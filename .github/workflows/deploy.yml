@@ -161,17 +161,44 @@ jobs:
             fi
 
       - name: Copy bundle to server
-        uses: appleboy/scp-action@917f8b81dfc1ccd331fef9e2d61bdc6c8be94634
-        with:
-          host: ${{ secrets.DEPLOY_HOST }}
-          username: ${{ secrets.DEPLOY_USER }}
-          password: ${{ secrets.DEPLOY_KEY == '' && secrets.DEPLOY_PASSWORD || '' }}
-          key: ${{ secrets.DEPLOY_KEY }}
-          source: "freedompost-deploy.tar.gz"
-          target: "/tmp"
-          overwrite: true
-          timeout: 180s
-          command_timeout: 10m
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+          DEPLOY_KEY: ${{ secrets.DEPLOY_KEY }}
+          DEPLOY_PASSWORD: ${{ secrets.DEPLOY_PASSWORD }}
+        run: |
+          set -eu
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+          if [ -n "$DEPLOY_KEY" ]; then
+            printf '%s\n' "$DEPLOY_KEY" > ~/.ssh/deploy_key
+            chmod 600 ~/.ssh/deploy_key
+            for attempt in 1 2 3; do
+              if scp -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=30 -o ServerAliveInterval=15 -i ~/.ssh/deploy_key freedompost-deploy.tar.gz "$DEPLOY_USER@$DEPLOY_HOST:/tmp/freedompost-deploy.tar.gz"; then
+                echo "=== Bundle copied successfully ==="
+                break
+              fi
+              if [ "$attempt" -eq 3 ]; then
+                exit 1
+              fi
+              echo "SCP attempt $attempt failed, retrying in 5s..."
+              sleep 5
+            done
+            rm -f ~/.ssh/deploy_key
+          else
+            sudo apt-get install -y sshpass
+            for attempt in 1 2 3; do
+              if sshpass -p "$DEPLOY_PASSWORD" scp -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=30 -o ServerAliveInterval=15 freedompost-deploy.tar.gz "$DEPLOY_USER@$DEPLOY_HOST:/tmp/freedompost-deploy.tar.gz"; then
+                echo "=== Bundle copied successfully ==="
+                break
+              fi
+              if [ "$attempt" -eq 3 ]; then
+                exit 1
+              fi
+              echo "SCP attempt $attempt failed, retrying in 5s..."
+              sleep 5
+            done
+          fi
 
       - name: Deploy over SSH
         uses: appleboy/ssh-action@2ead5e36573f08b82fbfce1504f1a4b05a647c6f
