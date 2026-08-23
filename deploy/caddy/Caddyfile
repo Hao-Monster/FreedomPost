@@ -6,11 +6,19 @@
 		max_size 512MB
 	}
 
+	# [H1] Block /internal/* — paid-access internal routes must never be
+	# reachable from the public internet. They are signed with HMAC, but
+	# minimising exposed attack surface is a defence-in-depth measure.
+	handle /internal/* {
+		respond 404
+	}
+
 	header {
 		X-Content-Type-Options "nosniff"
-		X-Frame-Options "SAMEORIGIN"
+		# [M1] Use DENY (not SAMEORIGIN) — admin panel must never be embedded.
+		X-Frame-Options "DENY"
 		Referrer-Policy "strict-origin-when-cross-origin"
-		Content-Security-Policy "default-src 'self'; img-src 'self' data: https: blob:; media-src 'self' https: blob:; script-src 'self' https://challenges.cloudflare.com; frame-src 'self' https://challenges.cloudflare.com; connect-src 'self' https://challenges.cloudflare.com; style-src 'self' 'unsafe-inline'; object-src 'none'; base-uri 'self'; frame-ancestors 'self'"
+		Content-Security-Policy "default-src 'self'; img-src 'self' data: https: blob:; media-src 'self' https: blob:; script-src 'self' https://challenges.cloudflare.com; frame-src 'self' https://challenges.cloudflare.com; connect-src 'self' https://challenges.cloudflare.com; style-src 'self' 'unsafe-inline'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'"
 	}
 	@benefitApi path /api/benefits/webmaster*
 	header @benefitApi Cache-Control "no-store"
@@ -20,8 +28,12 @@
 	@legacyTopics path /topics /topics/
 	redir @legacyTopics /benefit/?{query} permanent
 
+	# [M4] Force-overwrite X-Forwarded-For so paid-access cannot be tricked
+	# by a client supplying a crafted XFF header to bypass IP rate limits.
 	handle /api/reader/* {
-		reverse_proxy paid-access:8080
+		reverse_proxy paid-access:8080 {
+			header_up X-Forwarded-For {remote_host}
+		}
 	}
 
 	handle /api/* {
