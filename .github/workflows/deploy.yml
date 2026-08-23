@@ -82,10 +82,13 @@ jobs:
           mkdir -p /tmp/freedompost-deploy
           rsync -a --delete \
             --exclude ".git" \
-            --exclude "node_modules" \
+            --exclude "**/node_modules" \
             --exclude "runtime" \
             --exclude "coverage" \
             --exclude "apps/*/dist" \
+            --exclude "apps/*/.astro" \
+            --exclude ".agents" \
+            --exclude "services/api/bin" \
             ./ /tmp/freedompost-deploy/
           tar -czf freedompost-deploy.tar.gz -C /tmp/freedompost-deploy .
 
@@ -167,6 +170,8 @@ jobs:
           source: "freedompost-deploy.tar.gz"
           target: "/tmp"
           overwrite: true
+          timeout: 180s
+          command_timeout: 10m
 
       - name: Deploy over SSH
         uses: appleboy/ssh-action@2ead5e36573f08b82fbfce1504f1a4b05a647c6f
