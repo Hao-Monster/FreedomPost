@@ -11,14 +11,12 @@
     "packages/search",
     "packages/renderer",
     "packages/db",
-    "apps/api",
     "apps/public-reader",
     "apps/admin"
   ],
   "scripts": {
     "dev": "npm run dev -w @freedompost/public-reader",
     "dev:admin": "npm run dev -w @freedompost/admin",
-    "dev:api": "npm run dev -w @freedompost/api",
     "build:packages": "npm run build -w @freedompost/shared -w @freedompost/security -w @freedompost/search -w @freedompost/renderer -w @freedompost/storage -w @freedompost/db",
     "build": "npm run build --workspaces --if-present",
     "typecheck": "npm run build:packages && npm run typecheck:workspaces",

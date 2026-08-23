@@ -46,3 +46,47 @@ jobs:
           test -z "$gofmt_output" || { echo "$gofmt_output"; exit 1; }
           go vet ./...
           go test -race -coverprofile=coverage.out ./...
+
+  check-go-api:
+    name: Check Go API service
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+
+      - name: Setup Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
+        with:
+          go-version-file: services/api/go.mod
+          cache-dependency-path: services/api/go.sum
+
+      - name: Verify formatting
+        working-directory: services/api
+        run: |
+          gofmt_output="$(gofmt -l .)"
+          test -z "$gofmt_output" || { echo "Unformatted files:"; echo "$gofmt_output"; exit 1; }
+
+      - name: go vet
+        working-directory: services/api
+        run: go vet ./...
+
+      - name: go test (race detector + coverage)
+        working-directory: services/api
+        run: go test -race -coverprofile=coverage.out -covermode=atomic ./...
+
+      - name: Upload coverage
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: go-api-coverage
+          path: services/api/coverage.out
+          retention-days: 7
+
+      - name: Build binary
+        working-directory: services/api
+        run: |
+          go build -v \
+            -ldflags "-X main.version=${{ github.sha }}" \
+            -o /tmp/fp-api \
+            ./cmd/server

@@ -3,7 +3,6 @@ WORKDIR /app
 
 FROM base AS deps
 COPY package.json package-lock.json* ./
-COPY apps/api/package.json apps/api/package.json
 COPY apps/admin/package.json apps/admin/package.json
 COPY apps/public-reader/package.json apps/public-reader/package.json
 COPY packages/db/package.json packages/db/package.json
@@ -32,19 +31,6 @@ ENV PUBLIC_SITE_URL=$PUBLIC_SITE_URL
 ENV VITE_PUBLIC_SITE_URL=$VITE_PUBLIC_SITE_URL
 COPY . .
 RUN npm run build
-
-FROM base AS runtime
-ENV NODE_ENV=production
-COPY --from=build /app/package.json /app/package.json
-COPY --from=build /app/node_modules /app/node_modules
-COPY --from=build /app/apps/api/dist /app/apps/api/dist
-COPY --from=build /app/apps/api/package.json /app/apps/api/package.json
-COPY --from=build /app/packages /app/packages
-COPY --from=build /app/deploy/migrations /app/deploy/migrations
-COPY --from=build /app/deploy/production-preflight.mjs /app/deploy/production-preflight.mjs
-COPY --from=build /app/deploy/integration-staging-smoke.mjs /app/deploy/integration-staging-smoke.mjs
-EXPOSE 3000
-CMD ["npm", "run", "start", "-w", "@freedompost/api"]
 
 FROM golang:1.25.13-alpine AS paid-access-build
 WORKDIR /src/services/paid-access

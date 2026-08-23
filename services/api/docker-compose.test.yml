@@ -1,0 +1,39 @@
+# syntax=docker/dockerfile:1.7
+# 本地测试专用 docker-compose，仅启动 postgres + redis 基础设施
+# Go API 在 WSL 宿主机上直接 `go run` 运行，方便调试
+
+services:
+  postgres-test:
+    image: postgres:16-alpine
+    container_name: fp-postgres-test
+    environment:
+      POSTGRES_DB: freedompost_test
+      POSTGRES_USER: freedompost
+      POSTGRES_PASSWORD: test-password
+    ports:
+      - "5433:5432"   # 用 5433 避免与生产 postgres 冲突
+    volumes:
+      - pgdata-test:/var/lib/postgresql/data
+      # 自动执行所有迁移
+      - ../../deploy/migrations:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U freedompost -d freedompost_test"]
+      interval: 2s
+      timeout: 5s
+      retries: 15
+      start_period: 5s
+
+  redis-test:
+    image: redis:7-alpine
+    container_name: fp-redis-test
+    ports:
+      - "6380:6379"   # 用 6380 避免与生产 redis 冲突
+    command: redis-server --appendonly no --save ""
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  pgdata-test:

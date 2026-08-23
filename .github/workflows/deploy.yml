@@ -28,11 +28,17 @@ jobs:
           node-version: 24
           cache: npm
 
-      - name: Setup Go
+      - name: Setup Go (paid-access)
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
         with:
           go-version-file: services/paid-access/go.mod
           cache-dependency-path: services/paid-access/go.sum
+
+      - name: Setup Go (api-go)
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
+        with:
+          go-version-file: services/api/go.mod
+          cache-dependency-path: services/api/go.sum
 
       - name: Install dependencies
         run: |
@@ -58,6 +64,14 @@ jobs:
       - name: Test Go paid access service
         working-directory: services/paid-access
         run: go test -race ./...
+
+      - name: Test Go API service
+        working-directory: services/api
+        run: go test ./internal/domain/... ./internal/ratelimit/... ./internal/renderer/...
+
+      - name: Vet Go API service
+        working-directory: services/api
+        run: go vet ./...
 
       - name: Build
         run: npm run build
@@ -115,6 +129,8 @@ jobs:
           OPUS8_INTEGRATION_TIMEOUT_MS: "5000"
           BENEFIT_CLAIM_HMAC_SECRET: ${{ secrets.BENEFIT_CLAIM_HMAC_SECRET }}
           BENEFIT_LINK_ENCRYPTION_KEY: ${{ secrets.BENEFIT_LINK_ENCRYPTION_KEY }}
+          GO_API_WEIGHT: ${{ secrets.GO_API_WEIGHT || '0' }}
+          TS_API_WEIGHT: ${{ secrets.TS_API_WEIGHT || '100' }}
           BENEFIT_NETWORK_DAILY_LIMIT: "3"
           BENEFIT_CLAIM_MINUTE_LIMIT: "6"
         run: |
@@ -192,7 +208,9 @@ jobs:
           username: ${{ secrets.DEPLOY_USER }}
           password: ${{ secrets.DEPLOY_KEY == '' && secrets.DEPLOY_PASSWORD || '' }}
           key: ${{ secrets.DEPLOY_KEY }}
-          envs: DEPLOY_PATH,COOKIE_SECRET,VISITOR_HASH_SALT,ADMIN_PASSWORD,POSTGRES_PASSWORD,PAID_ACCESS_INTERNAL_SECRET,PREVIEW_DOMAIN,DEPLOY_HOST,STORAGE_DRIVER,ALIYUN_OSS_REGION,ALIYUN_OSS_BUCKET,ALIYUN_OSS_ENDPOINT,ALIYUN_OSS_PUBLIC_BASE_URL,ALIYUN_OSS_PREFIX,ALIYUN_OSS_ACCESS_KEY_ID,ALIYUN_OSS_ACCESS_KEY_SECRET,R2_ACCOUNT_ID,R2_BUCKET,R2_ACCESS_KEY_ID,R2_SECRET_ACCESS_KEY,R2_ENDPOINT,R2_PUBLIC_BASE_URL,R2_PREFIX,TURNSTILE_SITE_KEY,TURNSTILE_SECRET_KEY,OPUS8_INTEGRATION_BASE_URL,OPUS8_INTEGRATION_KEY_ID,OPUS8_INTEGRATION_SECRET,BENEFIT_CLAIM_HMAC_SECRET,BENEFIT_LINK_ENCRYPTION_KEY
+          GO_API_WEIGHT: ${{ secrets.GO_API_WEIGHT || '0' }}
+          TS_API_WEIGHT: ${{ secrets.TS_API_WEIGHT || '100' }}
+          envs: DEPLOY_PATH,COOKIE_SECRET,VISITOR_HASH_SALT,ADMIN_PASSWORD,POSTGRES_PASSWORD,PAID_ACCESS_INTERNAL_SECRET,PREVIEW_DOMAIN,DEPLOY_HOST,STORAGE_DRIVER,ALIYUN_OSS_REGION,ALIYUN_OSS_BUCKET,ALIYUN_OSS_ENDPOINT,ALIYUN_OSS_PUBLIC_BASE_URL,ALIYUN_OSS_PREFIX,ALIYUN_OSS_ACCESS_KEY_ID,ALIYUN_OSS_ACCESS_KEY_SECRET,R2_ACCOUNT_ID,R2_BUCKET,R2_ACCESS_KEY_ID,R2_SECRET_ACCESS_KEY,R2_ENDPOINT,R2_PUBLIC_BASE_URL,R2_PREFIX,TURNSTILE_SITE_KEY,TURNSTILE_SECRET_KEY,OPUS8_INTEGRATION_BASE_URL,OPUS8_INTEGRATION_KEY_ID,OPUS8_INTEGRATION_SECRET,BENEFIT_CLAIM_HMAC_SECRET,BENEFIT_LINK_ENCRYPTION_KEY,GO_API_WEIGHT,TS_API_WEIGHT
           command_timeout: 30m
           script: |
             set -eu
@@ -311,6 +329,9 @@ jobs:
             set_env "BENEFIT_LINK_ENCRYPTION_KEY" "$BENEFIT_LINK_ENCRYPTION_KEY"
             set_env "BENEFIT_NETWORK_DAILY_LIMIT" "3"
             set_env "BENEFIT_CLAIM_MINUTE_LIMIT" "6"
+            # Go API gray release weights (default: all traffic to TS)
+            set_env "GO_API_WEIGHT" "${GO_API_WEIGHT:-0}"
+            set_env "TS_API_WEIGHT" "${TS_API_WEIGHT:-100}"
             if [ "$STORAGE_DRIVER" = "oss" ]; then
               set_env "ALIYUN_OSS_REGION" "$ALIYUN_OSS_REGION"
               set_env "ALIYUN_OSS_BUCKET" "$ALIYUN_OSS_BUCKET"
@@ -441,13 +462,11 @@ jobs:
             docker_cmd builder prune --all --force || true
             docker_cmd image prune --all --force || true
             docker_cmd system df || true
-            compose --env-file .env -f deploy/docker-compose.yml build app paid-access nginx
-            compose --env-file .env -f deploy/docker-compose.yml run --rm app node deploy/production-preflight.mjs --runtime
-            compose --env-file .env -f deploy/docker-compose.yml run --rm app node deploy/integration-staging-smoke.mjs
-            compose --env-file .env -f deploy/docker-compose.yml run --rm app npm run db:migrate:prod -w @freedompost/api
-            compose --env-file .env -f deploy/docker-compose.yml up -d --force-recreate app paid-access nginx
+            compose --env-file .env -f deploy/docker-compose.yml build paid-access nginx api-go
+            compose --env-file .env -f deploy/docker-compose.yml run --rm api-go /fp-api -migrate
+            compose --env-file .env -f deploy/docker-compose.yml up -d --force-recreate paid-access nginx api-go
             for attempt in $(seq 1 60); do
-              if compose --env-file .env -f deploy/docker-compose.yml exec -T app node -e "fetch('http://127.0.0.1:3000/health').then(r=>{if(!r.ok)process.exit(1)})" \
+              if compose --env-file .env -f deploy/docker-compose.yml exec -T api-go /fp-api -health-check \
                 && curl -kfsS --resolve "$PREVIEW_DOMAIN:443:127.0.0.1" "https://$PREVIEW_DOMAIN/health" >/dev/null \
                 && curl -kfsS --resolve "$PREVIEW_DOMAIN:443:127.0.0.1" -D /tmp/paid-access-health.headers "https://$PREVIEW_DOMAIN/api/reader/config" | grep -q '"enabled":true' \
                 && grep -qi '^cache-control:.*no-store' /tmp/paid-access-health.headers \

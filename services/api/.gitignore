@@ -1,0 +1,8 @@
+# Compiled binaries
+bin/
+*.exe
+*.exe~
+
+# Test output
+*.out
+coverage.out
