@@ -87,13 +87,32 @@ jobs:
           mkdir -p /tmp/freedompost-deploy
           rsync -a --delete \
             --exclude ".git" \
+            --exclude ".github" \
+            --exclude ".agents" \
             --exclude "**/node_modules" \
             --exclude "runtime" \
             --exclude "coverage" \
             --exclude "apps/*/.astro" \
-            --exclude ".agents" \
+            --exclude "apps/*/src" \
+            --exclude "apps/*/public" \
+            --exclude "contracts" \
+            --exclude "packages" \
+            --exclude "services/*/internal" \
+            --exclude "services/*/cmd" \
+            --exclude "services/*/*.go" \
+            --exclude "services/*/go.*" \
+            --exclude "docs" \
+            --exclude "*.md" \
+            --exclude "*.html" \
+            --exclude "**/*.test.*" \
+            --exclude "**/*_test.go" \
+            --exclude "package.json" \
+            --exclude "package-lock.json" \
+            --exclude "tsconfig*.json" \
             ./ /tmp/freedompost-deploy/
           tar -czf freedompost-deploy.tar.gz -C /tmp/freedompost-deploy .
+          # Log bundle size for monitoring
+          du -sh freedompost-deploy.tar.gz
 
       - name: Verify deploy secrets
         env:
