@@ -25,11 +25,17 @@
 	}
 
 	handle /api/* {
-		reverse_proxy app:3000
+		reverse_proxy api-go:3000 {
+			header_up X-Forwarded-For {remote_host}
+		}
 	}
 
 	handle /health {
-		reverse_proxy app:3000
+		reverse_proxy api-go:3000
+	}
+
+	handle /health/ready {
+		reverse_proxy api-go:3000
 	}
 
 	handle /assets/* {

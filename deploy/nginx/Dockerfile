@@ -2,7 +2,6 @@ FROM node:24-alpine AS build
 WORKDIR /app
 
 COPY package.json package-lock.json ./
-COPY apps/api/package.json apps/api/package.json
 COPY apps/admin/package.json apps/admin/package.json
 COPY apps/public-reader/package.json apps/public-reader/package.json
 COPY packages/db/package.json packages/db/package.json

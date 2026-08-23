@@ -13,28 +13,41 @@ services:
       - "80:80"
       - "443:443"
     depends_on:
-      - app
+      - api-go
       - paid-access
     volumes:
       - caddydata:/data
       - caddyconfig:/config
 
-  app:
+  # Go API — the sole API backend after full cutover from TypeScript API
+  api-go:
     build:
       context: ..
-      dockerfile: Dockerfile
-      target: runtime
+      dockerfile: services/api/Dockerfile
+      target: api-go-runtime
       args:
-        PUBLIC_SITE_URL: ${PUBLIC_SITE_URL:-https://example.com}
-        VITE_PUBLIC_SITE_URL: ${VITE_PUBLIC_SITE_URL:-https://example.com}
+        VERSION: ${IMAGE_TAG:-dev}
     env_file:
       - ../.env
+    environment:
+      PORT: "3000"
+      TRUST_PROXY: "true"
     depends_on:
       - postgres
       - redis
       - paid-access
-    volumes:
-      - ../runtime:/app/runtime
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,noexec,nosuid
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD", "/fp-api", "-health-check"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
 
   paid-access:
     build:
