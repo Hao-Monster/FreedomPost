@@ -38,12 +38,29 @@ func New(ctx context.Context, databaseURL string) (*Postgres, error) {
 	cfg.HealthCheckPeriod = 30 * time.Second
 	cfg.ConnConfig.DefaultQueryExecMode = pgx.QueryExecModeSimpleProtocol
 
-	pool, err := pgxpool.NewWithConfig(ctx, cfg)
-	if err != nil {
-		return nil, fmt.Errorf("create pool: %w", err)
+	var pool *pgxpool.Pool
+	var lastErr error
+	for attempt := 1; attempt <= 30; attempt++ {
+		pool, err = pgxpool.NewWithConfig(ctx, cfg)
+		if err == nil {
+			if pingErr := pool.Ping(ctx); pingErr == nil {
+				lastErr = nil
+				break
+			} else {
+				lastErr = pingErr
+				pool.Close()
+			}
+		} else {
+			lastErr = err
+		}
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(1 * time.Second):
+		}
 	}
-	if err := pool.Ping(ctx); err != nil {
-		return nil, fmt.Errorf("ping database: %w", err)
+	if lastErr != nil {
+		return nil, fmt.Errorf("ping database after 30 attempts: %w", lastErr)
 	}
 	return &Postgres{pool: pool}, nil
 }
