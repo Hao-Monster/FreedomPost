@@ -44,6 +44,7 @@ type StoreProduct = {
   stock: number;
   soldCount: number;
   coverUrl: string | null;
+  imageUrl?: string | null;
   status: "published";
 };
 
@@ -496,7 +497,16 @@ async function hydrateMarket() {
     if (ref) productUrl.searchParams.set("ref", ref);
     const response = await fetch(productUrl, { headers: { Accept: "application/json" } });
     if (!response.ok) throw new Error("products unavailable");
-    products = ((await response.json()) as { items: StoreProduct[] }).items;
+    const rawItems: any[] = ((await response.json()) as { items?: any[]; products?: any[] }).items ?? [];
+    products = rawItems.map((p) => ({
+      ...p,
+      summary: p.summary ?? p.description ?? "",
+      coverUrl: p.coverUrl ?? p.imageUrl ?? null,
+      category: p.category ?? "service",
+      stock: p.stock ?? -1,
+      soldCount: p.soldCount ?? 0,
+      compareAtCents: p.compareAtCents ?? null,
+    } as StoreProduct));
     render();
     const requestedProduct = new URLSearchParams(location.search).get("product");
     const product = products.find((item) => item.slug === requestedProduct);
