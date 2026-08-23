@@ -149,16 +149,23 @@ jobs:
           command_timeout: 5m
           script: |
             set -eu
-            rm -f /tmp/freedompost-deploy.tar.gz
-            if command -v docker >/dev/null 2>&1; then
-              if [ "$(id -u)" -eq 0 ]; then
-                docker image prune --force || true
-                docker system df || true
-              else
-                sudo docker image prune --force || true
-                sudo docker system df || true
-              fi
+            if [ "$(id -u)" -eq 0 ]; then
+              SUDO=""
+            else
+              SUDO="sudo"
             fi
+            $SUDO rm -rf /tmp/*.tar.gz /tmp/freedompost* /tmp/drone-scp* || true
+            $SUDO journalctl --vacuum-size=50M || true
+            if command -v apt-get >/dev/null 2>&1; then
+              $SUDO apt-get clean || true
+            fi
+            if command -v docker >/dev/null 2>&1; then
+              $SUDO docker container prune --force || true
+              $SUDO docker image prune --force || true
+              $SUDO docker builder prune --keep-storage 2GB --force || true
+              $SUDO docker system df || true
+            fi
+            df -h
 
       - name: Copy bundle to server
         env:
