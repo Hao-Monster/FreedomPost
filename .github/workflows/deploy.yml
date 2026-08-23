@@ -190,12 +190,12 @@ jobs:
           if [ -n "$DEPLOY_KEY" ]; then
             printf '%s\n' "$DEPLOY_KEY" > ~/.ssh/deploy_key
             chmod 600 ~/.ssh/deploy_key
-            SSH_CMD="ssh -p $DEPLOY_PORT -T -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=20 -o ServerAliveInterval=15 -i ~/.ssh/deploy_key"
-            SCP_CMD="scp -P $DEPLOY_PORT -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=20 -o ServerAliveInterval=15 -i ~/.ssh/deploy_key"
+            SSH_CMD="ssh -4 -p $DEPLOY_PORT -T -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=20 -o ServerAliveInterval=15 -o ServerAliveCountMax=3 -i ~/.ssh/deploy_key"
+            SCP_CMD="scp -4 -P $DEPLOY_PORT -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=20 -o ServerAliveInterval=15 -o ServerAliveCountMax=3 -i ~/.ssh/deploy_key"
           else
             sudo apt-get install -y sshpass
-            SSH_CMD="sshpass -p '$DEPLOY_PASSWORD' ssh -p $DEPLOY_PORT -T -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=20 -o ServerAliveInterval=15"
-            SCP_CMD="sshpass -p '$DEPLOY_PASSWORD' scp -P $DEPLOY_PORT -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=20 -o ServerAliveInterval=15"
+            SSH_CMD="sshpass -p '$DEPLOY_PASSWORD' ssh -4 -p $DEPLOY_PORT -T -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=20 -o ServerAliveInterval=15 -o ServerAliveCountMax=3"
+            SCP_CMD="sshpass -p '$DEPLOY_PASSWORD' scp -4 -P $DEPLOY_PORT -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=20 -o ServerAliveInterval=15 -o ServerAliveCountMax=3"
           fi
 
           echo "=== 1. Copying deploy bundle to server ($DEPLOY_HOST:$DEPLOY_PORT) ==="
