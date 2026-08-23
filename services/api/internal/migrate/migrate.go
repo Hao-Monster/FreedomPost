@@ -1,6 +1,6 @@
 // Package migrate provides a simple SQL migration runner.
 // It applies *.sql files from a directory in lexicographic order,
-// tracking applied migrations in a schema_migrations table.
+// tracking applied migrations in a go_schema_migrations table.
 package migrate
 
 import (
@@ -16,7 +16,7 @@ import (
 )
 
 const createMigrationsTable = `
-CREATE TABLE IF NOT EXISTS schema_migrations (
+CREATE TABLE IF NOT EXISTS go_schema_migrations (
 	filename   TEXT PRIMARY KEY,
 	applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );`
@@ -31,32 +31,30 @@ func Run(ctx context.Context, databaseURL, migrationsDir string) error {
 	}
 	defer pool.Close()
 
-	// Ensure the tracking table exists.
+	// Ensure the dedicated tracking table exists.
 	if _, err := pool.Exec(ctx, createMigrationsTable); err != nil {
-		slog.Info("migrate: create schema_migrations note", "info", err)
+		return fmt.Errorf("migrate: create go_schema_migrations: %w", err)
 	}
 
-	// In case schema_migrations was created with legacy columns (e.g. 'version' instead of 'filename'):
-	_, _ = pool.Exec(ctx, `
-		ALTER TABLE schema_migrations ADD COLUMN IF NOT EXISTS filename TEXT;
-		ALTER TABLE schema_migrations ADD COLUMN IF NOT EXISTS applied_at TIMESTAMPTZ DEFAULT NOW();
-	`)
-
-	// Track whether 'version' column exists in case it has NOT NULL constraints.
-	hasVersionCol := false
 	appliedSet := make(map[string]bool)
 
-	// Read existing applied records dynamically from schema_migrations
-	rows, err := pool.Query(ctx, "SELECT * FROM schema_migrations")
+	// 1. Read already-applied migrations from go_schema_migrations
+	rows, err := pool.Query(ctx, "SELECT filename FROM go_schema_migrations")
 	if err == nil {
-		fieldDescs := rows.FieldDescriptions()
-		for _, f := range fieldDescs {
-			if string(f.Name) == "version" {
-				hasVersionCol = true
+		for rows.Next() {
+			var fn string
+			if err := rows.Scan(&fn); err == nil {
+				appliedSet[fn] = true
 			}
 		}
-		for rows.Next() {
-			vals, valErr := rows.Values()
+		rows.Close()
+	}
+
+	// 2. Read any existing records from legacy schema_migrations table (if it exists)
+	legacyRows, err := pool.Query(ctx, "SELECT * FROM schema_migrations")
+	if err == nil {
+		for legacyRows.Next() {
+			vals, valErr := legacyRows.Values()
 			if valErr == nil {
 				for _, v := range vals {
 					if v != nil {
@@ -66,7 +64,7 @@ func Run(ctx context.Context, databaseURL, migrationsDir string) error {
 				}
 			}
 		}
-		rows.Close()
+		legacyRows.Close()
 	}
 
 	// Read all *.sql files.
@@ -92,6 +90,11 @@ func Run(ctx context.Context, databaseURL, migrationsDir string) error {
 
 		if appliedSet[name] || appliedSet[prefix] || appliedSet[unpaddedPrefix] {
 			slog.Info("migration already applied, skipping", "file", name)
+			// Ensure it's recorded in go_schema_migrations as well
+			_, _ = pool.Exec(ctx, `
+				INSERT INTO go_schema_migrations (filename) VALUES ($1)
+				ON CONFLICT (filename) DO NOTHING
+			`, name)
 			continue
 		}
 
@@ -112,19 +115,12 @@ func Run(ctx context.Context, databaseURL, migrationsDir string) error {
 			return fmt.Errorf("migrate: apply %s: %w", name, err)
 		}
 
-		if hasVersionCol {
-			_, err = tx.Exec(ctx, `
-				INSERT INTO schema_migrations (version, filename) VALUES ($1, $1)
-				ON CONFLICT DO NOTHING
-			`, name)
-		} else {
-			_, err = tx.Exec(ctx, `
-				INSERT INTO schema_migrations (filename) VALUES ($1)
-				ON CONFLICT DO NOTHING
-			`, name)
-		}
-		if err != nil {
-			slog.Warn("migrate: record insert warning", "file", name, "error", err)
+		if _, err := tx.Exec(ctx, `
+			INSERT INTO go_schema_migrations (filename) VALUES ($1)
+			ON CONFLICT (filename) DO NOTHING
+		`, name); err != nil {
+			_ = tx.Rollback(ctx)
+			return fmt.Errorf("migrate: record %s: %w", name, err)
 		}
 
 		if err := tx.Commit(ctx); err != nil {
