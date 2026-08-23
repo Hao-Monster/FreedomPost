@@ -177,6 +177,7 @@ jobs:
           OPUS8_INTEGRATION_SECRET: ${{ secrets.OPUS8_INTEGRATION_SECRET }}
           BENEFIT_CLAIM_HMAC_SECRET: ${{ secrets.BENEFIT_CLAIM_HMAC_SECRET }}
           BENEFIT_LINK_ENCRYPTION_KEY: ${{ secrets.BENEFIT_LINK_ENCRYPTION_KEY }}
+          DEPLOY_PORT: ${{ secrets.DEPLOY_PORT || '22' }}
           GO_API_WEIGHT: ${{ secrets.GO_API_WEIGHT || '0' }}
           TS_API_WEIGHT: ${{ secrets.TS_API_WEIGHT || '100' }}
         run: |
@@ -189,61 +190,76 @@ jobs:
           if [ -n "$DEPLOY_KEY" ]; then
             printf '%s\n' "$DEPLOY_KEY" > ~/.ssh/deploy_key
             chmod 600 ~/.ssh/deploy_key
-            SSH_CMD="ssh -T -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=30 -o ServerAliveInterval=15 -i ~/.ssh/deploy_key"
-            SCP_CMD="scp -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=30 -o ServerAliveInterval=15 -i ~/.ssh/deploy_key"
+            SSH_CMD="ssh -p $DEPLOY_PORT -T -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=20 -o ServerAliveInterval=15 -i ~/.ssh/deploy_key"
+            SCP_CMD="scp -P $DEPLOY_PORT -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=20 -o ServerAliveInterval=15 -i ~/.ssh/deploy_key"
           else
             sudo apt-get install -y sshpass
-            SSH_CMD="sshpass -p '$DEPLOY_PASSWORD' ssh -T -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=30 -o ServerAliveInterval=15"
-            SCP_CMD="sshpass -p '$DEPLOY_PASSWORD' scp -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=30 -o ServerAliveInterval=15"
+            SSH_CMD="sshpass -p '$DEPLOY_PASSWORD' ssh -p $DEPLOY_PORT -T -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=20 -o ServerAliveInterval=15"
+            SCP_CMD="sshpass -p '$DEPLOY_PASSWORD' scp -P $DEPLOY_PORT -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=20 -o ServerAliveInterval=15"
           fi
 
-          echo "=== 1. Copying deploy bundle to server ==="
-          for attempt in 1 2 3; do
+          echo "=== 1. Copying deploy bundle to server ($DEPLOY_HOST:$DEPLOY_PORT) ==="
+          for attempt in 1 2 3 4 5; do
             if eval $SCP_CMD freedompost-deploy.tar.gz "$DEPLOY_USER@$DEPLOY_HOST:/tmp/freedompost-deploy.tar.gz"; then
               echo "=== Bundle copied successfully ==="
               break
             fi
-            if [ "$attempt" -eq 3 ]; then
+            if [ "$attempt" -eq 5 ]; then
+              echo "Failed to copy bundle after 5 attempts"
               exit 1
             fi
-            echo "SCP attempt $attempt failed, retrying in 5s..."
-            sleep 5
+            delay="$((attempt * 6))"
+            echo "SCP attempt $attempt failed, retrying in ${delay}s..."
+            sleep "$delay"
           done
 
           echo "=== 2. Executing remote deployment script ==="
-          eval $SSH_CMD "$DEPLOY_USER@$DEPLOY_HOST" \
-            "DEPLOY_PATH='$DEPLOY_PATH' \
-             PREVIEW_DOMAIN='$PREVIEW_DOMAIN' \
-             DEPLOY_HOST='$DEPLOY_HOST' \
-             COOKIE_SECRET='$COOKIE_SECRET' \
-             VISITOR_HASH_SALT='$VISITOR_HASH_SALT' \
-             ADMIN_PASSWORD='$ADMIN_PASSWORD' \
-             POSTGRES_PASSWORD='$POSTGRES_PASSWORD' \
-             PAID_ACCESS_INTERNAL_SECRET='$PAID_ACCESS_INTERNAL_SECRET' \
-             STORAGE_DRIVER='$STORAGE_DRIVER' \
-             ALIYUN_OSS_REGION='$ALIYUN_OSS_REGION' \
-             ALIYUN_OSS_BUCKET='$ALIYUN_OSS_BUCKET' \
-             ALIYUN_OSS_ENDPOINT='${ALIYUN_OSS_ENDPOINT:-}' \
-             ALIYUN_OSS_PUBLIC_BASE_URL='${ALIYUN_OSS_PUBLIC_BASE_URL:-}' \
-             ALIYUN_OSS_PREFIX='${ALIYUN_OSS_PREFIX:-}' \
-             ALIYUN_OSS_ACCESS_KEY_ID='$ALIYUN_OSS_ACCESS_KEY_ID' \
-             ALIYUN_OSS_ACCESS_KEY_SECRET='$ALIYUN_OSS_ACCESS_KEY_SECRET' \
-             R2_ACCOUNT_ID='$R2_ACCOUNT_ID' \
-             R2_BUCKET='$R2_BUCKET' \
-             R2_ACCESS_KEY_ID='$R2_ACCESS_KEY_ID' \
-             R2_SECRET_ACCESS_KEY='$R2_SECRET_ACCESS_KEY' \
-             R2_ENDPOINT='${R2_ENDPOINT:-}' \
-             R2_PUBLIC_BASE_URL='${R2_PUBLIC_BASE_URL:-}' \
-             R2_PREFIX='${R2_PREFIX:-}' \
-             TURNSTILE_SITE_KEY='$TURNSTILE_SITE_KEY' \
-             TURNSTILE_SECRET_KEY='$TURNSTILE_SECRET_KEY' \
-             OPUS8_INTEGRATION_BASE_URL='$OPUS8_INTEGRATION_BASE_URL' \
-             OPUS8_INTEGRATION_KEY_ID='$OPUS8_INTEGRATION_KEY_ID' \
-             OPUS8_INTEGRATION_SECRET='$OPUS8_INTEGRATION_SECRET' \
-             BENEFIT_CLAIM_HMAC_SECRET='$BENEFIT_CLAIM_HMAC_SECRET' \
-             BENEFIT_LINK_ENCRYPTION_KEY='$BENEFIT_LINK_ENCRYPTION_KEY' \
-             GO_API_WEIGHT='$GO_API_WEIGHT' \
-             TS_API_WEIGHT='$TS_API_WEIGHT' \
-             bash -s" < deploy/remote-deploy.sh
+          for attempt in 1 2 3; do
+            if eval $SSH_CMD "$DEPLOY_USER@$DEPLOY_HOST" \
+              "DEPLOY_PATH='$DEPLOY_PATH' \
+               PREVIEW_DOMAIN='$PREVIEW_DOMAIN' \
+               DEPLOY_HOST='$DEPLOY_HOST' \
+               COOKIE_SECRET='$COOKIE_SECRET' \
+               VISITOR_HASH_SALT='$VISITOR_HASH_SALT' \
+               ADMIN_PASSWORD='$ADMIN_PASSWORD' \
+               POSTGRES_PASSWORD='$POSTGRES_PASSWORD' \
+               PAID_ACCESS_INTERNAL_SECRET='$PAID_ACCESS_INTERNAL_SECRET' \
+               STORAGE_DRIVER='$STORAGE_DRIVER' \
+               ALIYUN_OSS_REGION='$ALIYUN_OSS_REGION' \
+               ALIYUN_OSS_BUCKET='$ALIYUN_OSS_BUCKET' \
+               ALIYUN_OSS_ENDPOINT='${ALIYUN_OSS_ENDPOINT:-}' \
+               ALIYUN_OSS_PUBLIC_BASE_URL='${ALIYUN_OSS_PUBLIC_BASE_URL:-}' \
+               ALIYUN_OSS_PREFIX='${ALIYUN_OSS_PREFIX:-}' \
+               ALIYUN_OSS_ACCESS_KEY_ID='$ALIYUN_OSS_ACCESS_KEY_ID' \
+               ALIYUN_OSS_ACCESS_KEY_SECRET='$ALIYUN_OSS_ACCESS_KEY_SECRET' \
+               R2_ACCOUNT_ID='$R2_ACCOUNT_ID' \
+               R2_BUCKET='$R2_BUCKET' \
+               R2_ACCESS_KEY_ID='$R2_ACCESS_KEY_ID' \
+               R2_SECRET_ACCESS_KEY='$R2_SECRET_ACCESS_KEY' \
+               R2_ENDPOINT='${R2_ENDPOINT:-}' \
+               R2_PUBLIC_BASE_URL='${R2_PUBLIC_BASE_URL:-}' \
+               R2_PREFIX='${R2_PREFIX:-}' \
+               TURNSTILE_SITE_KEY='$TURNSTILE_SITE_KEY' \
+               TURNSTILE_SECRET_KEY='$TURNSTILE_SECRET_KEY' \
+               OPUS8_INTEGRATION_BASE_URL='$OPUS8_INTEGRATION_BASE_URL' \
+               OPUS8_INTEGRATION_KEY_ID='$OPUS8_INTEGRATION_KEY_ID' \
+               OPUS8_INTEGRATION_SECRET='$OPUS8_INTEGRATION_SECRET' \
+               BENEFIT_CLAIM_HMAC_SECRET='$BENEFIT_CLAIM_HMAC_SECRET' \
+               BENEFIT_LINK_ENCRYPTION_KEY='$BENEFIT_LINK_ENCRYPTION_KEY' \
+               GO_API_WEIGHT='$GO_API_WEIGHT' \
+               TS_API_WEIGHT='$TS_API_WEIGHT' \
+               bash -s" < deploy/remote-deploy.sh; then
+              echo "=== Remote deployment finished successfully ==="
+              break
+            fi
+            if [ "$attempt" -eq 3 ]; then
+              echo "Remote deployment script failed"
+              exit 1
+            fi
+            delay="$((attempt * 8))"
+            echo "SSH attempt $attempt failed, retrying in ${delay}s..."
+            sleep "$delay"
+          done
 
           rm -f ~/.ssh/deploy_key
+
