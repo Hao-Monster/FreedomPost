@@ -33,7 +33,40 @@ func Run(ctx context.Context, databaseURL, migrationsDir string) error {
 
 	// Ensure the tracking table exists.
 	if _, err := pool.Exec(ctx, createMigrationsTable); err != nil {
-		return fmt.Errorf("migrate: create schema_migrations: %w", err)
+		slog.Info("migrate: create schema_migrations note", "info", err)
+	}
+
+	// In case schema_migrations was created with legacy columns (e.g. 'version' instead of 'filename'):
+	_, _ = pool.Exec(ctx, `
+		ALTER TABLE schema_migrations ADD COLUMN IF NOT EXISTS filename TEXT;
+		ALTER TABLE schema_migrations ADD COLUMN IF NOT EXISTS applied_at TIMESTAMPTZ DEFAULT NOW();
+	`)
+
+	// Track whether 'version' column exists in case it has NOT NULL constraints.
+	hasVersionCol := false
+	appliedSet := make(map[string]bool)
+
+	// Read existing applied records dynamically from schema_migrations
+	rows, err := pool.Query(ctx, "SELECT * FROM schema_migrations")
+	if err == nil {
+		fieldDescs := rows.FieldDescriptions()
+		for _, f := range fieldDescs {
+			if string(f.Name) == "version" {
+				hasVersionCol = true
+			}
+		}
+		for rows.Next() {
+			vals, valErr := rows.Values()
+			if valErr == nil {
+				for _, v := range vals {
+					if v != nil {
+						strVal := fmt.Sprintf("%v", v)
+						appliedSet[strVal] = true
+					}
+				}
+			}
+		}
+		rows.Close()
 	}
 
 	// Read all *.sql files.
@@ -50,14 +83,14 @@ func Run(ctx context.Context, databaseURL, migrationsDir string) error {
 	sort.Strings(files)
 
 	for _, name := range files {
-		// Check if already applied.
-		var count int
-		if err := pool.QueryRow(ctx,
-			"SELECT COUNT(*) FROM schema_migrations WHERE filename = $1", name,
-		).Scan(&count); err != nil {
-			return fmt.Errorf("migrate: check %s: %w", name, err)
+		// Check if already applied via filename, prefix number (e.g. "0001"), or unpadded number (e.g. "1")
+		prefix := strings.Split(name, "_")[0]
+		unpaddedPrefix := strings.TrimLeft(prefix, "0")
+		if unpaddedPrefix == "" {
+			unpaddedPrefix = "0"
 		}
-		if count > 0 {
+
+		if appliedSet[name] || appliedSet[prefix] || appliedSet[unpaddedPrefix] {
 			slog.Info("migration already applied, skipping", "file", name)
 			continue
 		}
@@ -78,19 +111,30 @@ func Run(ctx context.Context, databaseURL, migrationsDir string) error {
 			_ = tx.Rollback(ctx)
 			return fmt.Errorf("migrate: apply %s: %w", name, err)
 		}
-		if _, err := tx.Exec(ctx,
-			"INSERT INTO schema_migrations (filename) VALUES ($1)", name,
-		); err != nil {
-			_ = tx.Rollback(ctx)
-			return fmt.Errorf("migrate: record %s: %w", name, err)
+
+		if hasVersionCol {
+			_, err = tx.Exec(ctx, `
+				INSERT INTO schema_migrations (version, filename) VALUES ($1, $1)
+				ON CONFLICT DO NOTHING
+			`, name)
+		} else {
+			_, err = tx.Exec(ctx, `
+				INSERT INTO schema_migrations (filename) VALUES ($1)
+				ON CONFLICT DO NOTHING
+			`, name)
 		}
+		if err != nil {
+			slog.Warn("migrate: record insert warning", "file", name, "error", err)
+		}
+
 		if err := tx.Commit(ctx); err != nil {
 			return fmt.Errorf("migrate: commit %s: %w", name, err)
 		}
 
+		appliedSet[name] = true
 		slog.Info("migration applied", "file", name)
 	}
 
-	slog.Info("migrations complete", "applied", len(files))
+	slog.Info("migrations complete", "total_files", len(files))
 	return nil
 }
