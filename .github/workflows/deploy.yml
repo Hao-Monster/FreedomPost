@@ -461,6 +461,15 @@ jobs:
             docker_cmd image prune --force || true
             docker_cmd system df || true
             compose --env-file .env -f deploy/docker-compose.yml build paid-access nginx api-go
+            # Wait for PostgreSQL to finish initializing and recovery
+            for attempt in $(seq 1 30); do
+              if compose --env-file .env -f deploy/docker-compose.yml exec -T postgres pg_isready -U freedompost >/dev/null 2>&1; then
+                echo "=== PostgreSQL is ready ==="
+                break
+              fi
+              echo "Waiting for PostgreSQL ($attempt/30)..."
+              sleep 1
+            done
             compose --env-file .env -f deploy/docker-compose.yml run --rm api-go -migrate
             compose --env-file .env -f deploy/docker-compose.yml up -d --force-recreate --remove-orphans paid-access nginx api-go
             # ── Deployment gate: Go API must be healthy ────────────────────────────

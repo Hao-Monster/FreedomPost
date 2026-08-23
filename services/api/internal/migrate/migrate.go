@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -25,9 +26,35 @@ CREATE TABLE IF NOT EXISTS go_schema_migrations (
 // found in migrationsDir (*.sql, applied in lexicographic order).
 // It is safe to call repeatedly; already-applied migrations are skipped.
 func Run(ctx context.Context, databaseURL, migrationsDir string) error {
-	pool, err := pgxpool.New(ctx, databaseURL)
+	cfg, err := pgxpool.ParseConfig(databaseURL)
 	if err != nil {
-		return fmt.Errorf("migrate: connect: %w", err)
+		return fmt.Errorf("migrate: parse database URL: %w", err)
+	}
+
+	var pool *pgxpool.Pool
+	var lastErr error
+	for attempt := 1; attempt <= 30; attempt++ {
+		pool, err = pgxpool.NewWithConfig(ctx, cfg)
+		if err == nil {
+			if pingErr := pool.Ping(ctx); pingErr == nil {
+				lastErr = nil
+				break
+			} else {
+				lastErr = pingErr
+				pool.Close()
+			}
+		} else {
+			lastErr = err
+		}
+		slog.Info("migrate: waiting for database readiness...", "attempt", attempt, "error", lastErr)
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(1 * time.Second):
+		}
+	}
+	if lastErr != nil {
+		return fmt.Errorf("migrate: connect after 30 attempts: %w", lastErr)
 	}
 	defer pool.Close()
 
