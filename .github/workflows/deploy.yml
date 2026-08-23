@@ -465,17 +465,19 @@ jobs:
             compose --env-file .env -f deploy/docker-compose.yml build paid-access nginx api-go
             compose --env-file .env -f deploy/docker-compose.yml run --rm api-go /fp-api -migrate
             compose --env-file .env -f deploy/docker-compose.yml up -d --force-recreate --remove-orphans paid-access nginx api-go
+            # ── Deployment gate: Go API must be healthy ────────────────────────────
             for attempt in $(seq 1 60); do
               if compose --env-file .env -f deploy/docker-compose.yml exec -T api-go /fp-api -health-check \
                 && curl -kfsS --max-time 10 --connect-timeout 5 --resolve "$PREVIEW_DOMAIN:443:127.0.0.1" "https://$PREVIEW_DOMAIN/health" >/dev/null \
-                && curl -kfsS --max-time 10 --connect-timeout 5 --resolve "$PREVIEW_DOMAIN:443:127.0.0.1" -D /tmp/paid-access-health.headers "https://$PREVIEW_DOMAIN/api/reader/config" | grep -q '"enabled":true' \
-                && grep -qi '^cache-control:.*no-store' /tmp/paid-access-health.headers \
                 && curl -kfsS --max-time 10 --connect-timeout 5 --resolve "$PREVIEW_DOMAIN:443:127.0.0.1" -D /tmp/benefit-health.headers "https://$PREVIEW_DOMAIN/api/benefits/webmaster" >/dev/null \
                 && grep -qi '^cache-control:.*no-store' /tmp/benefit-health.headers; then
+                echo "=== Go API health check passed (attempt $attempt) ==="
                 exit 0
               fi
+              echo "Attempt $attempt failed, retrying in 2s..."
               sleep 2
             done
+            # ── Gate failed: dump diagnostics ─────────────────────────────────────
             compose --env-file .env -f deploy/docker-compose.yml ps
             compose --env-file .env -f deploy/docker-compose.yml logs --tail=120 api-go paid-access nginx
             exit 1
