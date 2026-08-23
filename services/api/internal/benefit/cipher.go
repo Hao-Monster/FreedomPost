@@ -38,17 +38,31 @@ type SubscriptionCipherAAD struct {
 	ClaimID    string
 }
 
-// NewSubscriptionCipher creates a cipher from a 32-byte key.
-// The key is hex or raw — if it is 64 hex chars, it is decoded.
-// If it is 32 raw bytes (from env), it is used directly.
+// NewSubscriptionCipher creates a cipher from a 32-byte AES key.
+//
+// The keyStr may be supplied in two formats (matching the original TS behavior
+// which called Buffer.from(key, 'base64url')):
+//
+//   - Raw 32-byte string: used directly.
+//   - Base64url-encoded 32-byte key (43 chars, no padding): decoded first.
 func NewSubscriptionCipher(keyStr string) (*SubscriptionCipher, error) {
 	if keyStr == "" {
 		return nil, errors.New("BENEFIT_LINK_ENCRYPTION_KEY is required")
 	}
 	raw := []byte(keyStr)
+
+	// If the key is not raw 32 bytes, attempt base64url decode (legacy format).
 	if len(raw) != aesKeyLen {
-		return nil, fmt.Errorf("BENEFIT_LINK_ENCRYPTION_KEY must be exactly %d bytes, got %d", aesKeyLen, len(raw))
+		decoded, err := base64.RawURLEncoding.DecodeString(keyStr)
+		if err != nil || len(decoded) != aesKeyLen {
+			return nil, fmt.Errorf(
+				"BENEFIT_LINK_ENCRYPTION_KEY must be exactly %d bytes (raw) or a base64url-encoded %d-byte key, got %d bytes",
+				aesKeyLen, aesKeyLen, len(raw),
+			)
+		}
+		raw = decoded
 	}
+
 	key := make([]byte, aesKeyLen)
 	copy(key, raw)
 	return &SubscriptionCipher{key: key}, nil
