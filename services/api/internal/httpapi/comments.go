@@ -3,12 +3,23 @@ package httpapi
 import (
 	"io"
 	"net/http"
+	"strings"
 	"time"
+	"unicode/utf8"
+
+	"github.com/microcosm-cc/bluemonday"
 
 	"github.com/fenghaoyun-monster/freedompost/services/api/internal/domain"
 	"github.com/fenghaoyun-monster/freedompost/services/api/internal/security"
 	"github.com/fenghaoyun-monster/freedompost/services/api/internal/storage"
 )
+
+// commentSanitizer removes all HTML tags from comment content,
+// preventing stored XSS. StrictPolicy keeps plain text only.
+var commentSanitizer = bluemonday.StrictPolicy()
+
+// maxCommentRunes is the maximum allowed Unicode character count per comment.
+const maxCommentRunes = 5000
 
 // listComments returns all comments for a post.
 func (s *Server) listComments(w http.ResponseWriter, r *http.Request) {
@@ -61,6 +72,28 @@ func (s *Server) createComment(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Sanitize: strip all HTML tags before any further processing (XSS defence)
+	input.Content = commentSanitizer.Sanitize(input.Content)
+
+	// Reject empty or whitespace-only content
+	if strings.TrimSpace(input.Content) == "" {
+		writeError(w, http.StatusBadRequest, "CONTENT_EMPTY", "评论内容不能为空")
+		return
+	}
+	// Reject content exceeding the character limit
+	if utf8.RuneCountInString(input.Content) > maxCommentRunes {
+		writeError(w, http.StatusBadRequest, "CONTENT_TOO_LONG", "评论内容超过最大长度限制")
+		return
+	}
+
+	// Validate attachment URLs: only allow URLs from configured storage origins
+	for _, a := range input.Attachments {
+		if !isAllowedAttachmentURL(a.URL, s.cfg.PublicUploadBaseURL, s.cfg.AliyunOSSPublicBaseURL, s.cfg.R2PublicBaseURL) {
+			writeError(w, http.StatusBadRequest, "INVALID_ATTACHMENT_URL", "附件URL不合法")
+			return
+		}
+	}
+
 	ipHash := security.HashVisitorKey(ip, s.cfg.VisitorHashSalt)
 	username := security.RandomUsername(input.FingerprintHash)
 
@@ -110,6 +143,25 @@ func (s *Server) uploadCommentAttachment(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	s.handleUpload(w, r, "comment", "", "public-comment")
+}
+
+// isAllowedAttachmentURL checks that an attachment URL originates from a
+// known storage base (local, OSS, R2) or is a relative /api/uploads/ path.
+// Empty URLs are allowed (attachment without a public URL).
+func isAllowedAttachmentURL(rawURL string, allowedBases ...string) bool {
+	if rawURL == "" {
+		return true
+	}
+	// Relative local-storage path is always allowed
+	if strings.HasPrefix(rawURL, "/api/uploads/") {
+		return true
+	}
+	for _, base := range allowedBases {
+		if base != "" && strings.HasPrefix(rawURL, base) {
+			return true
+		}
+	}
+	return false
 }
 
 // ─── Upload helper ────────────────────────────────────────────────────────────
