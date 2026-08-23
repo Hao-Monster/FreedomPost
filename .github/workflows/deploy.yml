@@ -74,7 +74,12 @@ jobs:
         run: go vet ./...
 
       - name: Build
-        run: npm run build
+        run: |
+          npm run build
+          mkdir -p services/paid-access/bin
+          (cd services/paid-access && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o bin/paid-access ./cmd/server)
+          mkdir -p services/api/bin
+          (cd services/api && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w -X main.version=${{ github.sha }}" -o bin/fp-api ./cmd/server)
 
       - name: Prepare deploy bundle
         run: |
@@ -85,10 +90,8 @@ jobs:
             --exclude "**/node_modules" \
             --exclude "runtime" \
             --exclude "coverage" \
-            --exclude "apps/*/dist" \
             --exclude "apps/*/.astro" \
             --exclude ".agents" \
-            --exclude "services/api/bin" \
             ./ /tmp/freedompost-deploy/
           tar -czf freedompost-deploy.tar.gz -C /tmp/freedompost-deploy .
 
