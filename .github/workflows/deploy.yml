@@ -103,7 +103,7 @@ jobs:
             --exclude "services/*/go.*" \
             --exclude "docs" \
             --exclude "*.md" \
-            --exclude "*.html" \
+            --exclude "/*.html" \
             --exclude "**/*.test.*" \
             --exclude "**/*_test.go" \
             --exclude "package.json" \
