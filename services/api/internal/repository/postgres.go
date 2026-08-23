@@ -558,8 +558,8 @@ func (p *Postgres) listAttachmentsByOwner(ctx context.Context, ownerType string,
 // ─── Products ─────────────────────────────────────────────────────────────────
 
 func (p *Postgres) ListProducts(ctx context.Context, publishedOnly bool) ([]domain.Product, error) {
-	q := `SELECT id, slug, title, description, cover_url, '' AS link_url,
-		         price_cents, currency, commission_cents, status, sort_order,
+	q := `SELECT id, slug, title, summary, description, category, cover_url, '' AS link_url,
+		         price_cents, compare_at_cents, currency, commission_cents, stock, sold_count, status, sort_order,
 		         created_at, updated_at FROM products`
 	var args []any
 	if publishedOnly {
@@ -576,8 +576,8 @@ func (p *Postgres) ListProducts(ctx context.Context, publishedOnly bool) ([]doma
 
 func (p *Postgres) GetProductBySlug(ctx context.Context, slug string) (*domain.Product, error) {
 	row := p.pool.QueryRow(ctx,
-		`SELECT id, slug, title, description, cover_url, '' AS link_url,
-		        price_cents, currency, commission_cents, status, sort_order,
+		`SELECT id, slug, title, summary, description, category, cover_url, '' AS link_url,
+		        price_cents, compare_at_cents, currency, commission_cents, stock, sold_count, status, sort_order,
 		        created_at, updated_at FROM products WHERE slug = $1`,
 		slug,
 	)
@@ -586,8 +586,8 @@ func (p *Postgres) GetProductBySlug(ctx context.Context, slug string) (*domain.P
 
 func (p *Postgres) GetProductByID(ctx context.Context, id string) (*domain.Product, error) {
 	row := p.pool.QueryRow(ctx,
-		`SELECT id, slug, title, description, cover_url, '' AS link_url,
-		        price_cents, currency, commission_cents, status, sort_order,
+		`SELECT id, slug, title, summary, description, category, cover_url, '' AS link_url,
+		        price_cents, compare_at_cents, currency, commission_cents, stock, sold_count, status, sort_order,
 		        created_at, updated_at FROM products WHERE id = $1`,
 		id,
 	)
@@ -602,15 +602,15 @@ func (p *Postgres) CreateProduct(ctx context.Context, input domain.ProductInput)
 	}
 	now := time.Now()
 	row := p.pool.QueryRow(ctx,
-		`INSERT INTO products (id, slug, title, description, cover_url,
-		                        price_cents, currency, commission_cents, status, sort_order,
+		`INSERT INTO products (id, slug, title, summary, description, category, cover_url,
+		                        price_cents, compare_at_cents, currency, commission_cents, stock, sold_count, status, sort_order,
 		                        created_at, updated_at)
-		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
-		 RETURNING id, slug, title, description, cover_url, '' AS link_url,
-		           price_cents, currency, commission_cents, status, sort_order,
+		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)
+		 RETURNING id, slug, title, summary, description, category, cover_url, '' AS link_url,
+		           price_cents, compare_at_cents, currency, commission_cents, stock, sold_count, status, sort_order,
 		           created_at, updated_at`,
-		id, slug, coalesce(input.Title, "未命名商品"), input.Description, input.ImageURL,
-		input.PriceCents, coalesce(input.Currency, "CNY"), input.CommissionCents,
+		id, slug, coalesce(input.Title, "未命名商品"), input.Summary, input.Description, coalesce(input.Category, "other"), input.CoverURL,
+		input.PriceCents, input.CompareAtCents, coalesce(input.Currency, "CNY"), input.CommissionCents, input.Stock, input.SoldCount,
 		coalesce(input.Status, "draft"), input.SortOrder, now, now,
 	)
 	return scanProduct(row)
@@ -619,16 +619,16 @@ func (p *Postgres) CreateProduct(ctx context.Context, input domain.ProductInput)
 func (p *Postgres) UpdateProduct(ctx context.Context, id string, input domain.ProductInput) (*domain.Product, error) {
 	row := p.pool.QueryRow(ctx,
 		`UPDATE products SET
-		    title=$2, description=$3, cover_url=$4,
-		    price_cents=$5, currency=$6, commission_cents=$7,
-		    status=$8, sort_order=$9, updated_at=$10
+		    title=$2, summary=$3, description=$4, category=$5, cover_url=$6,
+		    price_cents=$7, compare_at_cents=$8, currency=$9, commission_cents=$10,
+		    stock=$11, sold_count=$12, status=$13, sort_order=$14, updated_at=$15
 		 WHERE id=$1
-		 RETURNING id, slug, title, description, cover_url, '' AS link_url,
-		           price_cents, currency, commission_cents, status, sort_order,
+		 RETURNING id, slug, title, summary, description, category, cover_url, '' AS link_url,
+		           price_cents, compare_at_cents, currency, commission_cents, stock, sold_count, status, sort_order,
 		           created_at, updated_at`,
-		id, coalesce(input.Title, "未命名商品"), input.Description, input.ImageURL,
-		input.PriceCents, coalesce(input.Currency, "CNY"), input.CommissionCents,
-		coalesce(input.Status, "draft"), input.SortOrder, time.Now(),
+		id, coalesce(input.Title, "未命名商品"), input.Summary, input.Description, coalesce(input.Category, "other"), input.CoverURL,
+		input.PriceCents, input.CompareAtCents, coalesce(input.Currency, "CNY"), input.CommissionCents,
+		input.Stock, input.SoldCount, coalesce(input.Status, "draft"), input.SortOrder, time.Now(),
 	)
 	return scanProduct(row)
 }
@@ -1290,9 +1290,9 @@ func scanPosts(rows pgx.Rows) ([]domain.Post, error) {
 func scanProduct(row pgx.Row) (*domain.Product, error) {
 	var prod domain.Product
 	err := row.Scan(
-		&prod.ID, &prod.Slug, &prod.Title, &prod.Description, &prod.ImageURL, &prod.LinkURL,
-		&prod.PriceCents, &prod.Currency, &prod.CommissionCents, &prod.Status, &prod.SortOrder,
-		&prod.CreatedAt, &prod.UpdatedAt,
+		&prod.ID, &prod.Slug, &prod.Title, &prod.Summary, &prod.Description, &prod.Category, &prod.CoverURL, &prod.LinkURL,
+		&prod.PriceCents, &prod.CompareAtCents, &prod.Currency, &prod.CommissionCents, &prod.Stock, &prod.SoldCount,
+		&prod.Status, &prod.SortOrder, &prod.CreatedAt, &prod.UpdatedAt,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
@@ -1305,9 +1305,9 @@ func scanProducts(rows pgx.Rows) ([]domain.Product, error) {
 	for rows.Next() {
 		var prod domain.Product
 		if err := rows.Scan(
-			&prod.ID, &prod.Slug, &prod.Title, &prod.Description, &prod.ImageURL, &prod.LinkURL,
-			&prod.PriceCents, &prod.Currency, &prod.CommissionCents, &prod.Status, &prod.SortOrder,
-			&prod.CreatedAt, &prod.UpdatedAt,
+			&prod.ID, &prod.Slug, &prod.Title, &prod.Summary, &prod.Description, &prod.Category, &prod.CoverURL, &prod.LinkURL,
+			&prod.PriceCents, &prod.CompareAtCents, &prod.Currency, &prod.CommissionCents, &prod.Stock, &prod.SoldCount,
+			&prod.Status, &prod.SortOrder, &prod.CreatedAt, &prod.UpdatedAt,
 		); err != nil {
 			return nil, err
 		}

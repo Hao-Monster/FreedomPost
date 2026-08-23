@@ -175,12 +175,17 @@ type Product struct {
 	ID              string    `json:"id"`
 	Slug            string    `json:"slug"`
 	Title           string    `json:"title"`
+	Summary         string    `json:"summary"`
 	Description     string    `json:"description"`
-	ImageURL        string    `json:"imageUrl"`
+	Category        string    `json:"category"`
+	CoverURL        string    `json:"coverUrl"`
 	LinkURL         string    `json:"linkUrl"`
 	PriceCents      int       `json:"priceCents"`
+	CompareAtCents  *int      `json:"compareAtCents"`
 	Currency        string    `json:"currency"`
 	CommissionCents int       `json:"commissionCents"`
+	Stock           int       `json:"stock"`
+	SoldCount       int       `json:"soldCount"`
 	Status          string    `json:"status"`
 	SortOrder       int       `json:"sortOrder"`
 	CreatedAt       time.Time `json:"createdAt"`
@@ -218,12 +223,17 @@ func BuildAffiliateProductView(product Product, markupPercent int) AffiliateProd
 
 type ProductInput struct {
 	Title           string
+	Summary         string
 	Description     string
-	ImageURL        string
+	Category        string
+	CoverURL        string
 	LinkURL         string
 	PriceCents      int
+	CompareAtCents  *int
 	Currency        string
 	CommissionCents int
+	Stock           int
+	SoldCount       int
 	Status          string
 	SortOrder       int
 }
