@@ -457,10 +457,10 @@ jobs:
               sleep "$((attempt * 20))"
             done
             compose --env-file .env -f deploy/docker-compose.yml up -d postgres redis
-            # Keep named volumes and running images, but discard stale build data
-            # before compiling. The production host has limited local disk space.
-            docker_cmd builder prune --all --force || true
-            docker_cmd image prune --all --force || true
+            # Only prune dangling images to free space without destroying build cache.
+            # NEVER run 'builder prune --all' or 'image prune --all' — these destroy
+            # all layer caches and cause every build to start from scratch (25+ min).
+            docker_cmd image prune --force || true
             docker_cmd system df || true
             compose --env-file .env -f deploy/docker-compose.yml build paid-access nginx api-go
             compose --env-file .env -f deploy/docker-compose.yml run --rm api-go /fp-api -migrate
