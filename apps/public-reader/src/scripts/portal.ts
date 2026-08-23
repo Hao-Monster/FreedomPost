@@ -328,6 +328,20 @@ function syncPortalMetadata(nextDocument: Document): void {
   } else {
     document.head.append(nextRobots.cloneNode(true));
   }
+
+  const currentLinks = Array.from(document.head.querySelectorAll<HTMLLinkElement>('link[rel="stylesheet"]'));
+  nextDocument.head.querySelectorAll<HTMLLinkElement>('link[rel="stylesheet"]').forEach((nextLink) => {
+    if (!currentLinks.some((link) => link.href === nextLink.href)) {
+      document.head.append(nextLink.cloneNode(true));
+    }
+  });
+
+  const currentStyles = Array.from(document.head.querySelectorAll<HTMLStyleElement>("style"));
+  nextDocument.head.querySelectorAll<HTMLStyleElement>("style").forEach((nextStyle) => {
+    if (!currentStyles.some((style) => style.textContent === nextStyle.textContent)) {
+      document.head.append(nextStyle.cloneNode(true));
+    }
+  });
 }
 
 function closePrimaryNavigation(): void {
