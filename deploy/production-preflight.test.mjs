@@ -113,8 +113,11 @@ test("deployment workflow and Caddy keep the benefit path protected", () => {
   assert.match(caddy, /@readerApi path \/api\/reader\/\*/);
   assert.match(caddy, /header @readerApi Cache-Control "private, no-store"/);
   assert.match(caddy, /handle \/api\/reader\/\*[\s\S]*reverse_proxy paid-access:8080/);
-  assert.doesNotMatch(caddy, /handle \/internal\/\*/);
-  assert.match(caddy, /script-src[^\n]*https:\/\/challenges\.cloudflare\.com/);
+  // [H1] /internal/* must be explicitly blocked with a 404 response.
+  // A missing route is NOT safe — it could fall through to a catch-all.
+  // Requiring an explicit `respond 404` is the correct defence-in-depth.
+  assert.match(caddy, /handle \/internal\/\*[\s\S]*?respond 404/);
+  assert.match(caddy, /header_up X-Forwarded-For \{remote_host\}.*paid-access|paid-access[\s\S]*header_up X-Forwarded-For \{remote_host\}/);
   assert.match(caddy, /frame-src[^\n]*https:\/\/challenges\.cloudflare\.com/);
   assert.match(caddy, /connect-src[^\n]*https:\/\/challenges\.cloudflare\.com/);
   assert.match(caddy, /redir @legacyTopics \/benefit\/\?\{query\} permanent/);
