@@ -142,12 +142,49 @@ jobs:
         run: |
           node deploy/production-preflight.mjs
 
-      - name: Deploy to server
+      - name: Copy bundle to server
         env:
           DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
           DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
           DEPLOY_KEY: ${{ secrets.DEPLOY_KEY }}
           DEPLOY_PASSWORD: ${{ secrets.DEPLOY_PASSWORD }}
+        run: |
+          set -eu
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+          if [ -n "$DEPLOY_KEY" ]; then
+            printf '%s\n' "$DEPLOY_KEY" > ~/.ssh/deploy_key
+            chmod 600 ~/.ssh/deploy_key
+            for attempt in 1 2 3 4 5; do
+              if scp -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=30 -o ServerAliveInterval=15 -i ~/.ssh/deploy_key freedompost-deploy.tar.gz "$DEPLOY_USER@$DEPLOY_HOST:/tmp/freedompost-deploy.tar.gz"; then
+                echo "=== Bundle copied successfully ==="
+                break
+              fi
+              if [ "$attempt" -eq 5 ]; then
+                exit 1
+              fi
+              echo "SCP attempt $attempt failed, retrying in 5s..."
+              sleep 5
+            done
+            rm -f ~/.ssh/deploy_key
+          else
+            sudo apt-get install -y sshpass
+            for attempt in 1 2 3 4 5; do
+              if sshpass -p "$DEPLOY_PASSWORD" scp -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=30 -o ServerAliveInterval=15 freedompost-deploy.tar.gz "$DEPLOY_USER@$DEPLOY_HOST:/tmp/freedompost-deploy.tar.gz"; then
+                echo "=== Bundle copied successfully ==="
+                break
+              fi
+              if [ "$attempt" -eq 5 ]; then
+                exit 1
+              fi
+              echo "SCP attempt $attempt failed, retrying in 5s..."
+              sleep 5
+            done
+          fi
+
+      - name: Deploy over SSH
+        uses: appleboy/ssh-action@2ead5e36573f08b82fbfce1504f1a4b05a647c6f
+        env:
           DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
           COOKIE_SECRET: ${{ secrets.COOKIE_SECRET }}
           VISITOR_HASH_SALT: ${{ secrets.VISITOR_HASH_SALT }}
@@ -155,6 +192,7 @@ jobs:
           POSTGRES_PASSWORD: ${{ secrets.POSTGRES_PASSWORD }}
           PAID_ACCESS_INTERNAL_SECRET: ${{ secrets.PAID_ACCESS_INTERNAL_SECRET }}
           PREVIEW_DOMAIN: ${{ secrets.PREVIEW_DOMAIN }}
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
           STORAGE_DRIVER: ${{ secrets.STORAGE_DRIVER }}
           ALIYUN_OSS_REGION: ${{ secrets.ALIYUN_OSS_REGION }}
           ALIYUN_OSS_BUCKET: ${{ secrets.ALIYUN_OSS_BUCKET }}
@@ -177,89 +215,15 @@ jobs:
           OPUS8_INTEGRATION_SECRET: ${{ secrets.OPUS8_INTEGRATION_SECRET }}
           BENEFIT_CLAIM_HMAC_SECRET: ${{ secrets.BENEFIT_CLAIM_HMAC_SECRET }}
           BENEFIT_LINK_ENCRYPTION_KEY: ${{ secrets.BENEFIT_LINK_ENCRYPTION_KEY }}
-          DEPLOY_PORT: ${{ secrets.DEPLOY_PORT || '22' }}
           GO_API_WEIGHT: ${{ secrets.GO_API_WEIGHT || '0' }}
           TS_API_WEIGHT: ${{ secrets.TS_API_WEIGHT || '100' }}
-        run: |
-          set -eu
-          mkdir -p ~/.ssh
-          chmod 700 ~/.ssh
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          password: ${{ secrets.DEPLOY_KEY == '' && secrets.DEPLOY_PASSWORD || '' }}
+          key: ${{ secrets.DEPLOY_KEY }}
+          envs: DEPLOY_PATH,COOKIE_SECRET,VISITOR_HASH_SALT,ADMIN_PASSWORD,POSTGRES_PASSWORD,PAID_ACCESS_INTERNAL_SECRET,PREVIEW_DOMAIN,DEPLOY_HOST,STORAGE_DRIVER,ALIYUN_OSS_REGION,ALIYUN_OSS_BUCKET,ALIYUN_OSS_ENDPOINT,ALIYUN_OSS_PUBLIC_BASE_URL,ALIYUN_OSS_PREFIX,ALIYUN_OSS_ACCESS_KEY_ID,ALIYUN_OSS_ACCESS_KEY_SECRET,R2_ACCOUNT_ID,R2_BUCKET,R2_ACCESS_KEY_ID,R2_SECRET_ACCESS_KEY,R2_ENDPOINT,R2_PUBLIC_BASE_URL,R2_PREFIX,TURNSTILE_SITE_KEY,TURNSTILE_SECRET_KEY,OPUS8_INTEGRATION_BASE_URL,OPUS8_INTEGRATION_KEY_ID,OPUS8_INTEGRATION_SECRET,BENEFIT_CLAIM_HMAC_SECRET,BENEFIT_LINK_ENCRYPTION_KEY,GO_API_WEIGHT,TS_API_WEIGHT
+          command_timeout: 10m
+          script_path: deploy/remote-deploy.sh
 
-          SSH_CMD=""
-          SCP_CMD=""
-          if [ -n "$DEPLOY_KEY" ]; then
-            printf '%s\n' "$DEPLOY_KEY" > ~/.ssh/deploy_key
-            chmod 600 ~/.ssh/deploy_key
-            SSH_CMD="ssh -4 -p $DEPLOY_PORT -T -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=20 -o ServerAliveInterval=15 -o ServerAliveCountMax=3 -i ~/.ssh/deploy_key"
-            SCP_CMD="scp -4 -P $DEPLOY_PORT -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=20 -o ServerAliveInterval=15 -o ServerAliveCountMax=3 -i ~/.ssh/deploy_key"
-          else
-            sudo apt-get install -y sshpass
-            SSH_CMD="sshpass -p '$DEPLOY_PASSWORD' ssh -4 -p $DEPLOY_PORT -T -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=20 -o ServerAliveInterval=15 -o ServerAliveCountMax=3"
-            SCP_CMD="sshpass -p '$DEPLOY_PASSWORD' scp -4 -P $DEPLOY_PORT -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=20 -o ServerAliveInterval=15 -o ServerAliveCountMax=3"
-          fi
-
-          echo "=== 1. Copying deploy bundle to server ($DEPLOY_HOST:$DEPLOY_PORT) ==="
-          for attempt in 1 2 3 4 5; do
-            if eval $SCP_CMD freedompost-deploy.tar.gz "$DEPLOY_USER@$DEPLOY_HOST:/tmp/freedompost-deploy.tar.gz"; then
-              echo "=== Bundle copied successfully ==="
-              break
-            fi
-            if [ "$attempt" -eq 5 ]; then
-              echo "Failed to copy bundle after 5 attempts"
-              exit 1
-            fi
-            delay="$((attempt * 6))"
-            echo "SCP attempt $attempt failed, retrying in ${delay}s..."
-            sleep "$delay"
-          done
-
-          echo "=== 2. Executing remote deployment script ==="
-          for attempt in 1 2 3; do
-            if eval $SSH_CMD "$DEPLOY_USER@$DEPLOY_HOST" \
-              "DEPLOY_PATH='$DEPLOY_PATH' \
-               PREVIEW_DOMAIN='$PREVIEW_DOMAIN' \
-               DEPLOY_HOST='$DEPLOY_HOST' \
-               COOKIE_SECRET='$COOKIE_SECRET' \
-               VISITOR_HASH_SALT='$VISITOR_HASH_SALT' \
-               ADMIN_PASSWORD='$ADMIN_PASSWORD' \
-               POSTGRES_PASSWORD='$POSTGRES_PASSWORD' \
-               PAID_ACCESS_INTERNAL_SECRET='$PAID_ACCESS_INTERNAL_SECRET' \
-               STORAGE_DRIVER='$STORAGE_DRIVER' \
-               ALIYUN_OSS_REGION='$ALIYUN_OSS_REGION' \
-               ALIYUN_OSS_BUCKET='$ALIYUN_OSS_BUCKET' \
-               ALIYUN_OSS_ENDPOINT='${ALIYUN_OSS_ENDPOINT:-}' \
-               ALIYUN_OSS_PUBLIC_BASE_URL='${ALIYUN_OSS_PUBLIC_BASE_URL:-}' \
-               ALIYUN_OSS_PREFIX='${ALIYUN_OSS_PREFIX:-}' \
-               ALIYUN_OSS_ACCESS_KEY_ID='$ALIYUN_OSS_ACCESS_KEY_ID' \
-               ALIYUN_OSS_ACCESS_KEY_SECRET='$ALIYUN_OSS_ACCESS_KEY_SECRET' \
-               R2_ACCOUNT_ID='$R2_ACCOUNT_ID' \
-               R2_BUCKET='$R2_BUCKET' \
-               R2_ACCESS_KEY_ID='$R2_ACCESS_KEY_ID' \
-               R2_SECRET_ACCESS_KEY='$R2_SECRET_ACCESS_KEY' \
-               R2_ENDPOINT='${R2_ENDPOINT:-}' \
-               R2_PUBLIC_BASE_URL='${R2_PUBLIC_BASE_URL:-}' \
-               R2_PREFIX='${R2_PREFIX:-}' \
-               TURNSTILE_SITE_KEY='$TURNSTILE_SITE_KEY' \
-               TURNSTILE_SECRET_KEY='$TURNSTILE_SECRET_KEY' \
-               OPUS8_INTEGRATION_BASE_URL='$OPUS8_INTEGRATION_BASE_URL' \
-               OPUS8_INTEGRATION_KEY_ID='$OPUS8_INTEGRATION_KEY_ID' \
-               OPUS8_INTEGRATION_SECRET='$OPUS8_INTEGRATION_SECRET' \
-               BENEFIT_CLAIM_HMAC_SECRET='$BENEFIT_CLAIM_HMAC_SECRET' \
-               BENEFIT_LINK_ENCRYPTION_KEY='$BENEFIT_LINK_ENCRYPTION_KEY' \
-               GO_API_WEIGHT='$GO_API_WEIGHT' \
-               TS_API_WEIGHT='$TS_API_WEIGHT' \
-               bash -s" < deploy/remote-deploy.sh; then
-              echo "=== Remote deployment finished successfully ==="
-              break
-            fi
-            if [ "$attempt" -eq 3 ]; then
-              echo "Remote deployment script failed"
-              exit 1
-            fi
-            delay="$((attempt * 8))"
-            echo "SSH attempt $attempt failed, retrying in ${delay}s..."
-            sleep "$delay"
-          done
-
-          rm -f ~/.ssh/deploy_key
 
