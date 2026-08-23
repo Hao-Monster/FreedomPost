@@ -7,18 +7,16 @@ else
   SUDO="sudo"
 fi
 
-echo "=== Cleaning disk space and checking swap ==="
+echo "=== Cleaning disk space ==="
 $SUDO journalctl --vacuum-size=50M >/dev/null 2>&1 || true
 if command -v apt-get >/dev/null 2>&1; then
   $SUDO apt-get clean || true
 fi
-if [ -f /swapfile ] && [ "$(stat -c%s /swapfile 2>/dev/null || echo 0)" -gt 600000000 ]; then
-  $SUDO swapoff /swapfile || true
-  $SUDO rm -f /swapfile
+if [ ! -f /swapfile ] && [ "$(awk '/MemTotal/ { print $2 }' /proc/meminfo 2>/dev/null || echo 0)" -lt 1800000 ]; then
   $SUDO fallocate -l 512M /swapfile || $SUDO dd if=/dev/zero of=/swapfile bs=1M count=512
   $SUDO chmod 600 /swapfile
   $SUDO mkswap /swapfile
-  $SUDO swapon /swapfile
+  $SUDO swapon /swapfile || true
 fi
 
 echo "=== Extracting deploy bundle into $DEPLOY_PATH ==="

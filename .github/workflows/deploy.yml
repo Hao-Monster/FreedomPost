@@ -143,44 +143,18 @@ jobs:
           node deploy/production-preflight.mjs
 
       - name: Copy bundle to server
-        env:
-          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
-          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
-          DEPLOY_KEY: ${{ secrets.DEPLOY_KEY }}
-          DEPLOY_PASSWORD: ${{ secrets.DEPLOY_PASSWORD }}
-        run: |
-          set -eu
-          mkdir -p ~/.ssh
-          chmod 700 ~/.ssh
-          if [ -n "$DEPLOY_KEY" ]; then
-            printf '%s\n' "$DEPLOY_KEY" > ~/.ssh/deploy_key
-            chmod 600 ~/.ssh/deploy_key
-            for attempt in 1 2 3 4 5; do
-              if scp -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=30 -o ServerAliveInterval=15 -i ~/.ssh/deploy_key freedompost-deploy.tar.gz "$DEPLOY_USER@$DEPLOY_HOST:/tmp/freedompost-deploy.tar.gz"; then
-                echo "=== Bundle copied successfully ==="
-                break
-              fi
-              if [ "$attempt" -eq 5 ]; then
-                exit 1
-              fi
-              echo "SCP attempt $attempt failed, retrying in 5s..."
-              sleep 5
-            done
-            rm -f ~/.ssh/deploy_key
-          else
-            sudo apt-get install -y sshpass
-            for attempt in 1 2 3 4 5; do
-              if sshpass -p "$DEPLOY_PASSWORD" scp -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=30 -o ServerAliveInterval=15 freedompost-deploy.tar.gz "$DEPLOY_USER@$DEPLOY_HOST:/tmp/freedompost-deploy.tar.gz"; then
-                echo "=== Bundle copied successfully ==="
-                break
-              fi
-              if [ "$attempt" -eq 5 ]; then
-                exit 1
-              fi
-              echo "SCP attempt $attempt failed, retrying in 5s..."
-              sleep 5
-            done
-          fi
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          password: ${{ secrets.DEPLOY_KEY == '' && secrets.DEPLOY_PASSWORD || '' }}
+          key: ${{ secrets.DEPLOY_KEY }}
+          port: ${{ secrets.DEPLOY_PORT || 22 }}
+          source: "freedompost-deploy.tar.gz"
+          target: "/tmp"
+          rm: false
+          timeout: 60s
+          command_timeout: 3m
 
       - name: Deploy over SSH
         uses: appleboy/ssh-action@2ead5e36573f08b82fbfce1504f1a4b05a647c6f
@@ -222,6 +196,7 @@ jobs:
           username: ${{ secrets.DEPLOY_USER }}
           password: ${{ secrets.DEPLOY_KEY == '' && secrets.DEPLOY_PASSWORD || '' }}
           key: ${{ secrets.DEPLOY_KEY }}
+          port: ${{ secrets.DEPLOY_PORT || 22 }}
           envs: DEPLOY_PATH,COOKIE_SECRET,VISITOR_HASH_SALT,ADMIN_PASSWORD,POSTGRES_PASSWORD,PAID_ACCESS_INTERNAL_SECRET,PREVIEW_DOMAIN,DEPLOY_HOST,STORAGE_DRIVER,ALIYUN_OSS_REGION,ALIYUN_OSS_BUCKET,ALIYUN_OSS_ENDPOINT,ALIYUN_OSS_PUBLIC_BASE_URL,ALIYUN_OSS_PREFIX,ALIYUN_OSS_ACCESS_KEY_ID,ALIYUN_OSS_ACCESS_KEY_SECRET,R2_ACCOUNT_ID,R2_BUCKET,R2_ACCESS_KEY_ID,R2_SECRET_ACCESS_KEY,R2_ENDPOINT,R2_PUBLIC_BASE_URL,R2_PREFIX,TURNSTILE_SITE_KEY,TURNSTILE_SECRET_KEY,OPUS8_INTEGRATION_BASE_URL,OPUS8_INTEGRATION_KEY_ID,OPUS8_INTEGRATION_SECRET,BENEFIT_CLAIM_HMAC_SECRET,BENEFIT_LINK_ENCRYPTION_KEY,GO_API_WEIGHT,TS_API_WEIGHT
           command_timeout: 10m
           script_path: deploy/remote-deploy.sh
