@@ -149,12 +149,10 @@ jobs:
             rm -f /tmp/freedompost-deploy.tar.gz
             if command -v docker >/dev/null 2>&1; then
               if [ "$(id -u)" -eq 0 ]; then
-                docker builder prune --all --force || true
-                docker image prune --all --force || true
+                docker image prune --force || true
                 docker system df || true
               else
-                sudo docker builder prune --all --force || true
-                sudo docker image prune --all --force || true
+                sudo docker image prune --force || true
                 sudo docker system df || true
               fi
             fi
@@ -211,7 +209,7 @@ jobs:
           GO_API_WEIGHT: ${{ secrets.GO_API_WEIGHT || '0' }}
           TS_API_WEIGHT: ${{ secrets.TS_API_WEIGHT || '100' }}
           envs: DEPLOY_PATH,COOKIE_SECRET,VISITOR_HASH_SALT,ADMIN_PASSWORD,POSTGRES_PASSWORD,PAID_ACCESS_INTERNAL_SECRET,PREVIEW_DOMAIN,DEPLOY_HOST,STORAGE_DRIVER,ALIYUN_OSS_REGION,ALIYUN_OSS_BUCKET,ALIYUN_OSS_ENDPOINT,ALIYUN_OSS_PUBLIC_BASE_URL,ALIYUN_OSS_PREFIX,ALIYUN_OSS_ACCESS_KEY_ID,ALIYUN_OSS_ACCESS_KEY_SECRET,R2_ACCOUNT_ID,R2_BUCKET,R2_ACCESS_KEY_ID,R2_SECRET_ACCESS_KEY,R2_ENDPOINT,R2_PUBLIC_BASE_URL,R2_PREFIX,TURNSTILE_SITE_KEY,TURNSTILE_SECRET_KEY,OPUS8_INTEGRATION_BASE_URL,OPUS8_INTEGRATION_KEY_ID,OPUS8_INTEGRATION_SECRET,BENEFIT_CLAIM_HMAC_SECRET,BENEFIT_LINK_ENCRYPTION_KEY,GO_API_WEIGHT,TS_API_WEIGHT
-          command_timeout: 30m
+          command_timeout: 45m
           script: |
             set -eu
             if [ "$(id -u)" -eq 0 ]; then
@@ -463,7 +461,7 @@ jobs:
             docker_cmd image prune --force || true
             docker_cmd system df || true
             compose --env-file .env -f deploy/docker-compose.yml build paid-access nginx api-go
-            compose --env-file .env -f deploy/docker-compose.yml run --rm api-go /fp-api -migrate
+            compose --env-file .env -f deploy/docker-compose.yml run --rm api-go -migrate
             compose --env-file .env -f deploy/docker-compose.yml up -d --force-recreate --remove-orphans paid-access nginx api-go
             # ── Deployment gate: Go API must be healthy ────────────────────────────
             for attempt in $(seq 1 60); do

@@ -47,7 +47,17 @@ func main() {
 	hashPw := flag.String("hash-password", "", "Print bcrypt hash of given password and exit")
 	healthCheck := flag.Bool("health-check", false, "HTTP health check against running server and exit")
 	runMigrate := flag.Bool("migrate", false, "Apply pending SQL migrations from MIGRATIONS_DIR and exit")
-	flag.Parse()
+
+	// If container ENTRYPOINT ["/fp-api"] is invoked with arguments like "/fp-api -migrate",
+	// os.Args will be ["/fp-api", "/fp-api", "-migrate"]. Strip leading binary name if passed as an argument.
+	args := os.Args[1:]
+	if len(args) > 0 && (args[0] == "/fp-api" || args[0] == "fp-api" || args[0] == "./fp-api" || args[0] == "fp-api.exe") {
+		args = args[1:]
+	}
+	if err := flag.CommandLine.Parse(args); err != nil {
+		fmt.Fprintf(os.Stderr, "flag parse error: %v\n", err)
+		os.Exit(2)
+	}
 
 	// Mode: hash-password
 	if *hashPw != "" {
