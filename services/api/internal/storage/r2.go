@@ -65,6 +65,9 @@ func (a *R2Adapter) Put(ctx context.Context, input PutInput) (*StoredObject, err
 	}
 	req.Header.Set("Content-Type", detectedMime)
 	req.ContentLength = int64(len(input.Data))
+	if requiresDownload(detectedMime) {
+		req.Header.Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s"`, storedName))
+	}
 
 	// Sign with AWS SigV4
 	now := time.Now().UTC()
@@ -113,6 +116,9 @@ func (a *R2Adapter) Delete(ctx context.Context, storageKey string) error {
 		return fmt.Errorf("R2 delete: %w", err)
 	}
 	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent && resp.StatusCode != http.StatusNotFound {
+		return fmt.Errorf("R2 delete returned status %d", resp.StatusCode)
+	}
 	return nil
 }
 
@@ -132,6 +138,9 @@ func (a *R2Adapter) Ping(ctx context.Context) error {
 		return err
 	}
 	resp.Body.Close()
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		return fmt.Errorf("R2 ping returned status %d", resp.StatusCode)
+	}
 	return nil
 }
 

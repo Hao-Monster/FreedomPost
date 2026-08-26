@@ -71,24 +71,28 @@ func HMACEqual(a, b string) bool {
 // SignedRequestCanonical builds the canonical string for internal service
 // request signing. Matches paid-access validInternalRequest() exactly.
 //
-//	canonical = timestamp + "\n" + METHOD + "\n" + path + "\n" + hex(sha256(body))
-func SignedRequestCanonical(timestamp, method, path string, body []byte) string {
+//	canonical = timestamp + "\n" + nonce + "\n" + METHOD + "\n" + path + "\n" + actor + "\n" + hex(sha256(body))
+func SignedRequestCanonical(timestamp, nonce, method, path, actor string, body []byte) string {
 	bodyHash := sha256.Sum256(body)
-	return timestamp + "\n" + method + "\n" + path + "\n" + hex.EncodeToString(bodyHash[:])
+	return timestamp + "\n" + nonce + "\n" + method + "\n" + path + "\n" + actor + "\n" + hex.EncodeToString(bodyHash[:])
 }
 
 // SignRequest signs an internal service request.
-// Returns (X-FreedomPost-Timestamp, X-FreedomPost-Signature).
-func SignRequest(secret, method, path string, body []byte) (string, string) {
+// Returns timestamp, one-time nonce and signature headers.
+func SignRequest(secret, method, path, actor string, body []byte) (string, string, string, error) {
 	ts := strconv.FormatInt(time.Now().Unix(), 10)
-	canonical := SignedRequestCanonical(ts, method, path, body)
+	nonce, err := NewToken()
+	if err != nil {
+		return "", "", "", err
+	}
+	canonical := SignedRequestCanonical(ts, nonce, method, path, actor, body)
 	sig := HMACSign(secret, canonical)
-	return ts, sig
+	return ts, nonce, sig, nil
 }
 
 // ValidateSignedRequest checks that an incoming signed request is authentic
 // and within the acceptable timestamp window (±5 minutes).
-func ValidateSignedRequest(secret, method, path, timestamp, signature string, body []byte) bool {
+func ValidateSignedRequest(secret, method, path, actor, timestamp, nonce, signature string, body []byte) bool {
 	ts, err := strconv.ParseInt(timestamp, 10, 64)
 	if err != nil {
 		return false
@@ -97,7 +101,7 @@ func ValidateSignedRequest(secret, method, path, timestamp, signature string, bo
 	if age < -300 || age > 300 {
 		return false
 	}
-	canonical := SignedRequestCanonical(timestamp, method, path, body)
+	canonical := SignedRequestCanonical(timestamp, nonce, method, path, actor, body)
 	expected := HMACSign(secret, canonical)
 	return HMACEqual(expected, signature)
 }

@@ -3,6 +3,7 @@ package httpapi
 
 import (
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -164,14 +165,16 @@ func (s *Server) healthReady(w http.ResponseWriter, r *http.Request) {
 	allOk := true
 
 	if err := s.repo.Ping(r.Context()); err != nil {
-		checks["postgres"] = "unhealthy: " + err.Error()
+		s.logger.Error("readiness postgres check failed", "error", err)
+		checks["postgres"] = "unhealthy"
 		allOk = false
 	} else {
 		checks["postgres"] = "ok"
 	}
 
 	if err := s.sessions.Ping(r.Context()); err != nil {
-		checks["redis"] = "degraded: " + err.Error() // Redis failure ≠ unhealthy
+		s.logger.Warn("readiness redis check failed", "error", err)
+		checks["redis"] = "degraded" // Redis failure ≠ unhealthy
 	} else {
 		checks["redis"] = "ok"
 	}
@@ -230,10 +233,29 @@ func writeError(w http.ResponseWriter, status int, code, message string) {
 	})
 }
 
+// flattenedResponse preserves both the historical top-level write response
+// and the newer nested object used by integration clients.
+func flattenedResponse(key string, value any) map[string]any {
+	data, err := json.Marshal(value)
+	if err != nil {
+		return map[string]any{key: value}
+	}
+	response := make(map[string]any)
+	if err := json.Unmarshal(data, &response); err != nil {
+		return map[string]any{key: value}
+	}
+	response[key] = value
+	return response
+}
+
 func decodeJSON(w http.ResponseWriter, r *http.Request, target any) bool {
 	dec := json.NewDecoder(io.LimitReader(r.Body, 256*1024))
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(target); err != nil {
+		writeError(w, http.StatusBadRequest, "INVALID_JSON", "请求格式不正确")
+		return false
+	}
+	if err := dec.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
 		writeError(w, http.StatusBadRequest, "INVALID_JSON", "请求格式不正确")
 		return false
 	}

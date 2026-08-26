@@ -1,12 +1,17 @@
 package httpapi
 
 import (
+	"context"
+	"errors"
 	"io"
 	"net/http"
+	"net/url"
+	"path"
 	"strings"
 	"time"
 	"unicode/utf8"
 
+	"github.com/google/uuid"
 	"github.com/microcosm-cc/bluemonday"
 
 	"github.com/fenghaoyun-monster/freedompost/services/api/internal/domain"
@@ -19,10 +24,23 @@ import (
 var commentSanitizer = bluemonday.StrictPolicy()
 
 // maxCommentRunes is the maximum allowed Unicode character count per comment.
-const maxCommentRunes = 5000
+const (
+	maxCommentRunes               = 10000
+	maxCommentAttachments         = 5
+	publicCommentUploadMaxBytes   = 25 << 20
+	multipartRequestOverheadBytes = 1 << 20
+)
 
 // listComments returns all comments for a post.
 func (s *Server) listComments(w http.ResponseWriter, r *http.Request) {
+	ipKey := security.HashText(s.remoteIP(r))
+	if ok, _ := s.limiter.Allow(r.Context(), "comment-read:"+ipKey, 180, time.Minute); !ok {
+		writeError(w, http.StatusTooManyRequests, "RATE_LIMITED", "评论读取过于频繁")
+		return
+	}
+	if !s.requireCommentAccess(w, r) {
+		return
+	}
 	comments, err := s.repo.ListComments(r.Context(), r.PathValue("slug"))
 	if err != nil {
 		s.internalError(w, r, err)
@@ -38,26 +56,24 @@ func (s *Server) listComments(w http.ResponseWriter, r *http.Request) {
 // Rate limits: 5 per day per IP, 3 per 5 minutes per IP (matching TS logic).
 func (s *Server) createComment(w http.ResponseWriter, r *http.Request) {
 	ip := s.remoteIP(r)
-	ipKey := security.HashText(ip)
-
-	// Per-day rate limit
-	if ok, _ := s.limiter.Allow(r.Context(), "comment-day:"+ipKey, 5, 24*time.Hour); !ok {
-		writeError(w, http.StatusTooManyRequests, "RATE_LIMITED", "今天的评论次数已达上限，请明天再试")
+	if ok, _ := s.limiter.Allow(r.Context(), "comment-attempt:"+security.HashText(ip), 60, time.Minute); !ok {
+		writeError(w, http.StatusTooManyRequests, "RATE_LIMITED", "评论请求过于频繁")
 		return
 	}
-	// Per-5-minute burst limit
-	if ok, _ := s.limiter.Allow(r.Context(), "comment-burst:"+ipKey, 3, 5*time.Minute); !ok {
-		writeError(w, http.StatusTooManyRequests, "RATE_LIMITED", "发送评论太频繁，请稍后再试")
+	if !s.requireCommentAccess(w, r) {
 		return
 	}
+	// The subject combines server-observed network identity with bounded client
+	// identifiers. Changing only one client field cannot bypass the network key.
 
 	var input struct {
-		ParentID        string `json:"parentId"`
-		Content         string `json:"content"`
-		FingerprintHash string `json:"fingerprintHash"`
-		LocalIDHash     string `json:"localIdHash"`
-		Attachments     []struct {
+		ParentID    string `json:"parentId"`
+		Content     string `json:"content"`
+		Fingerprint string `json:"fingerprint"`
+		LocalID     string `json:"localId"`
+		Attachments []struct {
 			ID              string `json:"id"`
+			ClaimToken      string `json:"claimToken"`
 			Name            string `json:"name"`
 			MimeType        string `json:"mimeType"`
 			SizeBytes       int64  `json:"sizeBytes"`
@@ -71,12 +87,27 @@ func (s *Server) createComment(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &input) {
 		return
 	}
+	input.Fingerprint = strings.TrimSpace(input.Fingerprint)
+	input.LocalID = strings.TrimSpace(input.LocalID)
+	if len(input.Fingerprint) > 256 || len(input.LocalID) > 128 || (input.ParentID != "" && uuid.Validate(input.ParentID) != nil) {
+		writeError(w, http.StatusBadRequest, "INVALID_COMMENT", "评论标识格式不正确")
+		return
+	}
+	subjectKey := security.HashText(strings.Join([]string{r.PathValue("slug"), ip, input.Fingerprint, input.LocalID}, ":"))
+	if ok, _ := s.limiter.Allow(r.Context(), "comment-day:"+subjectKey, 5, 24*time.Hour); !ok {
+		writeError(w, http.StatusTooManyRequests, "RATE_LIMITED", "今天的评论次数已达上限，请明天再试")
+		return
+	}
+	if ok, _ := s.limiter.Allow(r.Context(), "comment-burst:"+subjectKey, 3, 5*time.Minute); !ok {
+		writeError(w, http.StatusTooManyRequests, "RATE_LIMITED", "发送评论太频繁，请稍后再试")
+		return
+	}
 
 	// Sanitize: strip all HTML tags before any further processing (XSS defence)
 	input.Content = commentSanitizer.Sanitize(input.Content)
 
 	// Reject empty or whitespace-only content
-	if strings.TrimSpace(input.Content) == "" {
+	if strings.TrimSpace(input.Content) == "" && len(input.Attachments) == 0 {
 		writeError(w, http.StatusBadRequest, "CONTENT_EMPTY", "评论内容不能为空")
 		return
 	}
@@ -86,21 +117,43 @@ func (s *Server) createComment(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Validate attachment URLs: only allow URLs from configured storage origins
+	if len(input.Attachments) > maxCommentAttachments {
+		writeError(w, http.StatusBadRequest, "TOO_MANY_ATTACHMENTS", "每条评论最多上传 5 个附件")
+		return
+	}
+	seenAttachments := make(map[string]struct{}, len(input.Attachments))
 	for _, a := range input.Attachments {
-		if !isAllowedAttachmentURL(a.URL, s.cfg.PublicUploadBaseURL, s.cfg.AliyunOSSPublicBaseURL, s.cfg.R2PublicBaseURL) {
-			writeError(w, http.StatusBadRequest, "INVALID_ATTACHMENT_URL", "附件URL不合法")
+		if uuid.Validate(a.ID) != nil || len(a.ClaimToken) < 32 || len(a.ClaimToken) > 256 {
+			writeError(w, http.StatusBadRequest, "INVALID_ATTACHMENT", "附件认领信息无效")
 			return
 		}
+		if _, exists := seenAttachments[a.ID]; exists {
+			writeError(w, http.StatusBadRequest, "INVALID_ATTACHMENT", "附件不能重复提交")
+			return
+		}
+		seenAttachments[a.ID] = struct{}{}
 	}
 
 	ipHash := security.HashVisitorKey(ip, s.cfg.VisitorHashSalt)
-	username := security.RandomUsername(input.FingerprintHash)
+	seed := input.LocalID
+	if seed == "" {
+		seed = ip
+	}
+	username := security.RandomUsername(seed)
+	fingerprintHash := ""
+	if input.Fingerprint != "" {
+		fingerprintHash = security.HashText(input.Fingerprint)
+	}
+	localIDHash := ""
+	if input.LocalID != "" {
+		localIDHash = security.HashText(input.LocalID)
+	}
 
 	attachments := make([]domain.PendingAttachment, len(input.Attachments))
 	for i, a := range input.Attachments {
 		attachments[i] = domain.PendingAttachment{
 			ID:              a.ID,
+			ClaimToken:      a.ClaimToken,
 			Name:            a.Name,
 			MimeType:        a.MimeType,
 			SizeBytes:       a.SizeBytes,
@@ -118,10 +171,18 @@ func (s *Server) createComment(w http.ResponseWriter, r *http.Request) {
 		Username:        username,
 		Content:         input.Content,
 		IPHash:          ipHash,
-		FingerprintHash: input.FingerprintHash,
-		LocalIDHash:     input.LocalIDHash,
+		FingerprintHash: fingerprintHash,
+		LocalIDHash:     localIDHash,
 		Attachments:     attachments,
 	})
+	if errors.Is(err, domain.ErrInvalidAttachment) {
+		writeError(w, http.StatusBadRequest, "INVALID_ATTACHMENT", "附件无效、已被使用或不属于本次上传")
+		return
+	}
+	if errors.Is(err, domain.ErrInvalidState) {
+		writeError(w, http.StatusBadRequest, "INVALID_PARENT", "回复的上级评论不存在")
+		return
+	}
 	if err != nil {
 		s.internalError(w, r, err)
 		return
@@ -130,7 +191,7 @@ func (s *Server) createComment(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "POST_NOT_FOUND", "文章不存在")
 		return
 	}
-	writeJSON(w, http.StatusCreated, map[string]any{"comment": comment})
+	writeJSON(w, http.StatusCreated, flattenedResponse("comment", comment))
 }
 
 // uploadCommentAttachment handles public comment file uploads.
@@ -142,7 +203,18 @@ func (s *Server) uploadCommentAttachment(w http.ResponseWriter, r *http.Request)
 		writeError(w, http.StatusTooManyRequests, "RATE_LIMITED", "上传附件太频繁，请稍后再试")
 		return
 	}
-	s.handleUpload(w, r, "comment", "", "public-comment")
+	if !s.requireCommentAccess(w, r) {
+		return
+	}
+	maxBytes := s.cfg.UploadMaxBytes
+	if maxBytes > publicCommentUploadMaxBytes {
+		maxBytes = publicCommentUploadMaxBytes
+	}
+	s.handleUpload(w, r, "comment", "", "public-comment", maxBytes)
+}
+
+func (s *Server) requireCommentAccess(w http.ResponseWriter, r *http.Request) bool {
+	return s.requireReadablePost(w, r) != nil
 }
 
 // isAllowedAttachmentURL checks that an attachment URL originates from a
@@ -153,11 +225,22 @@ func isAllowedAttachmentURL(rawURL string, allowedBases ...string) bool {
 		return true
 	}
 	// Relative local-storage path is always allowed
-	if strings.HasPrefix(rawURL, "/api/uploads/") {
+	parsed, err := url.Parse(rawURL)
+	if err != nil {
+		return false
+	}
+	if parsed.Scheme == "" && parsed.Host == "" && strings.HasPrefix(path.Clean(parsed.Path), "/api/uploads/") {
 		return true
 	}
 	for _, base := range allowedBases {
-		if base != "" && strings.HasPrefix(rawURL, base) {
+		baseURL, err := url.Parse(strings.TrimRight(base, "/"))
+		if err != nil || baseURL.Scheme == "" || baseURL.Host == "" {
+			continue
+		}
+		basePath := strings.TrimRight(path.Clean(baseURL.Path), "/")
+		candidatePath := path.Clean(parsed.Path)
+		pathMatches := candidatePath == basePath || strings.HasPrefix(candidatePath, basePath+"/")
+		if parsed.Scheme == baseURL.Scheme && parsed.Host == baseURL.Host && pathMatches {
 			return true
 		}
 	}
@@ -167,13 +250,16 @@ func isAllowedAttachmentURL(rawURL string, allowedBases ...string) bool {
 // ─── Upload helper ────────────────────────────────────────────────────────────
 
 // handleUpload processes a multipart file upload and stores it via the storage adapter.
-func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request, ownerType, ownerID, uploaderType string) {
+func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request, ownerType, ownerID, uploaderType string, maxBytes int64) {
 	// Limit request body to configured max upload size
-	r.Body = http.MaxBytesReader(w, r.Body, s.cfg.UploadMaxBytes)
+	r.Body = http.MaxBytesReader(w, r.Body, maxBytes+multipartRequestOverheadBytes)
 
-	if err := r.ParseMultipartForm(32 << 20); err != nil {
+	if err := r.ParseMultipartForm(1 << 20); err != nil {
 		writeError(w, http.StatusBadRequest, "INVALID_REQUEST", "无效的上传请求")
 		return
+	}
+	if r.MultipartForm != nil {
+		defer r.MultipartForm.RemoveAll()
 	}
 
 	file, header, err := r.FormFile("file")
@@ -182,15 +268,32 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request, ownerType,
 		return
 	}
 	defer file.Close()
+	if header.Size > maxBytes {
+		writeError(w, http.StatusRequestEntityTooLarge, "FILE_TOO_LARGE", "文件超出大小限制")
+		return
+	}
 
-	data, err := io.ReadAll(io.LimitReader(file, s.cfg.UploadMaxBytes+1))
+	data, err := io.ReadAll(io.LimitReader(file, maxBytes+1))
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "READ_ERROR", "读取文件失败")
 		return
 	}
-	if int64(len(data)) > s.cfg.UploadMaxBytes {
+	if int64(len(data)) > maxBytes {
 		writeError(w, http.StatusRequestEntityTooLarge, "FILE_TOO_LARGE", "文件超出大小限制")
 		return
+	}
+
+	// Generate the one-time claim before persisting bytes so an entropy-source
+	// failure cannot leave an object with no database row or cleanup handle.
+	claimToken := ""
+	claimTokenHash := ""
+	if uploaderType == "public-comment" {
+		claimToken, err = security.NewToken()
+		if err != nil {
+			s.internalError(w, r, err)
+			return
+		}
+		claimTokenHash = security.HashToken(claimToken)
 	}
 
 	obj, err := s.storage.Put(r.Context(), storage.PutInput{
@@ -200,9 +303,12 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request, ownerType,
 		OwnerID:      ownerID,
 		UploaderType: uploaderType,
 	})
+	if errors.Is(err, storage.ErrInvalidUpload) {
+		writeError(w, http.StatusBadRequest, "UPLOAD_REJECTED", "文件类型或大小不符合要求")
+		return
+	}
 	if err != nil {
-		// Check if it's a validation error (mime type not allowed, etc.)
-		writeError(w, http.StatusBadRequest, "UPLOAD_REJECTED", err.Error())
+		s.internalError(w, r, err)
 		return
 	}
 
@@ -218,11 +324,26 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request, ownerType,
 		DetectedMime:     obj.DetectedMime,
 		SizeBytes:        obj.SizeBytes,
 		SHA256:           obj.SHA256,
+		ClaimToken:       claimToken,
+		ClaimTokenHash:   claimTokenHash,
+		UploaderType:     uploaderType,
 	})
 	if err != nil {
+		cleanupContext, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if cleanupErr := s.storage.Delete(cleanupContext, obj.StorageKey); cleanupErr != nil {
+			s.logger.Warn("remove orphaned upload after database failure", "storage_provider", obj.StorageProvider, "error", cleanupErr)
+		}
 		s.internalError(w, r, err)
 		return
 	}
 
-	writeJSON(w, http.StatusCreated, map[string]any{"attachment": att})
+	fileResponse := map[string]any{
+		"id": att.ID, "name": att.OriginalFilename, "mimeType": att.MimeType,
+		"sizeBytes": att.SizeBytes, "url": att.PublicURL,
+		"storageProvider": att.StorageProvider, "storageKey": att.StorageKey,
+		"storedFilename": att.StoredFilename, "sha256": att.SHA256,
+		"claimToken": att.ClaimToken,
+	}
+	writeJSON(w, http.StatusCreated, map[string]any{"attachment": att, "file": fileResponse})
 }

@@ -1,0 +1,8 @@
+# Reviewed false positives: synthetic test credentials or identifier names,
+# never production secret values. Fingerprints keep the suppression exact.
+3b3cdc9249a7ffebc56a03e9b833e8bdb4f5f54a:apps/api/src/benefits/benefit-runtime.test.ts:generic-api-key:15
+3b3cdc9249a7ffebc56a03e9b833e8bdb4f5f54a:apps/api/src/benefits/turnstile.test.ts:generic-api-key:9
+3b3cdc9249a7ffebc56a03e9b833e8bdb4f5f54a:apps/api/src/benefits/opus8-client.ts:generic-api-key:102
+3b3cdc9249a7ffebc56a03e9b833e8bdb4f5f54a:apps/api/src/benefits/opus8-client.test.ts:generic-api-key:12
+3b3cdc9249a7ffebc56a03e9b833e8bdb4f5f54a:deploy/production-preflight.mjs:generic-api-key:8
+4797d1c6b6955a43883ded034bbfe19b521da581:apps/public-reader/src/scripts/portal.ts:generic-api-key:60

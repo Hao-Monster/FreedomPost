@@ -224,6 +224,9 @@ func Load() (*Config, error) {
 	default:
 		errs = append(errs, fmt.Sprintf("STORAGE_DRIVER must be 'local', 'oss', or 'r2', got %q", cfg.StorageDriver))
 	}
+	if cfg.UploadMaxBytes <= 0 || cfg.UploadMaxBytes > 500*1024*1024 {
+		errs = append(errs, "UPLOAD_MAX_BYTES must be between 1 and 524288000")
+	}
 
 	if cfg.StorageDriver == "oss" {
 		if cfg.AliyunOSSRegion == "" {
@@ -250,6 +253,9 @@ func Load() (*Config, error) {
 		if cfg.R2SecretAccessKey == "" {
 			errs = append(errs, "R2_SECRET_ACCESS_KEY is required when STORAGE_DRIVER=r2")
 		}
+	}
+	if len(cfg.PaidAccessInternalSecret) < 32 {
+		errs = append(errs, "PAID_ACCESS_INTERNAL_SECRET must contain at least 32 characters")
 	}
 
 	// Parse admin password.

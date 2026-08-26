@@ -18,5 +18,6 @@ docs/*
 !docs/WEBMASTER_BENEFIT_DETAILED_DESIGN.md
 !docs/WEBMASTER_BENEFIT_DEPLOYMENT.md
 !docs/paid-article-access.md
+!docs/security-hardening-2026-08-26.md
 bin/
 services/*/bin/

@@ -2,7 +2,10 @@ package httpapi
 
 import (
 	"net/http"
+	"net/url"
+	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/fenghaoyun-monster/freedompost/services/api/internal/domain"
 	"github.com/fenghaoyun-monster/freedompost/services/api/internal/security"
@@ -48,6 +51,17 @@ func (s *Server) requireAffiliate(w http.ResponseWriter, r *http.Request) *domai
 	}
 	if session == nil {
 		writeError(w, http.StatusUnauthorized, "UNAUTHENTICATED", "未登录")
+		return nil
+	}
+	affiliate, err := s.repo.GetAffiliateByID(r.Context(), session.AffiliateID)
+	if err != nil {
+		s.internalError(w, r, err)
+		return nil
+	}
+	if affiliate == nil || affiliate.Status != domain.AffiliateStatusActive || affiliate.CredentialVersion != session.CredentialVersion {
+		_ = s.sessions.DeleteAffiliateSession(r.Context(), tokenHash)
+		clearCookie(w, affiliateCookieName, s.cfg.CookieSecure)
+		writeError(w, http.StatusUnauthorized, "UNAUTHENTICATED", "登录已失效")
 		return nil
 	}
 	return session
@@ -286,7 +300,7 @@ func (s *Server) adminUploadAttachment(w http.ResponseWriter, r *http.Request) {
 	if s.requireAdmin(w, r) == nil {
 		return
 	}
-	s.handleUpload(w, r, "post", "", "admin")
+	s.handleUpload(w, r, "post", "", "admin", s.cfg.UploadMaxBytes)
 }
 
 // ─── Product admin handlers ───────────────────────────────────────────────────
@@ -314,12 +328,17 @@ func (s *Server) adminCreateProduct(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &input) {
 		return
 	}
+	input, valid := normalizeProductInput(input)
+	if !valid {
+		writeError(w, http.StatusBadRequest, "INVALID_PRODUCT", "商品信息不完整或格式不正确")
+		return
+	}
 	product, err := s.repo.CreateProduct(r.Context(), input)
 	if err != nil {
 		s.internalError(w, r, err)
 		return
 	}
-	writeJSON(w, http.StatusCreated, map[string]any{"product": product})
+	writeJSON(w, http.StatusCreated, flattenedResponse("product", product))
 }
 
 func (s *Server) adminUpdateProduct(w http.ResponseWriter, r *http.Request) {
@@ -328,6 +347,11 @@ func (s *Server) adminUpdateProduct(w http.ResponseWriter, r *http.Request) {
 	}
 	var input domain.ProductInput
 	if !decodeJSON(w, r, &input) {
+		return
+	}
+	input, valid := normalizeProductInput(input)
+	if !valid {
+		writeError(w, http.StatusBadRequest, "INVALID_PRODUCT", "商品信息不完整或格式不正确")
 		return
 	}
 	product, err := s.repo.UpdateProduct(r.Context(), r.PathValue("id"), input)
@@ -339,7 +363,59 @@ func (s *Server) adminUpdateProduct(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "PRODUCT_NOT_FOUND", "商品不存在")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"product": product})
+	writeJSON(w, http.StatusOK, flattenedResponse("product", product))
+}
+
+func normalizeProductInput(input domain.ProductInput) (domain.ProductInput, bool) {
+	input.Title = strings.TrimSpace(input.Title)
+	input.Summary = strings.TrimSpace(input.Summary)
+	input.Description = strings.TrimSpace(input.Description)
+	input.Category = strings.TrimSpace(input.Category)
+	input.Currency = strings.ToUpper(strings.TrimSpace(input.Currency))
+	input.CoverURL = strings.TrimSpace(input.CoverURL)
+	input.LinkURL = strings.TrimSpace(input.LinkURL)
+	input.Status = strings.TrimSpace(input.Status)
+	if input.Category == "" {
+		input.Category = "other"
+	}
+	if input.Currency == "" {
+		input.Currency = "CNY"
+	}
+	if !input.HasRequiredJSONFields() ||
+		input.Title == "" || utf8.RuneCountInString(input.Title) > 120 ||
+		input.Summary == "" || utf8.RuneCountInString(input.Summary) > 500 ||
+		input.Description == "" || utf8.RuneCountInString(input.Description) > 12000 ||
+		utf8.RuneCountInString(input.Category) > 32 || utf8.RuneCountInString(input.Currency) > 8 ||
+		(input.Status != "draft" && input.Status != "published") ||
+		input.PriceCents < 0 || input.PriceCents > 100_000_000 ||
+		input.CommissionCents < 0 || input.CommissionCents > 100_000_000 ||
+		input.Stock < -1 || input.Stock > 1_000_000 ||
+		input.SoldCount < 0 || input.SoldCount > 1_000_000 ||
+		input.SortOrder < -100_000 || input.SortOrder > 100_000 ||
+		!validProductURL(input.CoverURL) || !validProductURL(input.LinkURL) {
+		return domain.ProductInput{}, false
+	}
+	if input.CompareAtCents != nil && (*input.CompareAtCents < input.PriceCents || *input.CompareAtCents > 100_000_000) {
+		return domain.ProductInput{}, false
+	}
+	return input, true
+}
+
+func validProductURL(value string) bool {
+	if value == "" {
+		return true
+	}
+	if len(value) > 2000 || strings.HasPrefix(value, "//") {
+		return false
+	}
+	parsed, err := url.Parse(value)
+	if err != nil {
+		return false
+	}
+	if parsed.Scheme == "" {
+		return parsed.Host == ""
+	}
+	return (parsed.Scheme == "http" || parsed.Scheme == "https") && parsed.Host != ""
 }
 
 func (s *Server) adminDeleteProduct(w http.ResponseWriter, r *http.Request) {
@@ -388,7 +464,7 @@ func (s *Server) adminCreateTool(w http.ResponseWriter, r *http.Request) {
 		s.internalError(w, r, err)
 		return
 	}
-	writeJSON(w, http.StatusCreated, map[string]any{"tool": tool})
+	writeJSON(w, http.StatusCreated, flattenedResponse("tool", tool))
 }
 
 func (s *Server) adminUpdateTool(w http.ResponseWriter, r *http.Request) {
@@ -408,7 +484,7 @@ func (s *Server) adminUpdateTool(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "TOOL_NOT_FOUND", "工具不存在")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"tool": tool})
+	writeJSON(w, http.StatusOK, flattenedResponse("tool", tool))
 }
 
 func (s *Server) adminDeleteTool(w http.ResponseWriter, r *http.Request) {
@@ -454,7 +530,12 @@ func (s *Server) adminUpdateAffiliate(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &input) {
 		return
 	}
-	updated, err := s.repo.UpdateAffiliateStatus(r.Context(), r.PathValue("id"), domain.AffiliateStatus(input.Status))
+	status := domain.AffiliateStatus(input.Status)
+	if status != domain.AffiliateStatusActive && status != domain.AffiliateStatusDisabled {
+		writeError(w, http.StatusBadRequest, "INVALID_STATUS", "推广者状态无效")
+		return
+	}
+	updated, err := s.repo.UpdateAffiliateStatus(r.Context(), r.PathValue("id"), status)
 	if err != nil {
 		s.internalError(w, r, err)
 		return
@@ -476,6 +557,10 @@ func (s *Server) adminResetAffiliatePassword(w http.ResponseWriter, r *http.Requ
 	if !decodeJSON(w, r, &input) {
 		return
 	}
+	if !validAffiliatePassword(input.Password) {
+		writeError(w, http.StatusBadRequest, "INVALID_PASSWORD", "密码长度必须为 8 到 72 字节")
+		return
+	}
 	hash, err := bcryptHashReal(input.Password)
 	if err != nil {
 		s.internalError(w, r, err)
@@ -491,6 +576,11 @@ func (s *Server) adminResetAffiliatePassword(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+}
+
+func validAffiliatePassword(password string) bool {
+	password = strings.TrimSpace(password)
+	return len(password) >= 8 && len(password) <= 72
 }
 
 func (s *Server) adminListAffiliateOrders(w http.ResponseWriter, r *http.Request) {
@@ -513,22 +603,46 @@ func (s *Server) adminUpdateAffiliateOrder(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	var input struct {
-		Status string `json:"status"`
-		Notes  string `json:"notes"`
+		OrderStatus      string `json:"orderStatus"`
+		CommissionStatus string `json:"commissionStatus"`
+		Status           string `json:"status"` // legacy alias
+		Notes            string `json:"notes"`
 	}
 	if !decodeJSON(w, r, &input) {
 		return
 	}
-	updated, err := s.repo.UpdateAffiliateOrderStatus(r.Context(), r.PathValue("id"), input.Status, input.Notes)
+	if input.OrderStatus == "" {
+		input.OrderStatus = input.Status
+	}
+	if input.CommissionStatus == "" {
+		if input.OrderStatus == "completed" {
+			input.CommissionStatus = "pending"
+		} else {
+			input.CommissionStatus = "not_due"
+		}
+	}
+	if !validAffiliateOrderStatus(input.OrderStatus) || !validAffiliateCommissionStatus(input.CommissionStatus) || (input.CommissionStatus == "paid" && input.OrderStatus != "completed") {
+		writeError(w, http.StatusBadRequest, "INVALID_ORDER_STATUS", "订单或佣金状态无效")
+		return
+	}
+	order, err := s.repo.UpdateAffiliateOrderStatus(r.Context(), r.PathValue("id"), input.OrderStatus, input.CommissionStatus, input.Notes)
 	if err != nil {
 		s.internalError(w, r, err)
 		return
 	}
-	if !updated {
+	if order == nil {
 		writeError(w, http.StatusNotFound, "ORDER_NOT_FOUND", "订单不存在")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+	writeJSON(w, http.StatusOK, flattenedResponse("order", order))
+}
+
+func validAffiliateOrderStatus(value string) bool {
+	return value == "pending" || value == "completed" || value == "canceled"
+}
+
+func validAffiliateCommissionStatus(value string) bool {
+	return value == "not_due" || value == "pending" || value == "paid"
 }
 
 // ─── Reader account & article order admin handlers (via paid-access) ──────────

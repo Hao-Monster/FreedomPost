@@ -184,6 +184,7 @@ func corsMiddleware(allowedOrigins map[string]bool) func(http.Handler) http.Hand
 const (
 	adminCookieName     = "fp_admin_session"
 	affiliateCookieName = "fp_affiliate_session"
+	readerCookieName    = "fp_reader_session"
 )
 
 func setSessionCookie(w http.ResponseWriter, name, value string, maxAge int, secure bool) {

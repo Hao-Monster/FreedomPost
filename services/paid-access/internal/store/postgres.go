@@ -75,7 +75,8 @@ func (store *Postgres) FindAccountBySession(ctx context.Context, tokenHash strin
 		FROM reader_sessions s
 		JOIN reader_accounts a ON a.id = s.account_id
 		WHERE s.token_hash = $1 AND s.revoked_at IS NULL AND a.status = 'active'
-		  AND s.credential_version = a.credential_version`, tokenHash,
+		  AND s.credential_version = a.credential_version
+		  AND s.last_seen_at > NOW() - INTERVAL '30 days'`, tokenHash,
 	).Scan(&account.ID, &account.LoginName, &account.NormalizedLogin, &account.PasswordHash, &account.CredentialVersion, &account.Status, &account.CreatedAt)
 	return account, mapError(err)
 }
