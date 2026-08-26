@@ -16,6 +16,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/fenghaoyun-monster/freedompost/services/paid-access/internal/auth"
 	"github.com/fenghaoyun-monster/freedompost/services/paid-access/internal/domain"
@@ -24,7 +25,7 @@ import (
 
 const (
 	sessionCookieName = "fp_reader_session"
-	sessionMaxAge     = 400 * 24 * 60 * 60
+	sessionMaxAge     = 30 * 24 * 60 * 60
 )
 
 type TurnstileVerifier interface {
@@ -220,8 +221,12 @@ func (api *API) logout(response http.ResponseWriter, request *http.Request) {
 
 func (api *API) session(response http.ResponseWriter, request *http.Request) {
 	account, _, err := api.authenticate(response, request)
-	if err != nil {
+	if errors.Is(err, domain.ErrNotFound) {
 		writeError(response, http.StatusUnauthorized, "UNAUTHENTICATED", "未登录")
+		return
+	}
+	if err != nil {
+		api.internalError(response, request, err)
 		return
 	}
 	writeJSON(response, http.StatusOK, map[string]any{"account": publicAccount(account)})
@@ -231,9 +236,17 @@ func (api *API) article(response http.ResponseWriter, request *http.Request) {
 	if !api.requireEnabled(response) {
 		return
 	}
+	if !api.allow(request, "article", 240, time.Minute) {
+		writeError(response, http.StatusTooManyRequests, "RATE_LIMITED", "文章请求过于频繁")
+		return
+	}
 	article, err := api.config.Store.FindArticle(request.Context(), request.PathValue("slug"))
-	if err != nil || article.Visibility == "private" {
+	if errors.Is(err, domain.ErrNotFound) || article.Visibility == "private" {
 		writeError(response, http.StatusNotFound, "POST_NOT_FOUND", "文章不存在")
+		return
+	}
+	if err != nil {
+		api.internalError(response, request, err)
 		return
 	}
 	access := map[string]bool{"locked": false, "authenticated": false, "purchased": false}
@@ -247,9 +260,13 @@ func (api *API) article(response http.ResponseWriter, request *http.Request) {
 				return
 			}
 			access["purchased"] = entitled
+		} else if !errors.Is(authErr, domain.ErrNotFound) {
+			api.internalError(response, request, authErr)
+			return
 		}
 		access["locked"] = !access["purchased"]
 		if access["locked"] {
+			article.Excerpt = ""
 			article.ContentHTML = ""
 			article.AttachmentCount = 0
 		}
@@ -270,8 +287,12 @@ func (api *API) createOrder(response http.ResponseWriter, request *http.Request)
 		return
 	}
 	account, _, err := api.authenticate(response, request)
-	if err != nil {
+	if errors.Is(err, domain.ErrNotFound) {
 		writeError(response, http.StatusUnauthorized, "UNAUTHENTICATED", "请先登录")
+		return
+	}
+	if err != nil {
+		api.internalError(response, request, err)
 		return
 	}
 	if !api.allowAccount(request, account.ID, "order", 20, time.Hour) {
@@ -279,8 +300,12 @@ func (api *API) createOrder(response http.ResponseWriter, request *http.Request)
 		return
 	}
 	article, err := api.config.Store.FindArticle(request.Context(), request.PathValue("slug"))
-	if err != nil || article.Visibility != "paid" {
+	if errors.Is(err, domain.ErrNotFound) || article.Visibility != "paid" {
 		writeError(response, http.StatusNotFound, "POST_NOT_FOUND", "付费文章不存在")
+		return
+	}
+	if err != nil {
+		api.internalError(response, request, err)
 		return
 	}
 	order, created, err := api.config.Store.CreateOrder(request.Context(), account.ID, article)
@@ -301,8 +326,12 @@ func (api *API) createOrder(response http.ResponseWriter, request *http.Request)
 
 func (api *API) accountOrders(response http.ResponseWriter, request *http.Request) {
 	account, _, err := api.authenticate(response, request)
-	if err != nil {
+	if errors.Is(err, domain.ErrNotFound) {
 		writeError(response, http.StatusUnauthorized, "UNAUTHENTICATED", "请先登录")
+		return
+	}
+	if err != nil {
+		api.internalError(response, request, err)
 		return
 	}
 	orders, err := api.config.Store.ListAccountOrders(request.Context(), account.ID)
@@ -328,13 +357,21 @@ func (api *API) internalAccessCheck(response http.ResponseWriter, request *http.
 		return
 	}
 	account, err := api.config.Store.FindAccountBySession(request.Context(), auth.HashSessionToken(input.SessionToken))
-	if err != nil {
+	if errors.Is(err, domain.ErrNotFound) {
 		writeJSON(response, http.StatusOK, map[string]bool{"allowed": false})
 		return
 	}
-	article, err := api.config.Store.FindArticle(request.Context(), input.PostSlug)
 	if err != nil {
+		api.internalError(response, request, err)
+		return
+	}
+	article, err := api.config.Store.FindArticle(request.Context(), input.PostSlug)
+	if errors.Is(err, domain.ErrNotFound) {
 		writeJSON(response, http.StatusOK, map[string]bool{"allowed": false})
+		return
+	}
+	if err != nil {
+		api.internalError(response, request, err)
 		return
 	}
 	allowed := article.Visibility == "public"
@@ -349,7 +386,7 @@ func (api *API) internalAccessCheck(response http.ResponseWriter, request *http.
 }
 
 func (api *API) internalOrders(response http.ResponseWriter, request *http.Request) {
-	if !api.validInternalRequest(request, nil) {
+	if !api.validInternalAdminRequest(request, nil) {
 		writeError(response, http.StatusUnauthorized, "UNAUTHENTICATED", "未授权")
 		return
 	}
@@ -363,7 +400,7 @@ func (api *API) internalOrders(response http.ResponseWriter, request *http.Reque
 
 func (api *API) internalUpdateOrder(response http.ResponseWriter, request *http.Request) {
 	body, ok := readInternalBody(response, request)
-	if !ok || !api.validInternalRequest(request, body) {
+	if !ok || !api.validInternalAdminRequest(request, body) {
 		writeError(response, http.StatusUnauthorized, "UNAUTHENTICATED", "未授权")
 		return
 	}
@@ -391,7 +428,7 @@ func (api *API) internalUpdateOrder(response http.ResponseWriter, request *http.
 }
 
 func (api *API) internalAccounts(response http.ResponseWriter, request *http.Request) {
-	if !api.validInternalRequest(request, nil) {
+	if !api.validInternalAdminRequest(request, nil) {
 		writeError(response, http.StatusUnauthorized, "UNAUTHENTICATED", "未授权")
 		return
 	}
@@ -409,7 +446,7 @@ func (api *API) internalAccounts(response http.ResponseWriter, request *http.Req
 
 func (api *API) internalResetPassword(response http.ResponseWriter, request *http.Request) {
 	body, ok := readInternalBody(response, request)
-	if !ok || !api.validInternalRequest(request, body) {
+	if !ok || !api.validInternalAdminRequest(request, body) {
 		writeError(response, http.StatusUnauthorized, "UNAUTHENTICATED", "未授权")
 		return
 	}
@@ -526,17 +563,39 @@ func (api *API) internalError(response http.ResponseWriter, request *http.Reques
 
 func (api *API) validInternalRequest(request *http.Request, body []byte) bool {
 	timestampText := request.Header.Get("X-FreedomPost-Timestamp")
+	nonce := request.Header.Get("X-FreedomPost-Nonce")
+	actor := request.Header.Get("X-FreedomPost-Admin")
 	signatureText := request.Header.Get("X-FreedomPost-Signature")
 	timestamp, err := strconv.ParseInt(timestampText, 10, 64)
-	if err != nil || abs(time.Now().Unix()-timestamp) > 300 {
+	if err != nil || abs(time.Now().Unix()-timestamp) > 300 || len(nonce) < 16 || len(nonce) > 128 || !validInternalActor(actor) {
 		return false
 	}
 	bodyHash := sha256.Sum256(body)
-	canonical := timestampText + "\n" + request.Method + "\n" + request.URL.Path + "\n" + hex.EncodeToString(bodyHash[:])
+	canonical := timestampText + "\n" + nonce + "\n" + request.Method + "\n" + request.URL.Path + "\n" + actor + "\n" + hex.EncodeToString(bodyHash[:])
 	mac := hmac.New(sha256.New, []byte(api.config.InternalSecret))
 	_, _ = mac.Write([]byte(canonical))
 	expected := hex.EncodeToString(mac.Sum(nil))
-	return hmac.Equal([]byte(expected), []byte(signatureText))
+	if !hmac.Equal([]byte(expected), []byte(signatureText)) {
+		return false
+	}
+	allowed, _ := api.config.Limiter.Allow(request.Context(), "internal-nonce:"+hashText(nonce), 1, 10*time.Minute)
+	return allowed
+}
+
+func (api *API) validInternalAdminRequest(request *http.Request, body []byte) bool {
+	return request.Header.Get("X-FreedomPost-Admin") != "" && api.validInternalRequest(request, body)
+}
+
+func validInternalActor(actor string) bool {
+	if len(actor) > 128 || !utf8.ValidString(actor) {
+		return false
+	}
+	for _, character := range actor {
+		if character < 0x20 || character == 0x7f {
+			return false
+		}
+	}
+	return true
 }
 
 func (api *API) securityHeaders(next http.Handler) http.Handler {
@@ -580,11 +639,7 @@ func publicAccount(account domain.Account) map[string]any {
 	return map[string]any{"id": account.ID, "loginName": account.LoginName, "status": account.Status, "createdAt": account.CreatedAt}
 }
 func internalActor(request *http.Request) string {
-	actor := request.Header.Get("X-FreedomPost-Admin")
-	if len(actor) > 128 || actor == "" {
-		return "admin"
-	}
-	return actor
+	return request.Header.Get("X-FreedomPost-Admin")
 }
 func hashText(value string) string {
 	sum := sha256.Sum256([]byte(value))

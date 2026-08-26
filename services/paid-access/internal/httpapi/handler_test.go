@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -13,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/fenghaoyun-monster/freedompost/services/paid-access/internal/auth"
 	"github.com/fenghaoyun-monster/freedompost/services/paid-access/internal/domain"
 )
 
@@ -27,11 +29,23 @@ type allowAll struct{}
 
 func (allowAll) Allow(context.Context, string, int, time.Duration) (bool, error) { return true, nil }
 
+type oncePerKeyLimiter struct{ seen map[string]bool }
+
+func (limiter *oncePerKeyLimiter) Allow(_ context.Context, key string, _ int, _ time.Duration) (bool, error) {
+	if limiter.seen[key] {
+		return false, nil
+	}
+	limiter.seen[key] = true
+	return true, nil
+}
+
 type fakeStore struct {
-	account  domain.Account
-	article  domain.Article
-	entitled bool
-	sessions map[string]bool
+	account    domain.Account
+	article    domain.Article
+	articleErr error
+	sessionErr error
+	entitled   bool
+	sessions   map[string]bool
 }
 
 func newFakeStore() *fakeStore {
@@ -53,10 +67,46 @@ func (store *fakeStore) CreateSession(_ context.Context, _ string, hash string, 
 	return nil
 }
 func (store *fakeStore) FindAccountBySession(_ context.Context, hash string) (domain.Account, error) {
+	if store.sessionErr != nil {
+		return domain.Account{}, store.sessionErr
+	}
 	if store.sessions[hash] {
 		return store.account, nil
 	}
 	return domain.Account{}, domain.ErrNotFound
+}
+
+func TestAuthenticatedEndpointsDoNotHideSessionStoreFailure(t *testing.T) {
+	store := newFakeStore()
+	store.sessionErr = errors.New("database unavailable")
+	handler, err := New(Config{Enabled: true, Store: store, Turnstile: &fakeVerifier{}, Limiter: allowAll{}, TurnstileSiteKey: "site-key", PublicOrigin: "https://example.com", InternalSecret: strings.Repeat("i", 32)})
+	if err != nil {
+		t.Fatalf("New returned error: %v", err)
+	}
+
+	for _, test := range []struct {
+		name   string
+		method string
+		path   string
+		origin bool
+	}{
+		{name: "session", method: http.MethodGet, path: "/api/reader/session"},
+		{name: "orders", method: http.MethodGet, path: "/api/reader/orders"},
+		{name: "create order", method: http.MethodPost, path: "/api/reader/posts/paid-post/orders", origin: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			request := httptest.NewRequest(test.method, test.path, strings.NewReader("{}"))
+			request.AddCookie(&http.Cookie{Name: sessionCookieName, Value: strings.Repeat("s", 48)})
+			if test.origin {
+				request.Header.Set("Origin", "https://example.com")
+			}
+			response := httptest.NewRecorder()
+			handler.ServeHTTP(response, request)
+			if response.Code != http.StatusInternalServerError {
+				t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+			}
+		})
+	}
 }
 func (store *fakeStore) TouchSession(context.Context, string) error { return nil }
 func (store *fakeStore) RevokeSession(_ context.Context, hash string) error {
@@ -68,10 +118,40 @@ func (store *fakeStore) RevokeAllSessions(context.Context, string) error {
 	return nil
 }
 func (store *fakeStore) FindArticle(_ context.Context, slug string) (domain.Article, error) {
+	if store.articleErr != nil {
+		return domain.Article{}, store.articleErr
+	}
 	if slug == store.article.Slug {
 		return store.article, nil
 	}
 	return domain.Article{}, domain.ErrNotFound
+}
+
+func TestInternalAccessCheckDoesNotHideArticleStoreFailure(t *testing.T) {
+	secret := strings.Repeat("i", 32)
+	store := newFakeStore()
+	store.account = domain.Account{ID: "reader-1", Status: "active"}
+	sessionToken := strings.Repeat("s", 48)
+	store.sessions[auth.HashSessionToken(sessionToken)] = true
+	store.articleErr = errors.New("database unavailable")
+	handler, err := New(Config{Enabled: true, Store: store, Turnstile: &fakeVerifier{}, Limiter: allowAll{}, TurnstileSiteKey: "site-key", PublicOrigin: "https://example.com", InternalSecret: secret})
+	if err != nil {
+		t.Fatalf("New returned error: %v", err)
+	}
+
+	body := []byte(`{"sessionToken":"` + sessionToken + `","postSlug":"paid-post"}`)
+	path := "/internal/access/check"
+	timestamp := fmt.Sprint(time.Now().Unix())
+	request := httptest.NewRequest(http.MethodPost, path, strings.NewReader(string(body)))
+	request.Header.Set("X-FreedomPost-Timestamp", timestamp)
+	request.Header.Set("X-FreedomPost-Nonce", "article-store-error-nonce")
+	request.Header.Set("X-FreedomPost-Signature", testSignature(secret, timestamp, "article-store-error-nonce", http.MethodPost, path, "", body))
+	response := httptest.NewRecorder()
+
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusInternalServerError {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
 }
 func (store *fakeStore) HasEntitlement(context.Context, string, string) (bool, error) {
 	return store.entitled, nil
@@ -124,6 +204,7 @@ func TestRegisterCreatesPersistentSecureSession(t *testing.T) {
 
 func TestPaidArticleNeverLeaksBodyWithoutEntitlement(t *testing.T) {
 	store := newFakeStore()
+	store.article.Excerpt = "绝密正文自动生成的摘要"
 	handler, err := New(Config{Enabled: true, Store: store, Turnstile: &fakeVerifier{}, Limiter: allowAll{}, TurnstileSiteKey: "site-key", PublicOrigin: "https://example.com", InternalSecret: strings.Repeat("i", 32)})
 	if err != nil {
 		t.Fatalf("New returned error: %v", err)
@@ -138,6 +219,9 @@ func TestPaidArticleNeverLeaksBodyWithoutEntitlement(t *testing.T) {
 	if strings.Contains(response.Body.String(), "绝密正文") {
 		t.Fatalf("locked response leaked content: %s", response.Body.String())
 	}
+	if strings.Contains(response.Body.String(), "绝密正文自动生成的摘要") {
+		t.Fatalf("locked response leaked excerpt: %s", response.Body.String())
+	}
 	var body struct {
 		Access struct {
 			Locked bool `json:"locked"`
@@ -145,6 +229,48 @@ func TestPaidArticleNeverLeaksBodyWithoutEntitlement(t *testing.T) {
 	}
 	if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil || !body.Access.Locked {
 		t.Fatalf("unexpected response: %s", response.Body.String())
+	}
+}
+
+func TestInternalRequestRejectsReplayAndActorTampering(t *testing.T) {
+	secret := strings.Repeat("i", 32)
+	handler, err := New(Config{Enabled: true, Store: newFakeStore(), Turnstile: &fakeVerifier{}, Limiter: &oncePerKeyLimiter{seen: make(map[string]bool)}, TurnstileSiteKey: "site-key", PublicOrigin: "https://example.com", InternalSecret: secret})
+	if err != nil {
+		t.Fatalf("New returned error: %v", err)
+	}
+	timestamp := fmt.Sprint(time.Now().Unix())
+	path := "/internal/article-orders"
+	nonce := "one-time-nonce-value"
+	actor := "admin-a"
+	signature := testSignature(secret, timestamp, nonce, http.MethodGet, path, actor, nil)
+
+	first := httptest.NewRequest(http.MethodGet, path, nil)
+	first.Header.Set("X-FreedomPost-Timestamp", timestamp)
+	first.Header.Set("X-FreedomPost-Nonce", nonce)
+	first.Header.Set("X-FreedomPost-Admin", actor)
+	first.Header.Set("X-FreedomPost-Signature", signature)
+	firstResponse := httptest.NewRecorder()
+	handler.ServeHTTP(firstResponse, first)
+	if firstResponse.Code != http.StatusOK {
+		t.Fatalf("first signed request status=%d body=%s", firstResponse.Code, firstResponse.Body.String())
+	}
+
+	replay := httptest.NewRequest(http.MethodGet, path, nil)
+	replay.Header = first.Header.Clone()
+	replayResponse := httptest.NewRecorder()
+	handler.ServeHTTP(replayResponse, replay)
+	if replayResponse.Code != http.StatusUnauthorized {
+		t.Fatalf("replayed request status=%d, want 401", replayResponse.Code)
+	}
+
+	tampered := httptest.NewRequest(http.MethodGet, path, nil)
+	tampered.Header = first.Header.Clone()
+	tampered.Header.Set("X-FreedomPost-Nonce", "different-nonce")
+	tampered.Header.Set("X-FreedomPost-Admin", "admin-b")
+	tamperedResponse := httptest.NewRecorder()
+	handler.ServeHTTP(tamperedResponse, tampered)
+	if tamperedResponse.Code != http.StatusUnauthorized {
+		t.Fatalf("actor-tampered request status=%d, want 401", tamperedResponse.Code)
 	}
 }
 
@@ -217,7 +343,9 @@ func TestInternalAdminEndpointAcceptsBodyBoundSignature(t *testing.T) {
 	request := httptest.NewRequest(http.MethodGet, "/internal/article-orders", nil)
 	timestamp := time.Now().Unix()
 	request.Header.Set("X-FreedomPost-Timestamp", fmt.Sprint(timestamp))
-	request.Header.Set("X-FreedomPost-Signature", testSignature(secret, fmt.Sprint(timestamp), http.MethodGet, "/internal/article-orders", nil))
+	request.Header.Set("X-FreedomPost-Nonce", "list-orders-nonce-value")
+	request.Header.Set("X-FreedomPost-Admin", "admin-test")
+	request.Header.Set("X-FreedomPost-Signature", testSignature(secret, fmt.Sprint(timestamp), "list-orders-nonce-value", http.MethodGet, "/internal/article-orders", "admin-test", nil))
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, request)
 	if response.Code != http.StatusOK {
@@ -228,8 +356,9 @@ func TestInternalAdminEndpointAcceptsBodyBoundSignature(t *testing.T) {
 	path := "/internal/article-orders/order-1"
 	update := httptest.NewRequest(http.MethodPatch, path, strings.NewReader(string(body)))
 	update.Header.Set("X-FreedomPost-Timestamp", fmt.Sprint(timestamp))
-	update.Header.Set("X-FreedomPost-Actor", "admin-test")
-	update.Header.Set("X-FreedomPost-Signature", testSignature(secret, fmt.Sprint(timestamp), http.MethodPatch, path, body))
+	update.Header.Set("X-FreedomPost-Nonce", "update-order-nonce-value")
+	update.Header.Set("X-FreedomPost-Admin", "admin-test")
+	update.Header.Set("X-FreedomPost-Signature", testSignature(secret, fmt.Sprint(timestamp), "update-order-nonce-value", http.MethodPatch, path, "admin-test", body))
 	updateResponse := httptest.NewRecorder()
 	handler.ServeHTTP(updateResponse, update)
 	if updateResponse.Code != http.StatusOK {
@@ -237,9 +366,9 @@ func TestInternalAdminEndpointAcceptsBodyBoundSignature(t *testing.T) {
 	}
 }
 
-func testSignature(secret, timestamp, method, path string, body []byte) string {
+func testSignature(secret, timestamp, nonce, method, path, actor string, body []byte) string {
 	bodyHash := sha256.Sum256(body)
 	mac := hmac.New(sha256.New, []byte(secret))
-	_, _ = mac.Write([]byte(timestamp + "\n" + method + "\n" + path + "\n" + hex.EncodeToString(bodyHash[:])))
+	_, _ = mac.Write([]byte(timestamp + "\n" + nonce + "\n" + method + "\n" + path + "\n" + actor + "\n" + hex.EncodeToString(bodyHash[:])))
 	return hex.EncodeToString(mac.Sum(nil))
 }

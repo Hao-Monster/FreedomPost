@@ -37,24 +37,44 @@ func NewClient(baseURL, secret string) *Client {
 
 // ListReaderAccounts returns all reader accounts via paid-access admin endpoint.
 func (c *Client) ListReaderAccounts(ctx context.Context, adminUsername string) (json.RawMessage, error) {
-	return c.get(ctx, "/internal/accounts", adminUsername)
+	return c.get(ctx, "/internal/reader-accounts", adminUsername)
 }
 
 // ResetReaderPassword resets a reader account password.
 func (c *Client) ResetReaderPassword(ctx context.Context, accountID, newPasswordHash, adminUsername string) (json.RawMessage, error) {
 	body, _ := json.Marshal(map[string]string{"passwordHash": newPasswordHash})
-	return c.post(ctx, fmt.Sprintf("/internal/accounts/%s/reset-password", accountID), body, adminUsername)
+	return c.post(ctx, fmt.Sprintf("/internal/reader-accounts/%s/reset-password", accountID), body, adminUsername)
 }
 
 // ListArticleOrders returns paid article orders.
 func (c *Client) ListArticleOrders(ctx context.Context, adminUsername string) (json.RawMessage, error) {
-	return c.get(ctx, "/internal/orders", adminUsername)
+	return c.get(ctx, "/internal/article-orders", adminUsername)
 }
 
 // UpdateArticleOrderStatus updates an article order status.
 func (c *Client) UpdateArticleOrderStatus(ctx context.Context, orderID, status, adminUsername string) (json.RawMessage, error) {
 	body, _ := json.Marshal(map[string]string{"status": status})
-	return c.patch(ctx, fmt.Sprintf("/internal/orders/%s", orderID), body, adminUsername)
+	return c.patch(ctx, fmt.Sprintf("/internal/article-orders/%s", orderID), body, adminUsername)
+}
+
+// CheckArticleAccess verifies that a raw reader session is entitled to a post.
+// The session token is carried only inside the HMAC-signed internal request.
+func (c *Client) CheckArticleAccess(ctx context.Context, sessionToken, postSlug string) (bool, error) {
+	body, err := json.Marshal(map[string]string{"sessionToken": sessionToken, "postSlug": postSlug})
+	if err != nil {
+		return false, err
+	}
+	data, err := c.post(ctx, "/internal/access/check", body, "")
+	if err != nil {
+		return false, err
+	}
+	var response struct {
+		Allowed bool `json:"allowed"`
+	}
+	if err := json.Unmarshal(data, &response); err != nil {
+		return false, fmt.Errorf("decode paid-access check response: %w", err)
+	}
+	return response.Allowed, nil
 }
 
 // ─── Internal request transport ──────────────────────────────────────────────
@@ -76,7 +96,10 @@ func (c *Client) do(ctx context.Context, method, path string, body []byte, actor
 		body = []byte{}
 	}
 
-	ts, sig := security.SignRequest(c.secret, method, path, body)
+	ts, nonce, sig, err := security.SignRequest(c.secret, method, path, actor, body)
+	if err != nil {
+		return nil, fmt.Errorf("sign paid-access request: %w", err)
+	}
 
 	url := c.baseURL + path
 	req, err := http.NewRequestWithContext(ctx, method, url, bytes.NewReader(body))
@@ -86,6 +109,7 @@ func (c *Client) do(ctx context.Context, method, path string, body []byte, actor
 
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-FreedomPost-Timestamp", ts)
+	req.Header.Set("X-FreedomPost-Nonce", nonce)
 	req.Header.Set("X-FreedomPost-Signature", sig)
 	if actor != "" {
 		req.Header.Set("X-FreedomPost-Admin", actor)
@@ -102,8 +126,8 @@ func (c *Client) do(ctx context.Context, method, path string, body []byte, actor
 		return nil, fmt.Errorf("read paid-access response: %w", err)
 	}
 
-	if resp.StatusCode >= 500 {
-		return nil, fmt.Errorf("paid-access server error: status %d", resp.StatusCode)
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		return nil, fmt.Errorf("paid-access request failed: status %d", resp.StatusCode)
 	}
 
 	return json.RawMessage(data), nil

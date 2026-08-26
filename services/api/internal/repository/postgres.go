@@ -377,8 +377,10 @@ func (p *Postgres) CreateComment(ctx context.Context, input domain.CreateComment
 	var path string
 
 	if input.ParentID != "" {
+		parentFound := false
 		for _, c := range existing {
 			if c.id == input.ParentID {
+				parentFound = true
 				parentID = &c.id
 				if c.rootID != "" {
 					rootID = &c.rootID
@@ -396,6 +398,9 @@ func (p *Postgres) CreateComment(ctx context.Context, input domain.CreateComment
 				path = c.path + "." + security.PadPath(siblingCount+1)
 				break
 			}
+		}
+		if !parentFound {
+			return nil, domain.ErrInvalidState
 		}
 	}
 	if path == "" {
@@ -416,6 +421,32 @@ func (p *Postgres) CreateComment(ctx context.Context, input domain.CreateComment
 	}
 	defer tx.Rollback(ctx)
 
+	claimedAttachments := make([]domain.CommentAttachment, 0, len(input.Attachments))
+	for _, claim := range input.Attachments {
+		var attachment domain.CommentAttachment
+		err := tx.QueryRow(ctx, `
+			SELECT id, original_filename, mime_type, size_bytes, public_url,
+			       storage_provider, storage_key, stored_filename, COALESCE(sha256, '')
+			FROM attachments
+			WHERE id = $1
+			  AND owner_type = 'comment'
+			  AND owner_id IS NULL
+			  AND uploader_type = 'public-comment'
+			  AND claim_token_hash = $2
+			FOR UPDATE`, claim.ID, security.HashToken(claim.ClaimToken)).Scan(
+			&attachment.ID, &attachment.Name, &attachment.MimeType,
+			&attachment.SizeBytes, &attachment.URL, &attachment.StorageProvider,
+			&attachment.StorageKey, &attachment.StoredFilename, &attachment.SHA256,
+		)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, domain.ErrInvalidAttachment
+		}
+		if err != nil {
+			return nil, err
+		}
+		claimedAttachments = append(claimedAttachments, attachment)
+	}
+
 	var comment domain.Comment
 	comment.PostSlug = input.PostSlug
 	comment.ParentID = parentID
@@ -434,36 +465,21 @@ func (p *Postgres) CreateComment(ctx context.Context, input domain.CreateComment
 		 RETURNING id, created_at`,
 		commentID, post.ID, parentID, rootID, depth, path,
 		input.Username, nullStr(input.FingerprintHash), nullStr(input.LocalIDHash),
-		nullStr(input.IPHash), input.Content, len(input.Attachments), time.Now(),
+		nullStr(input.IPHash), input.Content, len(claimedAttachments), time.Now(),
 	).Scan(&comment.ID, &comment.CreatedAt); err != nil {
 		return nil, fmt.Errorf("insert comment: %w", err)
 	}
 
-	// Insert attachments
-	for _, a := range input.Attachments {
-		attID := uuid.NewString()
-		if _, err := tx.Exec(ctx,
-			`INSERT INTO attachments (id, owner_type, owner_id, uploader_type,
-			                          original_filename, stored_filename, storage_provider,
-			                          storage_key, public_url, mime_type, detected_mime_type,
-			                          size_bytes, sha256, created_at)
-			 VALUES ($1,'comment',$2,'public-comment',$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
-			attID, commentID, a.Name, a.StoredFilename, a.StorageProvider,
-			a.StorageKey, a.URL, a.MimeType, a.MimeType, a.SizeBytes, a.SHA256, time.Now(),
-		); err != nil {
-			return nil, fmt.Errorf("insert attachment: %w", err)
+	// Bind uploaded objects atomically and erase the one-time claim token.
+	for _, attachment := range claimedAttachments {
+		result, err := tx.Exec(ctx, `
+			UPDATE attachments
+			SET owner_id = $2, claim_token_hash = NULL
+			WHERE id = $1 AND owner_id IS NULL`, attachment.ID, commentID)
+		if err != nil || result.RowsAffected() != 1 {
+			return nil, domain.ErrInvalidAttachment
 		}
-		comment.Attachments = append(comment.Attachments, domain.CommentAttachment{
-			ID:              attID,
-			Name:            a.Name,
-			MimeType:        a.MimeType,
-			SizeBytes:       a.SizeBytes,
-			URL:             a.URL,
-			StorageProvider: a.StorageProvider,
-			StorageKey:      a.StorageKey,
-			StoredFilename:  a.StoredFilename,
-			SHA256:          a.SHA256,
-		})
+		comment.Attachments = append(comment.Attachments, attachment)
 	}
 
 	// Increment post comment count
@@ -488,11 +504,12 @@ func (p *Postgres) CreateAttachment(ctx context.Context, a domain.Attachment) (*
 		`INSERT INTO attachments (id, owner_type, owner_id, uploader_type,
 		                          original_filename, stored_filename, storage_provider,
 		                          storage_key, public_url, mime_type, detected_mime_type,
-		                          size_bytes, sha256, created_at)
-		 VALUES ($1,$2,$3,'admin',$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+		                          size_bytes, sha256, claim_token_hash, created_at)
+		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
 		 RETURNING id`,
-		id, a.OwnerType, a.OwnerID, a.OriginalFilename, a.StoredFilename, a.StorageProvider,
-		a.StorageKey, a.PublicURL, a.MimeType, a.DetectedMime, a.SizeBytes, a.SHA256, now,
+		id, a.OwnerType, a.OwnerID, coalesce(a.UploaderType, "admin"), a.OriginalFilename,
+		a.StoredFilename, a.StorageProvider, a.StorageKey, a.PublicURL, a.MimeType,
+		a.DetectedMime, a.SizeBytes, a.SHA256, nullStr(a.ClaimTokenHash), now,
 	).Scan(&a.ID)
 	if err != nil {
 		return nil, fmt.Errorf("create attachment: %w", err)
@@ -739,7 +756,7 @@ func (p *Postgres) ListAffiliates(ctx context.Context) ([]domain.AffiliateListIt
 
 func (p *Postgres) GetAffiliateByWechatID(ctx context.Context, wechatID string) (*domain.Affiliate, error) {
 	row := p.pool.QueryRow(ctx,
-		`SELECT id, wechat_id, password_hash, status, default_markup_percent, created_at, updated_at
+		`SELECT id, wechat_id, password_hash, credential_version, status, default_markup_percent, created_at, updated_at
 		 FROM affiliates WHERE wechat_id = $1`,
 		wechatID,
 	)
@@ -748,7 +765,7 @@ func (p *Postgres) GetAffiliateByWechatID(ctx context.Context, wechatID string) 
 
 func (p *Postgres) GetAffiliateByID(ctx context.Context, id string) (*domain.Affiliate, error) {
 	row := p.pool.QueryRow(ctx,
-		`SELECT id, wechat_id, password_hash, status, default_markup_percent, created_at, updated_at
+		`SELECT id, wechat_id, password_hash, credential_version, status, default_markup_percent, created_at, updated_at
 		 FROM affiliates WHERE id = $1`,
 		id,
 	)
@@ -758,7 +775,7 @@ func (p *Postgres) GetAffiliateByID(ctx context.Context, id string) (*domain.Aff
 func (p *Postgres) CreateAffiliate(ctx context.Context, wechatID, passwordHash string) (*domain.Affiliate, error) {
 	row := p.pool.QueryRow(ctx,
 		`INSERT INTO affiliates (wechat_id, password_hash) VALUES ($1, $2)
-		 RETURNING id, wechat_id, password_hash, status, default_markup_percent, created_at, updated_at`,
+		 RETURNING id, wechat_id, password_hash, credential_version, status, default_markup_percent, created_at, updated_at`,
 		wechatID, passwordHash,
 	)
 	return scanAffiliate(row)
@@ -766,7 +783,7 @@ func (p *Postgres) CreateAffiliate(ctx context.Context, wechatID, passwordHash s
 
 func (p *Postgres) UpdateAffiliateStatus(ctx context.Context, id string, status domain.AffiliateStatus) (bool, error) {
 	ct, err := p.pool.Exec(ctx,
-		`UPDATE affiliates SET status = $2, updated_at = $3 WHERE id = $1`,
+		`UPDATE affiliates SET status = $2, credential_version = credential_version + 1, updated_at = $3 WHERE id = $1`,
 		id, string(status), time.Now(),
 	)
 	return ct.RowsAffected() > 0, err
@@ -774,7 +791,7 @@ func (p *Postgres) UpdateAffiliateStatus(ctx context.Context, id string, status 
 
 func (p *Postgres) UpdateAffiliatePassword(ctx context.Context, id, passwordHash string) (bool, error) {
 	ct, err := p.pool.Exec(ctx,
-		`UPDATE affiliates SET password_hash = $2, updated_at = $3 WHERE id = $1`,
+		`UPDATE affiliates SET password_hash = $2, credential_version = credential_version + 1, updated_at = $3 WHERE id = $1`,
 		id, passwordHash, time.Now(),
 	)
 	return ct.RowsAffected() > 0, err
@@ -826,35 +843,52 @@ func (p *Postgres) ListAffiliateProducts(ctx context.Context, affiliateID string
 }
 
 func (p *Postgres) SetAffiliateMarkup(ctx context.Context, affiliateID string, productIDs []string, markupPercent int) error {
+	if !domain.ValidAffiliateMarkupPercent(markupPercent) {
+		return domain.ErrInvalidState
+	}
+	tx, err := p.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, "affiliate-markup:"+affiliateID); err != nil {
+		return err
+	}
 	if productIDs == nil {
 		// Reset all overrides and set default
-		_, err := p.pool.Exec(ctx,
+		_, err := tx.Exec(ctx,
 			`DELETE FROM affiliate_product_markups WHERE affiliate_id = $1`, affiliateID,
 		)
 		if err != nil {
 			return err
 		}
-		_, err = p.pool.Exec(ctx,
+		_, err = tx.Exec(ctx,
 			`UPDATE affiliates SET default_markup_percent = $2, updated_at = $3 WHERE id = $1`,
 			affiliateID, markupPercent, time.Now(),
 		)
-		return err
-	}
-	if len(productIDs) == 0 {
-		return nil
-	}
-	for _, pid := range productIDs {
-		if _, err := p.pool.Exec(ctx,
-			`INSERT INTO affiliate_product_markups (affiliate_id, product_id, markup_percent, updated_at)
-			 VALUES ($1, $2, $3, $4)
-			 ON CONFLICT (affiliate_id, product_id) DO UPDATE
-			 SET markup_percent = EXCLUDED.markup_percent, updated_at = EXCLUDED.updated_at`,
-			affiliateID, pid, markupPercent, time.Now(),
-		); err != nil {
+		if err != nil {
 			return err
 		}
+		return tx.Commit(ctx)
 	}
-	return nil
+	if len(productIDs) == 0 {
+		return tx.Commit(ctx)
+	}
+	for _, pid := range productIDs {
+		result, err := tx.Exec(ctx,
+			`INSERT INTO affiliate_product_markups (affiliate_id, product_id, markup_percent, updated_at)
+			 SELECT $1, p.id, $3, $4 FROM products p WHERE p.id = $2
+			 ON CONFLICT (affiliate_id, product_id) DO UPDATE
+			 SET markup_percent = EXCLUDED.markup_percent, updated_at = EXCLUDED.updated_at`,
+			affiliateID, pid, markupPercent, time.Now())
+		if err != nil {
+			return err
+		}
+		if result.RowsAffected() != 1 {
+			return domain.ErrNotFound
+		}
+	}
+	return tx.Commit(ctx)
 }
 
 func (p *Postgres) GetAffiliateDashboard(ctx context.Context, affiliateID string) (*domain.AffiliateDashboard, error) {
@@ -874,43 +908,69 @@ func (p *Postgres) GetAffiliateDashboard(ctx context.Context, affiliateID string
 	if err != nil {
 		return nil, err
 	}
-	return &domain.AffiliateDashboard{
+	dashboard := &domain.AffiliateDashboard{
 		Affiliate:    *affiliate,
 		TotalClicks:  totalClicks,
 		UniqueClicks: uniqueClicks,
 		Orders:       orders,
-	}, nil
+	}
+	for _, order := range orders {
+		if order.OrderStatus == "completed" {
+			dashboard.CompletedOrders++
+		}
+		switch order.CommissionStatus {
+		case "pending":
+			dashboard.PendingCommissionCents += order.CommissionCents
+		case "paid":
+			dashboard.PaidCommissionCents += order.CommissionCents
+		}
+	}
+	return dashboard, nil
 }
 
 func (p *Postgres) RecordAffiliateClick(ctx context.Context, wechatID, visitorKey, path string) (bool, bool, error) {
-	affiliate, err := p.GetAffiliateByWechatID(ctx, wechatID)
+	tx, err := p.pool.Begin(ctx)
 	if err != nil {
 		return false, false, err
 	}
-	if affiliate == nil || affiliate.Status != domain.AffiliateStatusActive {
+	defer tx.Rollback(ctx)
+	var affiliateID string
+	err = tx.QueryRow(ctx, `SELECT id FROM affiliates WHERE wechat_id = $1 AND status = 'active'`, wechatID).Scan(&affiliateID)
+	if errors.Is(err, pgx.ErrNoRows) {
 		return false, false, nil
+	}
+	if err != nil {
+		return false, false, err
+	}
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, "affiliate-click:"+affiliateID+":"+visitorKey); err != nil {
+		return false, false, err
 	}
 
 	cutoff := time.Now().Add(-24 * time.Hour)
-	var recentID string
-	err = p.pool.QueryRow(ctx,
-		`SELECT id FROM affiliate_clicks
-		 WHERE affiliate_id = $1 AND visitor_key = $2 AND clicked_at > $3
-		 LIMIT 1`,
-		affiliate.ID, visitorKey, cutoff,
-	).Scan(&recentID)
-	isUnique := errors.Is(err, pgx.ErrNoRows)
+	var seenRecently bool
+	if err := tx.QueryRow(ctx,
+		`SELECT EXISTS (
+			SELECT 1 FROM affiliate_clicks
+			WHERE affiliate_id = $1 AND visitor_key = $2 AND clicked_at > $3
+		)`, affiliateID, visitorKey, cutoff,
+	).Scan(&seenRecently); err != nil {
+		return false, false, err
+	}
+	isUnique := !seenRecently
 
 	isUniqueInt := 0
 	if isUnique {
 		isUniqueInt = 1
 	}
-	if _, err := p.pool.Exec(ctx,
+	if _, err := tx.Exec(ctx,
 		`INSERT INTO affiliate_clicks (affiliate_id, visitor_key, path, is_unique)
 		 VALUES ($1, $2, $3, $4)`,
-		affiliate.ID, visitorKey, path, isUniqueInt,
+		affiliateID, visitorKey, path, isUniqueInt,
 	); err != nil {
 		return false, false, fmt.Errorf("record click: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return false, false, err
 	}
 	return true, isUnique, nil
 }
@@ -922,24 +982,71 @@ func (p *Postgres) CreateAffiliateOrder(ctx context.Context, input domain.Create
 	if err != nil {
 		return nil, err
 	}
-	product, err := p.GetProductByID(ctx, input.ProductID)
-	if err != nil || product == nil {
-		return nil, fmt.Errorf("product not found")
+	tx, err := p.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
+	if err != nil {
+		return nil, err
 	}
+	defer tx.Rollback(ctx)
+	var affiliateID string
+	if err := tx.QueryRow(ctx, `SELECT id FROM affiliates WHERE wechat_id = $1 AND status = 'active'`, input.AffiliateWechatID).Scan(&affiliateID); errors.Is(err, pgx.ErrNoRows) {
+		return nil, domain.ErrInvalidRecommender
+	} else if err != nil {
+		return nil, err
+	}
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, "affiliate-markup:"+affiliateID); err != nil {
+		return nil, err
+	}
+
+	var product domain.Product
+	var markupPercent int
+	err = tx.QueryRow(ctx, `
+		SELECT p.id, p.slug, p.title, p.summary, p.description, p.category,
+		       COALESCE(p.cover_url, ''), '' AS link_url, p.price_cents,
+		       p.compare_at_cents, p.currency, p.commission_cents, p.stock,
+		       p.sold_count, p.status, p.sort_order, p.created_at, p.updated_at,
+		       COALESCE(apm.markup_percent, a.default_markup_percent)
+		FROM affiliates a
+		JOIN products p ON p.slug = $2
+		LEFT JOIN affiliate_product_markups apm
+		  ON apm.affiliate_id = a.id AND apm.product_id = p.id
+		WHERE a.id = $1 AND a.status = 'active'
+		  AND p.slug = $2 AND p.status = 'published' AND p.stock <> 0
+		FOR SHARE OF a, p`, affiliateID, input.ProductSlug).Scan(
+		&product.ID, &product.Slug, &product.Title, &product.Summary,
+		&product.Description, &product.Category, &product.CoverURL, &product.LinkURL,
+		&product.PriceCents, &product.CompareAtCents, &product.Currency,
+		&product.CommissionCents, &product.Stock, &product.SoldCount, &product.Status,
+		&product.SortOrder, &product.CreatedAt, &product.UpdatedAt, &markupPercent,
+	)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, domain.ErrNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	if !domain.ValidAffiliateMarkupPercent(markupPercent) {
+		return nil, domain.ErrInvalidState
+	}
+	view := domain.BuildAffiliateProductView(product, markupPercent)
 	now := time.Now()
 	var order domain.AffiliateOrder
-	err = p.pool.QueryRow(ctx,
+	err = tx.QueryRow(ctx,
 		`INSERT INTO affiliate_orders (order_code, affiliate_id, product_id, product_title,
-		                               price_cents, commission_cents, currency, created_at, updated_at)
-		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
-		 RETURNING id, order_code, affiliate_id, product_id, product_title, price_cents, commission_cents,
+		                               price_cents, commission_cents,
+		                               base_commission_cents, markup_commission_cents,
+		                               currency, created_at, updated_at)
+		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+		 RETURNING id, order_code, affiliate_id, product_id, product_title,
+		           price_cents, commission_cents, base_commission_cents, markup_commission_cents,
 		           COALESCE(currency, 'CNY'), COALESCE(order_status, 'pending'),
 		           COALESCE(commission_status, 'pending'), created_at, updated_at`,
-		orderCode, input.AffiliateID, input.ProductID, product.Title,
-		input.CustomerPriceCents, input.CommissionCents, product.Currency, now, now,
+		orderCode, affiliateID, product.ID, product.Title,
+		view.CustomerPriceCents, view.CommissionCents, view.BaseCommissionCents,
+		view.MarkupCommissionCents, product.Currency, now, now,
 	).Scan(
 		&order.ID, &order.OrderCode, &order.AffiliateID, &order.ProductID, &order.ProductTitle,
-		&order.PriceCents, &order.CommissionCents, &order.Currency,
+		&order.PriceCents, &order.CommissionCents,
+		&order.BaseCommissionCents, &order.MarkupCommissionCents, &order.Currency,
 		&order.OrderStatus, &order.CommissionStatus, &order.CreatedAt, &order.UpdatedAt,
 	)
 	if err != nil {
@@ -947,8 +1054,9 @@ func (p *Postgres) CreateAffiliateOrder(ctx context.Context, input domain.Create
 	}
 	order.CustomerPriceCents = order.PriceCents
 	order.Status = order.OrderStatus
-	order.BaseCommissionCents = input.BaseCommissionCents
-	order.MarkupCommissionCents = input.MarkupCommissionCents
+	if err := tx.Commit(ctx); err != nil {
+		return nil, err
+	}
 	return &order, nil
 }
 
@@ -956,20 +1064,54 @@ func (p *Postgres) ListAffiliateOrders(ctx context.Context) ([]domain.AffiliateO
 	return p.listOrdersFor(ctx, "")
 }
 
-func (p *Postgres) UpdateAffiliateOrderStatus(ctx context.Context, id, status, notes string) (bool, error) {
-	ct, err := p.pool.Exec(ctx,
-		`UPDATE affiliate_orders SET order_status = $2, updated_at = $3 WHERE id = $1`,
-		id, status, time.Now(),
+func (p *Postgres) UpdateAffiliateOrderStatus(ctx context.Context, id, orderStatus, commissionStatus, notes string) (*domain.AffiliateOrder, error) {
+	var order domain.AffiliateOrder
+	err := p.pool.QueryRow(ctx, `
+		WITH updated AS (
+			UPDATE affiliate_orders SET
+				order_status = $2,
+				commission_status = $3,
+				notes = $4,
+				updated_at = NOW(),
+				completed_at = CASE WHEN $2 = 'completed' THEN COALESCE(completed_at, NOW()) ELSE NULL END,
+				commission_paid_at = CASE WHEN $3 = 'paid' THEN COALESCE(commission_paid_at, NOW()) ELSE NULL END
+			WHERE id = $1
+			RETURNING *
+		)
+		SELECT u.id, u.order_code, u.affiliate_id, COALESCE(a.wechat_id, ''),
+		       COALESCE(u.product_id::text, ''), u.product_title,
+		       u.price_cents, u.commission_cents, u.base_commission_cents,
+		       u.markup_commission_cents, u.currency, u.order_status,
+		       u.commission_status, u.notes, u.created_at, u.updated_at,
+		       u.completed_at, u.commission_paid_at
+		FROM updated u LEFT JOIN affiliates a ON a.id = u.affiliate_id`,
+		id, orderStatus, commissionStatus, notes,
+	).Scan(
+		&order.ID, &order.OrderCode, &order.AffiliateID, &order.AffiliateWechatID,
+		&order.ProductID, &order.ProductTitle, &order.PriceCents, &order.CommissionCents,
+		&order.BaseCommissionCents, &order.MarkupCommissionCents, &order.Currency,
+		&order.OrderStatus, &order.CommissionStatus, &order.Notes,
+		&order.CreatedAt, &order.UpdatedAt, &order.CompletedAt, &order.CommissionPaidAt,
 	)
-	return ct.RowsAffected() > 0, err
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	order.CustomerPriceCents = order.PriceCents
+	order.Status = order.OrderStatus
+	return &order, nil
 }
 
 func (p *Postgres) listOrdersFor(ctx context.Context, affiliateID string) ([]domain.AffiliateOrder, error) {
 	q := `SELECT ao.id, ao.order_code, ao.affiliate_id, COALESCE(a.wechat_id, ''),
 	             COALESCE(ao.product_id::text, ''), COALESCE(ao.product_title, ''),
-	             ao.price_cents, ao.commission_cents, COALESCE(ao.currency, 'CNY'),
-		         COALESCE(ao.order_status, 'pending'), COALESCE(ao.commission_status, 'pending'),
-		         ao.created_at, ao.updated_at
+	             ao.price_cents, ao.commission_cents,
+	             ao.base_commission_cents, ao.markup_commission_cents, COALESCE(ao.currency, 'CNY'),
+		         COALESCE(ao.order_status, 'pending'), COALESCE(ao.commission_status, 'not_due'),
+		         COALESCE(ao.notes, ''), ao.created_at, ao.updated_at,
+		         ao.completed_at, ao.commission_paid_at
 		  FROM affiliate_orders ao
 		  LEFT JOIN affiliates a ON a.id = ao.affiliate_id`
 	var args []any
@@ -989,9 +1131,10 @@ func (p *Postgres) listOrdersFor(ctx context.Context, affiliateID string) ([]dom
 		if err := rows.Scan(
 			&o.ID, &o.OrderCode, &o.AffiliateID, &o.AffiliateWechatID,
 			&o.ProductID, &o.ProductTitle,
-			&o.PriceCents, &o.CommissionCents, &o.Currency,
-			&o.OrderStatus, &o.CommissionStatus,
-			&o.CreatedAt, &o.UpdatedAt,
+			&o.PriceCents, &o.CommissionCents,
+			&o.BaseCommissionCents, &o.MarkupCommissionCents, &o.Currency,
+			&o.OrderStatus, &o.CommissionStatus, &o.Notes,
+			&o.CreatedAt, &o.UpdatedAt, &o.CompletedAt, &o.CommissionPaidAt,
 		); err != nil {
 			return nil, err
 		}
@@ -1354,7 +1497,7 @@ func scanTools(rows pgx.Rows) ([]domain.Tool, error) {
 
 func scanAffiliate(row pgx.Row) (*domain.Affiliate, error) {
 	var a domain.Affiliate
-	err := row.Scan(&a.ID, &a.WechatID, &a.PasswordHash, &a.Status, &a.DefaultMarkupPercent, &a.CreatedAt, &a.UpdatedAt)
+	err := row.Scan(&a.ID, &a.WechatID, &a.PasswordHash, &a.CredentialVersion, &a.Status, &a.DefaultMarkupPercent, &a.CreatedAt, &a.UpdatedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
 	}

@@ -2,6 +2,8 @@ package httpapi
 
 import (
 	"net/http"
+	"strings"
+	"time"
 
 	"github.com/fenghaoyun-monster/freedompost/services/api/internal/domain"
 	"github.com/fenghaoyun-monster/freedompost/services/api/internal/searchindex"
@@ -17,6 +19,11 @@ func (s *Server) listPosts(w http.ResponseWriter, r *http.Request) {
 	}
 	if posts == nil {
 		posts = []domain.PostSummary{}
+	}
+	for index := range posts {
+		if posts[index].Visibility == domain.VisibilityPaid {
+			posts[index].Excerpt = ""
+		}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"items": posts, "posts": posts})
 }
@@ -35,38 +42,70 @@ func (s *Server) getPost(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "POST_NOT_FOUND", "文章不存在")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"item": post, "post": post})
+	publicPost := redactPostForPublic(post)
+	writeJSON(w, http.StatusOK, map[string]any{"item": publicPost, "post": publicPost})
+}
+
+func redactPostForPublic(post *domain.Post) *domain.Post {
+	if post == nil || post.Visibility != domain.VisibilityPaid {
+		return post
+	}
+	redacted := *post
+	redacted.ContentMarkdown = ""
+	redacted.Markdown = ""
+	redacted.ContentHTML = ""
+	redacted.SearchText = ""
+	redacted.Excerpt = ""
+	redacted.AttachmentCount = 0
+	return &redacted
 }
 
 // recordView records a page view and returns the updated view count.
 // Uses Redis buffer for high-throughput write avoidance.
 func (s *Server) recordView(w http.ResponseWriter, r *http.Request) {
 	slug := r.PathValue("slug")
+	ip := s.remoteIP(r)
+	if ok, _ := s.limiter.Allow(r.Context(), "post-view:"+security.HashText(ip), 120, time.Minute); !ok {
+		writeError(w, http.StatusTooManyRequests, "RATE_LIMITED", "浏览记录过于频繁")
+		return
+	}
+	if s.requireReadablePost(w, r) == nil {
+		return
+	}
 
 	var input struct {
-		ViewDate        string `json:"viewDate"` // YYYY-MM-DD
-		VisitorKey      string `json:"visitorKey"`
-		FingerprintHash string `json:"fingerprintHash"`
-		LocalIDHash     string `json:"localIdHash"`
+		Fingerprint string `json:"fingerprint"`
+		LocalID     string `json:"localId"`
 	}
 	if !decodeJSON(w, r, &input) {
 		return
 	}
 
-	ip := s.remoteIP(r)
+	input.Fingerprint = strings.TrimSpace(input.Fingerprint)
+	input.LocalID = strings.TrimSpace(input.LocalID)
+	if len(input.Fingerprint) > 256 || len(input.LocalID) > 128 {
+		writeError(w, http.StatusBadRequest, "INVALID_VISITOR", "访客标识格式不正确")
+		return
+	}
+	viewDate := time.Now().UTC().Format("2006-01-02")
 	ipHash := security.HashVisitorKey(ip, s.cfg.VisitorHashSalt)
-	visitorKey := input.VisitorKey
-	if visitorKey == "" {
-		visitorKey = ipHash
+	visitorKey := security.HashText(strings.Join([]string{ip, input.Fingerprint, input.LocalID, viewDate, s.cfg.VisitorHashSalt}, ":"))
+	fingerprintHash := ""
+	if input.Fingerprint != "" {
+		fingerprintHash = security.HashText(input.Fingerprint)
+	}
+	localIDHash := ""
+	if input.LocalID != "" {
+		localIDHash = security.HashText(input.LocalID)
 	}
 
 	result, err := s.repo.RecordView(r.Context(), domain.RecordViewInput{
 		PostSlug:        slug,
-		ViewDate:        input.ViewDate,
+		ViewDate:        viewDate,
 		VisitorKey:      visitorKey,
 		IPHash:          ipHash,
-		FingerprintHash: input.FingerprintHash,
-		LocalIDHash:     input.LocalIDHash,
+		FingerprintHash: fingerprintHash,
+		LocalIDHash:     localIDHash,
 	})
 	if err != nil {
 		s.internalError(w, r, err)
@@ -77,6 +116,36 @@ func (s *Server) recordView(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, result)
+}
+
+func (s *Server) requireReadablePost(w http.ResponseWriter, r *http.Request) *domain.Post {
+	post, err := s.repo.GetPostBySlug(r.Context(), r.PathValue("slug"))
+	if err != nil {
+		s.internalError(w, r, err)
+		return nil
+	}
+	if post == nil || post.Visibility == domain.VisibilityPrivate {
+		writeError(w, http.StatusNotFound, "POST_NOT_FOUND", "文章不存在")
+		return nil
+	}
+	if post.Visibility != domain.VisibilityPaid {
+		return post
+	}
+	cookie, err := r.Cookie(readerCookieName)
+	if err != nil || cookie.Value == "" {
+		writeError(w, http.StatusNotFound, "POST_NOT_FOUND", "文章不存在")
+		return nil
+	}
+	allowed, err := s.paidAccess.CheckArticleAccess(r.Context(), cookie.Value, post.Slug)
+	if err != nil {
+		s.internalError(w, r, err)
+		return nil
+	}
+	if !allowed {
+		writeError(w, http.StatusNotFound, "POST_NOT_FOUND", "文章不存在")
+		return nil
+	}
+	return post
 }
 
 // searchIndex returns the pre-built search index payload.

@@ -6,6 +6,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"mime"
 	"net/http"
@@ -50,10 +51,14 @@ type Adapter interface {
 
 // ─── Validation ───────────────────────────────────────────────────────────────
 
+// ErrInvalidUpload identifies client-controlled content validation failures.
+// Callers can return a bounded 4xx response without exposing backend errors.
+var ErrInvalidUpload = errors.New("invalid upload")
+
 // AllowedMimeTypes is the server-authoritative whitelist of uploadable types.
 var AllowedMimeTypes = map[string]bool{
 	"image/jpeg": true, "image/png": true, "image/gif": true,
-	"image/webp": true, "image/avif": true, "image/svg+xml": true,
+	"image/webp": true, "image/avif": true,
 	"application/pdf": true,
 	"text/plain":      true, "text/markdown": true,
 	"audio/mpeg": true, "audio/ogg": true,
@@ -66,7 +71,7 @@ var AllowedMimeTypes = map[string]bool{
 // This is the authoritative type check — client-supplied Content-Type is ignored.
 func Validate(data []byte, maxBytes int64) (detectedMime string, err error) {
 	if int64(len(data)) > maxBytes {
-		return "", fmt.Errorf("file size %d exceeds limit %d", len(data), maxBytes)
+		return "", fmt.Errorf("%w: file size %d exceeds limit %d", ErrInvalidUpload, len(data), maxBytes)
 	}
 	detected := mimetype.Detect(data)
 	mt := detected.String()
@@ -76,7 +81,7 @@ func Validate(data []byte, maxBytes int64) (detectedMime string, err error) {
 		base = mt
 	}
 	if !AllowedMimeTypes[base] {
-		return "", fmt.Errorf("file type %q is not allowed", base)
+		return "", fmt.Errorf("%w: file type %q is not allowed", ErrInvalidUpload, base)
 	}
 	return base, nil
 }
@@ -87,19 +92,39 @@ func ComputeSHA256(data []byte) string {
 	return hex.EncodeToString(sum[:])
 }
 
-// GenerateStoredFilename builds "uuid.ext" where ext is derived from the
-// original filename (falling back to mime type extension).
-func GenerateStoredFilename(originalName, mimeType string) string {
+var canonicalExtensions = map[string]string{
+	"image/jpeg": ".jpg", "image/png": ".png", "image/gif": ".gif",
+	"image/webp": ".webp", "image/avif": ".avif", "application/pdf": ".pdf",
+	"text/plain": ".txt", "text/markdown": ".md", "audio/mpeg": ".mp3",
+	"audio/ogg": ".ogg", "video/mp4": ".mp4", "video/webm": ".webm",
+	"application/zip": ".zip", "application/octet-stream": ".bin",
+}
+
+// GenerateStoredFilename builds "uuid.ext" from the detected MIME type. The
+// attacker-controlled original extension must never influence HTTP serving.
+func GenerateStoredFilename(_ string, mimeType string) string {
 	id := uuid.NewString()
-	ext := strings.ToLower(filepath.Ext(originalName))
+	ext := canonicalExtensions[mimeType]
 	if ext == "" {
-		// Derive from MIME type
-		exts, _ := mime.ExtensionsByType(mimeType)
-		if len(exts) > 0 {
-			ext = exts[0]
-		}
+		ext = ".bin"
 	}
 	return id + ext
+}
+
+func storedMIMEType(storageKey string) string {
+	ext := strings.ToLower(filepath.Ext(storageKey))
+	for mimeType, canonicalExt := range canonicalExtensions {
+		if ext == canonicalExt {
+			return mimeType
+		}
+	}
+	return "application/octet-stream"
+}
+
+func requiresDownload(mimeType string) bool {
+	return !strings.HasPrefix(mimeType, "image/") &&
+		!strings.HasPrefix(mimeType, "audio/") &&
+		!strings.HasPrefix(mimeType, "video/")
 }
 
 // ─── Local storage ────────────────────────────────────────────────────────────
@@ -182,6 +207,12 @@ func (a *LocalAdapter) ServeFile(w http.ResponseWriter, r *http.Request, storage
 		return
 	}
 	// 4. Set long-lived cache header for immutable uploads
+	mimeType := storedMIMEType(absTarget)
+	w.Header().Set("Content-Type", mimeType)
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	if requiresDownload(mimeType) {
+		w.Header().Set("Content-Disposition", mime.FormatMediaType("attachment", map[string]string{"filename": filepath.Base(absTarget)}))
+	}
 	w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
 	http.ServeFile(w, r, absTarget)
 }

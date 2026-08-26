@@ -89,7 +89,7 @@ type AffiliateProduct = StoreProduct & {
 
 const themeKey = "fp_theme_v1";
 const referralKey = referralStorageKey;
-const visitorKey = "fp_affiliate_visitor_v1";
+const affiliateVisitorStorageKey = "fp_affiliate_visitor_v1"; // gitleaks:allow — public localStorage key, not a credential
 const root = document.documentElement;
 const navToggle = document.querySelector<HTMLButtonElement>("#navToggle");
 const primaryNav = document.querySelector<HTMLElement>("#primaryNav");
@@ -937,10 +937,10 @@ function lockedReferral(): string | null {
 }
 
 function affiliateVisitorId(): string {
-  const existing = localStorage.getItem(visitorKey);
+  const existing = localStorage.getItem(affiliateVisitorStorageKey);
   if (existing) return existing;
   const created = crypto.randomUUID();
-  localStorage.setItem(visitorKey, created);
+  localStorage.setItem(affiliateVisitorStorageKey, created);
   return created;
 }
 

@@ -8,7 +8,7 @@ require (
 	github.com/jackc/pgx/v5 v5.10.0
 	github.com/microcosm-cc/bluemonday v1.0.27
 	github.com/redis/go-redis/v9 v9.22.0
-	github.com/yuin/goldmark v1.7.12
+	github.com/yuin/goldmark v1.7.17
 	golang.org/x/crypto v0.41.0
 )
 
@@ -23,5 +23,5 @@ require (
 	golang.org/x/net v0.42.0 // indirect
 	golang.org/x/sync v0.21.0 // indirect
 	golang.org/x/sys v0.35.0 // indirect
-	golang.org/x/text v0.29.0 // indirect
+	golang.org/x/text v0.39.0 // indirect
 )

@@ -1,6 +1,16 @@
 package domain
 
-import "context"
+import (
+	"context"
+	"errors"
+)
+
+var (
+	ErrNotFound           = errors.New("not found")
+	ErrInvalidState       = errors.New("invalid state")
+	ErrInvalidAttachment  = errors.New("invalid attachment claim")
+	ErrInvalidRecommender = errors.New("invalid recommender")
+)
 
 // Repository is the central data access interface. All infrastructure
 // (PostgreSQL) implementations must satisfy this interface.
@@ -55,7 +65,7 @@ type Repository interface {
 	// ─── Orders ─────────────────────────────────────────────────────────────
 	CreateAffiliateOrder(ctx context.Context, input CreateOrderInput) (*AffiliateOrder, error)
 	ListAffiliateOrders(ctx context.Context) ([]AffiliateOrder, error)
-	UpdateAffiliateOrderStatus(ctx context.Context, id, status, notes string) (bool, error)
+	UpdateAffiliateOrderStatus(ctx context.Context, id, orderStatus, commissionStatus, notes string) (*AffiliateOrder, error)
 
 	// ─── Reader Accounts (proxied from paid-access) ──────────────────────────
 	// These are managed by paid-access; admin API proxies via HTTP.

@@ -44,7 +44,7 @@ func main() {
 	enabled := os.Getenv("PAID_ARTICLES_ENABLED") == "true"
 	var turnstileVerifier httpapi.TurnstileVerifier = rejectingTurnstile{}
 	turnstileSiteKey := "disabled"
-	internalSecret := valueOr("PAID_ACCESS_INTERNAL_SECRET", strings.Repeat("disabled-", 4))
+	internalSecret := required("PAID_ACCESS_INTERNAL_SECRET")
 	if enabled {
 		turnstileVerifier, err = turnstile.New(turnstile.Config{
 			SecretKey:        required("TURNSTILE_SECRET_KEY"),
@@ -56,7 +56,6 @@ func main() {
 			os.Exit(1)
 		}
 		turnstileSiteKey = required("TURNSTILE_SITE_KEY")
-		internalSecret = required("PAID_ACCESS_INTERNAL_SECRET")
 	}
 
 	handler, err := httpapi.New(httpapi.Config{

@@ -3,7 +3,12 @@ package storage
 import (
 	"bytes"
 	"context"
+	"crypto/hmac"
+	"crypto/md5"
+	"crypto/sha1"
+	"encoding/base64"
 	"fmt"
+	"mime"
 	"net/http"
 	"strings"
 	"time"
@@ -25,6 +30,9 @@ type OSSAdapter struct {
 
 // NewOSSAdapter creates an Aliyun OSS storage adapter.
 func NewOSSAdapter(region, bucket, accessKeyID, accessKeySecret, endpoint, publicBaseURL, prefix string) (*OSSAdapter, error) {
+	if bucket == "" || accessKeyID == "" || accessKeySecret == "" {
+		return nil, fmt.Errorf("OSS bucket and access credentials are required")
+	}
 	if endpoint == "" {
 		endpoint = fmt.Sprintf("https://%s.oss-%s.aliyuncs.com", bucket, region)
 	}
@@ -59,8 +67,12 @@ func (a *OSSAdapter) Put(ctx context.Context, input PutInput) (*StoredObject, er
 	}
 	req.Header.Set("Content-Type", detectedMime)
 	req.ContentLength = int64(len(input.Data))
-	// TODO: add HMAC-SHA1 Authorization header for full production use
-	// For now, bucket must allow public writes (or use STS tokens)
+	contentMD5 := md5.Sum(input.Data)
+	req.Header.Set("Content-MD5", base64.StdEncoding.EncodeToString(contentMD5[:]))
+	if requiresDownload(detectedMime) {
+		req.Header.Set("Content-Disposition", mime.FormatMediaType("attachment", map[string]string{"filename": storedName}))
+	}
+	a.sign(req, key)
 
 	resp, err := a.httpClient.Do(req)
 	if err != nil {
@@ -97,11 +109,15 @@ func (a *OSSAdapter) Delete(ctx context.Context, storageKey string) error {
 	if err != nil {
 		return fmt.Errorf("build OSS delete request: %w", err)
 	}
+	a.sign(req, storageKey)
 	resp, err := a.httpClient.Do(req)
 	if err != nil {
 		return fmt.Errorf("OSS delete: %w", err)
 	}
 	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent && resp.StatusCode != http.StatusNotFound {
+		return fmt.Errorf("OSS delete returned status %d", resp.StatusCode)
+	}
 	return nil
 }
 
@@ -111,10 +127,34 @@ func (a *OSSAdapter) Ping(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	a.sign(req, "")
 	resp, err := a.httpClient.Do(req)
 	if err != nil {
 		return err
 	}
 	resp.Body.Close()
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		return fmt.Errorf("OSS ping returned status %d", resp.StatusCode)
+	}
 	return nil
+}
+
+// sign adds an OSS V1 Authorization header. OSS still supports V1 for REST
+// requests; unlike the previous implementation this never requires a bucket
+// with anonymous write permission.
+func (a *OSSAdapter) sign(req *http.Request, key string) {
+	date := time.Now().UTC().Format(http.TimeFormat)
+	req.Header.Set("Date", date)
+	canonicalResource := "/" + a.bucket + "/" + strings.TrimLeft(key, "/")
+	stringToSign := strings.Join([]string{
+		req.Method,
+		req.Header.Get("Content-MD5"),
+		req.Header.Get("Content-Type"),
+		date,
+		canonicalResource,
+	}, "\n")
+	mac := hmac.New(sha1.New, []byte(a.accessSecret))
+	_, _ = mac.Write([]byte(stringToSign))
+	signature := base64.StdEncoding.EncodeToString(mac.Sum(nil))
+	req.Header.Set("Authorization", "OSS "+a.accessKeyID+":"+signature)
 }

@@ -20,6 +20,13 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 0
+
+      - name: Scan repository secrets
+        uses: gitleaks/gitleaks-action@dcedce43c6f43de0b836d1fe38946645c9c638dc
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Setup Node
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
@@ -47,10 +54,28 @@ jobs:
           go vet ./...
           go test -race -coverprofile=coverage.out ./...
 
+      - name: Check Go paid access vulnerabilities
+        working-directory: services/paid-access
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.7.0 ./...
+
   check-go-api:
     name: Check Go API service
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: freedompost_test
+          POSTGRES_USER: freedompost
+          POSTGRES_PASSWORD: test-password
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U freedompost -d freedompost_test"
+          --health-interval 2s
+          --health-timeout 5s
+          --health-retries 15
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
@@ -73,7 +98,17 @@ jobs:
 
       - name: go test (race detector + coverage)
         working-directory: services/api
-        run: go test -race -coverprofile=coverage.out -covermode=atomic ./...
+        env:
+          DATABASE_URL: postgres://freedompost:test-password@127.0.0.1:5432/freedompost_test?sslmode=disable
+          TEST_DATABASE_URL: postgres://freedompost:test-password@127.0.0.1:5432/freedompost_test?sslmode=disable
+          MIGRATIONS_DIR: ../../deploy/migrations
+        run: |
+          go run ./cmd/server -migrate
+          go test -race -coverprofile=coverage.out -covermode=atomic ./...
+
+      - name: govulncheck
+        working-directory: services/api
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.7.0 ./...
 
       - name: Upload coverage
         uses: actions/upload-artifact@v4

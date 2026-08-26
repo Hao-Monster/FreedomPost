@@ -2,7 +2,13 @@
 // This package has no dependencies on any infrastructure (no pgx, no redis, no http).
 package domain
 
-import "time"
+import (
+	"bytes"
+	"encoding/json"
+	"errors"
+	"io"
+	"time"
+)
 
 // ─── Post ────────────────────────────────────────────────────────────────────
 
@@ -139,6 +145,7 @@ type CreateCommentInput struct {
 // linked to a new comment.
 type PendingAttachment struct {
 	ID              string
+	ClaimToken      string
 	Name            string
 	MimeType        string
 	SizeBytes       int64
@@ -166,6 +173,9 @@ type Attachment struct {
 	Width            *int      `json:"width,omitempty"`
 	Height           *int      `json:"height,omitempty"`
 	SHA256           string    `json:"sha256,omitempty"`
+	ClaimToken       string    `json:"claimToken,omitempty"`
+	ClaimTokenHash   string    `json:"-"`
+	UploaderType     string    `json:"uploaderType,omitempty"`
 	CreatedAt        time.Time `json:"createdAt"`
 }
 
@@ -204,6 +214,12 @@ type AffiliateProductView struct {
 	CommissionCents       int `json:"commissionCents"`       // total = base + markup
 }
 
+const MaxAffiliateMarkupPercent = 1000
+
+func ValidAffiliateMarkupPercent(value int) bool {
+	return value >= 0 && value <= MaxAffiliateMarkupPercent
+}
+
 // BuildAffiliateProductView computes server-authoritative customer price and
 // affiliate earnings. Matches TypeScript buildAffiliateProductView() exactly
 // (including Math.round behaviour: (a*b + 50) / 100 for rounding half-up).
@@ -222,20 +238,98 @@ func BuildAffiliateProductView(product Product, markupPercent int) AffiliateProd
 }
 
 type ProductInput struct {
-	Title           string
-	Summary         string
-	Description     string
-	Category        string
-	CoverURL        string
-	LinkURL         string
-	PriceCents      int
-	CompareAtCents  *int
-	Currency        string
-	CommissionCents int
-	Stock           int
-	SoldCount       int
-	Status          string
-	SortOrder       int
+	Title           string `json:"title"`
+	Summary         string `json:"summary"`
+	Description     string `json:"description"`
+	Category        string `json:"category"`
+	CoverURL        string `json:"coverUrl"`
+	LinkURL         string `json:"linkUrl"`
+	PriceCents      int    `json:"priceCents"`
+	CompareAtCents  *int   `json:"compareAtCents"`
+	Currency        string `json:"currency"`
+	CommissionCents int    `json:"commissionCents"`
+	Stock           int    `json:"stock"`
+	SoldCount       int    `json:"soldCount"`
+	Status          string `json:"status"`
+	SortOrder       int    `json:"sortOrder"`
+	priceCentsSet   bool
+	compareAtSet    bool
+	stockSet        bool
+	sortOrderSet    bool
+}
+
+// HasRequiredJSONFields distinguishes omitted numeric fields from their valid
+// zero values. Admin create/update requests must carry the complete product
+// contract so omission cannot silently turn unlimited inventory into sold out.
+func (p ProductInput) HasRequiredJSONFields() bool {
+	return p.priceCentsSet && p.compareAtSet && p.stockSet && p.sortOrderSet
+}
+
+// UnmarshalJSON preserves the legacy imageUrl input while keeping strict
+// unknown-field rejection for the public admin contract.
+func (p *ProductInput) UnmarshalJSON(data []byte) error {
+	var wire struct {
+		Title           string `json:"title"`
+		Summary         string `json:"summary"`
+		Description     string `json:"description"`
+		Category        string `json:"category"`
+		CoverURL        string `json:"coverUrl"`
+		ImageURL        string `json:"imageUrl"`
+		LinkURL         string `json:"linkUrl"`
+		PriceCents      *int   `json:"priceCents"`
+		CompareAtCents  *int   `json:"compareAtCents"`
+		Currency        string `json:"currency"`
+		CommissionCents int    `json:"commissionCents"`
+		Stock           *int   `json:"stock"`
+		SoldCount       int    `json:"soldCount"`
+		Status          string `json:"status"`
+		SortOrder       *int   `json:"sortOrder"`
+	}
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&wire); err != nil {
+		return err
+	}
+	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		if err == nil {
+			return errors.New("request body must contain exactly one JSON value")
+		}
+		return err
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(data, &fields); err != nil {
+		return err
+	}
+	coverURL := wire.CoverURL
+	if coverURL == "" {
+		coverURL = wire.ImageURL
+	}
+	priceCents := 0
+	if wire.PriceCents != nil {
+		priceCents = *wire.PriceCents
+	}
+	stock := 0
+	if wire.Stock != nil {
+		stock = *wire.Stock
+	}
+	sortOrder := 0
+	if wire.SortOrder != nil {
+		sortOrder = *wire.SortOrder
+	}
+	_, priceCentsSet := fields["priceCents"]
+	_, compareAtSet := fields["compareAtCents"]
+	_, stockSet := fields["stock"]
+	_, sortOrderSet := fields["sortOrder"]
+	*p = ProductInput{
+		Title: wire.Title, Summary: wire.Summary, Description: wire.Description,
+		Category: wire.Category, CoverURL: coverURL, LinkURL: wire.LinkURL,
+		PriceCents: priceCents, CompareAtCents: wire.CompareAtCents,
+		Currency: wire.Currency, CommissionCents: wire.CommissionCents,
+		Stock: stock, SoldCount: wire.SoldCount, Status: wire.Status,
+		SortOrder: sortOrder, priceCentsSet: priceCentsSet,
+		compareAtSet: compareAtSet, stockSet: stockSet, sortOrderSet: sortOrderSet,
+	}
+	return nil
 }
 
 // ─── Tool ────────────────────────────────────────────────────────────────────
@@ -276,13 +370,14 @@ type AffiliateStatus string
 
 const (
 	AffiliateStatusActive   AffiliateStatus = "active"
-	AffiliateStatusInactive AffiliateStatus = "inactive"
+	AffiliateStatusDisabled AffiliateStatus = "disabled"
 )
 
 type Affiliate struct {
 	ID                   string          `json:"id"`
 	WechatID             string          `json:"wechatId"`
 	PasswordHash         string          `json:"-"`
+	CredentialVersion    int             `json:"-"`
 	Status               AffiliateStatus `json:"status"`
 	DefaultMarkupPercent int             `json:"defaultMarkupPercent"`
 	CreatedAt            time.Time       `json:"createdAt"`
@@ -297,41 +392,41 @@ type AffiliateListItem struct {
 }
 
 type AffiliateDashboard struct {
-	Affiliate    Affiliate        `json:"affiliate"`
-	TotalClicks  int              `json:"totalClicks"`
-	UniqueClicks int              `json:"uniqueClicks"`
-	Orders       []AffiliateOrder `json:"orders"`
+	Affiliate              Affiliate        `json:"affiliate"`
+	TotalClicks            int              `json:"totalClicks"`
+	UniqueClicks           int              `json:"uniqueClicks"`
+	CompletedOrders        int              `json:"completedOrders"`
+	PendingCommissionCents int              `json:"pendingCommissionCents"`
+	PaidCommissionCents    int              `json:"paidCommissionCents"`
+	Orders                 []AffiliateOrder `json:"orders"`
 }
 
 type AffiliateOrder struct {
-	ID                    string    `json:"id"`
-	OrderCode             string    `json:"orderCode"`
-	AffiliateID           string    `json:"affiliateId"`
-	AffiliateWechatID     string    `json:"affiliateWechatId"`
-	ProductID             string    `json:"productId"`
-	ProductTitle          string    `json:"productTitle"`
-	PriceCents            int       `json:"priceCents"`
-	CustomerPriceCents    int       `json:"customerPriceCents"`
-	CommissionCents       int       `json:"commissionCents"`
-	BaseCommissionCents   int       `json:"baseCommissionCents"`
-	MarkupCommissionCents int       `json:"markupCommissionCents"`
-	Currency              string    `json:"currency"`
-	Status                string    `json:"status"`
-	OrderStatus           string    `json:"orderStatus"`
-	CommissionStatus      string    `json:"commissionStatus"`
-	Notes                 string    `json:"notes,omitempty"`
-	CreatedAt             time.Time `json:"createdAt"`
-	UpdatedAt             time.Time `json:"updatedAt"`
+	ID                    string     `json:"id"`
+	OrderCode             string     `json:"orderCode"`
+	AffiliateID           string     `json:"affiliateId"`
+	AffiliateWechatID     string     `json:"affiliateWechatId"`
+	ProductID             string     `json:"productId"`
+	ProductTitle          string     `json:"productTitle"`
+	PriceCents            int        `json:"priceCents"`
+	CustomerPriceCents    int        `json:"customerPriceCents"`
+	CommissionCents       int        `json:"commissionCents"`
+	BaseCommissionCents   int        `json:"baseCommissionCents"`
+	MarkupCommissionCents int        `json:"markupCommissionCents"`
+	Currency              string     `json:"currency"`
+	Status                string     `json:"status"`
+	OrderStatus           string     `json:"orderStatus"`
+	CommissionStatus      string     `json:"commissionStatus"`
+	Notes                 string     `json:"notes,omitempty"`
+	CompletedAt           *time.Time `json:"completedAt"`
+	CommissionPaidAt      *time.Time `json:"commissionPaidAt"`
+	CreatedAt             time.Time  `json:"createdAt"`
+	UpdatedAt             time.Time  `json:"updatedAt"`
 }
 
 type CreateOrderInput struct {
-	AffiliateID           string
-	ProductID             string
-	CustomerContact       string
-	CustomerPriceCents    int
-	CommissionCents       int
-	BaseCommissionCents   int
-	MarkupCommissionCents int
+	AffiliateWechatID string
+	ProductSlug       string
 }
 
 // ─── Admin ───────────────────────────────────────────────────────────────────
@@ -342,9 +437,10 @@ type AdminSession struct {
 }
 
 type AffiliateSession struct {
-	AffiliateID string    `json:"affiliateId"`
-	WechatID    string    `json:"wechatId"`
-	CreatedAt   time.Time `json:"createdAt"`
+	AffiliateID       string    `json:"affiliateId"`
+	WechatID          string    `json:"wechatId"`
+	CredentialVersion int       `json:"credentialVersion"`
+	CreatedAt         time.Time `json:"createdAt"`
 }
 
 // ─── Benefit ─────────────────────────────────────────────────────────────────
