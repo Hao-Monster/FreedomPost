@@ -20,8 +20,8 @@ describe("market product actions", () => {
   });
 
   it("shows the configured commission on product cards and affiliate pricing rows", () => {
-    expect(portalScript).toContain("market-product-commission");
+    expect(portalScript).toContain('<span class="market-product-share-label">分享赚钱</span><span class="market-product-commission">每单赚');
     expect(portalScript).toContain("专属链接下单每单赚");
-    expect(portalStyles).toContain(".market-product-commission");
+    expect(portalStyles).toMatch(/\.market-product-share \.button\s*\{[^}]*flex-direction:\s*column;[^}]*gap:\s*1px;/s);
   });
 });
