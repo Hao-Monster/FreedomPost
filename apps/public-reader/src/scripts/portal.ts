@@ -618,7 +618,7 @@ function renderMarketProduct(product: StoreProduct) {
       <div class="market-product-bottom"><div class="market-product-price"><strong>${formatCurrency(displayPrice, product.currency)}</strong>${compareAt}</div><span>${availability}</span></div>
       <div class="market-product-actions">
         <button class="market-details-button" type="button" data-market-action="details" data-product-slug="${escapeAttribute(product.slug)}">查看详情 <i data-lucide="arrow-up-right"></i></button>
-        <div class="market-product-share"><button class="button secondary" type="button" data-market-action="share" data-product-slug="${escapeAttribute(product.slug)}">分享赚钱</button><span class="market-product-commission">每单赚${escapeHtml(formatCommissionEarnings(product.commissionCents, product.currency))}</span></div>
+        <div class="market-product-share"><button class="button secondary" type="button" data-market-action="share" data-product-slug="${escapeAttribute(product.slug)}"><span class="market-product-share-label">分享赚钱</span><span class="market-product-commission">每单赚${escapeHtml(formatCommissionEarnings(product.commissionCents, product.currency))}</span></button></div>
         <button class="button primary" type="button" data-market-action="order" data-product-slug="${escapeAttribute(product.slug)}" ${product.stock === 0 ? "disabled" : ""}>立即下单</button>
       </div>
     </div>

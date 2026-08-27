@@ -1320,29 +1320,28 @@ svg {
 
 .market-product-share {
   min-width: 0;
-  display: grid;
-  align-content: start;
-  gap: 5px;
 }
 
 .market-product-share .button {
   width: 100%;
+  flex-direction: column;
+  gap: 1px;
+  padding-block: 5px;
+  border-color: color-mix(in srgb, var(--portal-accent) 62%, var(--portal-line));
+  color: var(--portal-accent);
+  line-height: 1;
+}
+
+.market-product-share-label {
+  line-height: 1.05;
 }
 
 .market-product-commission {
-  min-height: 22px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  padding: 2px 7px;
-  border: 1px solid color-mix(in srgb, var(--portal-accent) 62%, var(--portal-line));
-  border-radius: 999px;
-  background: color-mix(in srgb, var(--portal-accent) 18%, var(--portal-panel));
-  box-shadow: 0 0 16px color-mix(in srgb, var(--portal-accent) 18%, transparent);
-  color: var(--portal-accent);
-  font-size: 11px;
-  font-weight: 850;
-  line-height: 1.2;
+  display: block;
+  color: color-mix(in srgb, currentColor 82%, var(--portal-muted));
+  font-size: 10px;
+  font-weight: 750;
+  line-height: 1.05;
   white-space: nowrap;
 }
 
