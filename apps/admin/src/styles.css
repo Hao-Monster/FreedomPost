@@ -32,6 +32,19 @@ button {
   cursor: pointer;
 }
 
+button:disabled {
+  cursor: not-allowed;
+  opacity: 0.62;
+}
+
+input:focus-visible,
+select:focus-visible,
+textarea:focus-visible,
+button:focus-visible {
+  outline: 3px solid rgba(31, 122, 91, 0.24);
+  outline-offset: 2px;
+}
+
 .login-screen {
   min-height: 100vh;
   min-height: 100dvh;
@@ -682,6 +695,20 @@ button:hover {
   font-size: 11px;
 }
 
+.product-form-grid [aria-invalid="true"],
+.wide-field [aria-invalid="true"],
+.product-cover-row [aria-invalid="true"] {
+  border-color: #d92d20;
+  box-shadow: 0 0 0 2px rgba(217, 45, 32, 0.12);
+}
+
+.product-field-error {
+  display: block;
+  color: #b42318 !important;
+  font-size: 12px !important;
+  line-height: 1.45;
+}
+
 .wide-field textarea {
   min-height: 240px;
   padding: 10px;
@@ -732,6 +759,176 @@ button:hover {
   margin: 3px 0 10px;
   color: #667085;
   font-size: 13px;
+}
+
+.product-cover-row.invalid {
+  border-color: #d92d20;
+}
+
+.product-save-failure {
+  flex: 0 0 auto;
+  z-index: 19;
+  max-height: min(38vh, 360px);
+  display: grid;
+  gap: 8px;
+  overflow: auto;
+  padding: 12px 16px;
+  border-top: 1px solid #f4b9b2;
+  background: #fff7f6;
+  color: #5f1d16;
+  box-shadow: 0 -6px 18px rgba(86, 30, 24, 0.08);
+}
+
+.product-save-failure:focus {
+  outline: 3px solid rgba(217, 45, 32, 0.24);
+  outline-offset: -3px;
+}
+
+.product-save-failure-heading {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+}
+
+.product-save-failure-heading > div {
+  min-width: 0;
+  display: flex;
+  align-items: baseline;
+  gap: 9px;
+  flex-wrap: wrap;
+}
+
+.product-save-failure-heading strong {
+  color: #8f2118;
+  font-size: 15px;
+}
+
+.product-save-failure-heading span {
+  color: #8c514c;
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 11px;
+}
+
+.product-save-failure p {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.product-issue-list {
+  display: grid;
+  gap: 6px;
+  margin: 2px 0;
+  padding: 0;
+  list-style: none;
+}
+
+.product-issue-list button {
+  width: 100%;
+  height: auto;
+  min-height: 38px;
+  display: grid;
+  justify-items: start;
+  gap: 2px;
+  padding: 7px 9px;
+  border-color: #efc0ba;
+  color: #5f1d16;
+  text-align: left;
+  white-space: normal;
+}
+
+.product-issue-list button span {
+  color: #8c514c;
+  font-size: 12px;
+}
+
+.product-save-failure-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.product-save-failure-actions code {
+  max-width: 260px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-size: 11px;
+}
+
+.reauth-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 300;
+  display: grid;
+  place-items: center;
+  padding: 20px;
+  background: rgba(20, 27, 24, 0.55);
+  backdrop-filter: blur(3px);
+}
+
+.reauth-dialog {
+  width: min(430px, 100%);
+  display: grid;
+  gap: 16px;
+  padding: 20px;
+  border: 1px solid #cbd5c8;
+  border-radius: 10px;
+  background: #fff;
+  box-shadow: 0 24px 70px rgba(0, 0, 0, 0.28);
+}
+
+.reauth-heading {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+}
+
+.reauth-heading h2,
+.reauth-heading p {
+  margin: 0;
+}
+
+.reauth-heading h2 {
+  font-size: 19px;
+}
+
+.reauth-heading p {
+  margin-top: 4px;
+  color: #667085;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.reauth-dialog form {
+  display: grid;
+  gap: 12px;
+}
+
+.reauth-error {
+  margin: 0;
+  padding: 8px 10px;
+  border-radius: 6px;
+  background: #fff1f0;
+  color: #b42318;
+  font-size: 13px;
+}
+
+.reauth-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 2px;
+}
+
+.spin {
+  animation: spin 0.8s linear infinite;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
 }
 
 .product-toolbar {

@@ -10,11 +10,15 @@ import {
 } from "react";
 import { createRoot } from "react-dom/client";
 import {
+  CircleAlert,
   Bold,
   Code2,
+  Copy,
   ImagePlus,
   Italic,
+  KeyRound,
   Link2,
+  LoaderCircle,
   LogOut,
   Package,
   Plus,
@@ -43,6 +47,18 @@ import { focusEditorStart, insertBlockPlaceholderAtSelection } from "./editor-se
 import { createNewPostPayload } from "./new-post.js";
 import { startPendingMediaInsertion } from "./pending-media-insertion.js";
 import { PendingTaskBarrier } from "./pending-task-barrier.js";
+import {
+  failureFromProductIssues,
+  invalidProductResponseFailure,
+  networkProductFailure,
+  readProductApiFailure,
+  readReauthenticationFailure,
+  validateProductForSave,
+  type ProductField,
+  type ProductIssue,
+  type ProductOperation,
+  type ProductSaveFailure
+} from "./product-save-feedback.js";
 import "./styles.css";
 
 type AdminPost = {
@@ -90,6 +106,7 @@ type AdminProduct = {
   stock: number;
   soldCount: number;
   coverUrl: string | null;
+  linkUrl: string;
   status: "draft" | "published";
   sortOrder: number;
   createdAt: string;
@@ -227,6 +244,8 @@ function App() {
   async function fetchSession() {
     const response = await fetch("/api/admin/session", { credentials: "include" });
     if (response.ok) {
+      const body = await response.json().catch(() => null) as { session?: { username?: string } } | null;
+      if (body?.session?.username) setUsername(body.session.username);
       setAuthed(true);
       await Promise.all([loadPosts(), loadProducts(), loadTools(), loadDistribution()]);
     }
@@ -278,7 +297,7 @@ function App() {
     const response = await fetch("/api/admin/products", { credentials: "include" });
     if (!response.ok) return;
     const body = (await response.json()) as { items: AdminProduct[] };
-    setProducts(body.items);
+    setProducts(body.items.map((product) => ({ ...product, linkUrl: product.linkUrl ?? "" })));
   }
 
   async function loadTools() {
@@ -843,6 +862,7 @@ function App() {
         onOpenDistribution={() => { setWorkspace("distribution"); void loadDistribution(); }}
         onRefresh={loadProducts}
         onLogout={logout}
+        adminUsername={username}
         showToast={showToast}
         toast={toast}
       />
@@ -1112,7 +1132,7 @@ function App() {
   );
 }
 
-function ProductWorkspace({
+export function ProductWorkspace({
   products,
   setProducts,
   onOpenPosts,
@@ -1120,6 +1140,7 @@ function ProductWorkspace({
   onOpenTools,
   onRefresh,
   onLogout,
+  adminUsername,
   showToast,
   toast
 }: {
@@ -1130,48 +1151,274 @@ function ProductWorkspace({
   onOpenTools: () => void;
   onRefresh: () => Promise<void>;
   onLogout: () => Promise<void>;
+  adminUsername: string;
   showToast: (text: string) => void;
   toast: Toast | null;
 }) {
   const [activeId, setActiveId] = useState<string | null>(null);
+  const [productFailure, setProductFailure] = useState<{ operation: ProductOperation; details: ProductSaveFailure } | null>(null);
+  const [isCreatingProduct, setCreatingProduct] = useState(false);
+  const [isSavingProduct, setSavingProduct] = useState(false);
+  const [isReauthenticationOpen, setReauthenticationOpen] = useState(false);
+  const [reauthUsername, setReauthUsername] = useState(adminUsername);
+  const [reauthPassword, setReauthPassword] = useState("");
+  const [reauthError, setReauthError] = useState<string | null>(null);
+  const [isReauthenticating, setReauthenticating] = useState(false);
   const coverInputRef = useRef<HTMLInputElement | null>(null);
+  const productFailureRef = useRef<HTMLDivElement | null>(null);
+  const saveProductButtonRef = useRef<HTMLButtonElement | null>(null);
+  const reauthDialogRef = useRef<HTMLElement | null>(null);
+  const reauthPasswordRef = useRef<HTMLInputElement | null>(null);
+  const reauthReturnFocusRef = useRef<HTMLElement | null>(null);
+  const productFieldRefs = useRef<Partial<Record<ProductField, HTMLElement>>>({});
+  const creatingProductRef = useRef(false);
+  const savingProductRef = useRef(false);
+  const reauthenticatingRef = useRef(false);
   const activeProduct = useMemo(() => products.find((product) => product.id === activeId) ?? products[0], [products, activeId]);
 
   useEffect(() => {
     setActiveId((current) => current ?? products[0]?.id ?? null);
   }, [products]);
 
+  useEffect(() => {
+    setProductFailure(null);
+  }, [activeProduct?.id]);
+
+  useEffect(() => {
+    setReauthUsername(adminUsername);
+  }, [adminUsername]);
+
+  useEffect(() => {
+    if (!isReauthenticationOpen) return;
+    window.setTimeout(() => reauthPasswordRef.current?.focus(), 0);
+    const handleKeyDown = (event: globalThis.KeyboardEvent) => {
+      if (event.key === "Escape" && !reauthenticatingRef.current) {
+        event.preventDefault();
+        closeReauthentication();
+        return;
+      }
+      if (event.key !== "Tab") return;
+      const focusable = [...(reauthDialogRef.current?.querySelectorAll<HTMLElement>('button:not(:disabled), input:not(:disabled), [tabindex]:not([tabindex="-1"])') ?? [])];
+      if (focusable.length === 0) return;
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last?.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first?.focus();
+      }
+    };
+    document.addEventListener("keydown", handleKeyDown);
+    return () => document.removeEventListener("keydown", handleKeyDown);
+  }, [isReauthenticationOpen]);
+
   function patchProduct(patch: Partial<AdminProduct>) {
     if (!activeProduct) return;
-    setProducts((items) => items.map((item) => (item.id === activeProduct.id ? { ...item, ...patch } : item)));
+    const updated = { ...activeProduct, ...patch };
+    setProducts((items) => items.map((item) => (item.id === activeProduct.id ? updated : item)));
+    if (productFailure?.details.code === "INVALID_PRODUCT") {
+      const issues = validateProductForSave(updated);
+      setProductFailure(issues.length > 0 ? { operation: "save", details: failureFromProductIssues(issues, "save") } : null);
+    }
   }
 
   async function createProduct() {
-    const response = await fetch("/api/admin/products", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      credentials: "include",
-      body: JSON.stringify(defaultProductPayload())
-    });
-    if (!response.ok) return showToast("创建商品失败");
-    const created = (await response.json()) as AdminProduct;
-    setProducts((items) => [created, ...items]);
-    setActiveId(created.id);
-    showToast("商品草稿已创建");
+    if (creatingProductRef.current) return;
+    creatingProductRef.current = true;
+    setCreatingProduct(true);
+    try {
+      const response = await fetch("/api/admin/products", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        credentials: "include",
+        body: JSON.stringify(defaultProductPayload())
+      });
+      if (!response.ok) {
+        presentProductFailure(await readProductApiFailure(response, "create"), "create");
+        return;
+      }
+      const created = await readAdminProductResponse(response);
+      if (!created) {
+        presentProductFailure(invalidProductResponseFailure("create", response), "create");
+        return;
+      }
+      setProductFailure(null);
+      setProducts((items) => [created, ...items]);
+      setActiveId(created.id);
+      showToast("商品草稿已创建");
+    } catch {
+      presentProductFailure(networkProductFailure("create"), "create");
+    } finally {
+      creatingProductRef.current = false;
+      setCreatingProduct(false);
+    }
   }
 
   async function saveProduct() {
-    if (!activeProduct) return;
-    const response = await fetch(`/api/admin/products/${activeProduct.id}`, {
-      method: "PUT",
-      headers: { "content-type": "application/json" },
-      credentials: "include",
-      body: JSON.stringify(productPayload(activeProduct))
-    });
-    if (!response.ok) return showToast("保存失败，请检查商品信息");
-    const saved = (await response.json()) as AdminProduct;
-    setProducts((items) => items.map((item) => (item.id === saved.id ? saved : item)));
-    showToast(saved.status === "published" ? "商品已发布" : "商品草稿已保存");
+    if (!activeProduct || savingProductRef.current) return;
+    const issues = validateProductForSave(activeProduct);
+    if (issues.length > 0) {
+      presentProductFailure(failureFromProductIssues(issues, "save"), "save");
+      return;
+    }
+
+    savingProductRef.current = true;
+    setSavingProduct(true);
+    try {
+      const response = await fetch(`/api/admin/products/${activeProduct.id}`, {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        credentials: "include",
+        body: JSON.stringify(productPayload(activeProduct))
+      });
+      if (!response.ok) {
+        presentProductFailure(await readProductApiFailure(response, "save"), "save");
+        return;
+      }
+      const saved = await readAdminProductResponse(response);
+      if (!saved) {
+        presentProductFailure(invalidProductResponseFailure("save", response), "save");
+        return;
+      }
+      setProductFailure(null);
+      setProducts((items) => items.map((item) => (item.id === saved.id ? saved : item)));
+      showToast(saved.status === "published" ? "商品已发布" : "商品草稿已保存");
+    } catch {
+      presentProductFailure(networkProductFailure("save"), "save");
+    } finally {
+      savingProductRef.current = false;
+      setSavingProduct(false);
+    }
+  }
+
+  function presentProductFailure(details: ProductSaveFailure, operation: ProductOperation) {
+    setProductFailure({ operation, details });
+    showToast(`${operation === "create" ? "创建" : "保存"}失败，请查看具体原因`);
+    if (details.requiresReauthentication) {
+      openReauthentication();
+      return;
+    }
+    window.setTimeout(() => {
+      const firstField = details.issues[0]?.field;
+      ((firstField && productFieldRefs.current[firstField]) || productFailureRef.current)?.focus();
+    }, 0);
+  }
+
+  async function reauthenticate(event: FormEvent) {
+    event.preventDefault();
+    if (reauthenticatingRef.current) return;
+    reauthenticatingRef.current = true;
+    setReauthenticating(true);
+    setReauthError(null);
+    try {
+      const response = await fetch("/api/admin/login", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        credentials: "include",
+        body: JSON.stringify({ username: reauthUsername, password: reauthPassword })
+      });
+      if (!response.ok) {
+        setReauthError(await readReauthenticationFailure(response));
+        return;
+      }
+      setReauthenticationOpen(false);
+      setReauthPassword("");
+      setProductFailure(null);
+      showToast("登录已恢复，请再次保存商品");
+      restoreReauthenticationFocus();
+    } catch {
+      setReauthError("无法连接服务器，请检查网络后重试");
+    } finally {
+      reauthenticatingRef.current = false;
+      setReauthenticating(false);
+    }
+  }
+
+  function openReauthentication() {
+    if (!isReauthenticationOpen) {
+      reauthReturnFocusRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    }
+    setReauthError(null);
+    setReauthPassword("");
+    setReauthenticationOpen(true);
+  }
+
+  function closeReauthentication() {
+    setReauthenticationOpen(false);
+    setReauthPassword("");
+    setReauthError(null);
+    restoreReauthenticationFocus();
+  }
+
+  function restoreReauthenticationFocus() {
+    window.setTimeout(() => {
+      const target = reauthReturnFocusRef.current?.isConnected ? reauthReturnFocusRef.current : saveProductButtonRef.current;
+      target?.focus();
+      reauthReturnFocusRef.current = null;
+    }, 0);
+  }
+
+  async function copyRequestId() {
+    const requestId = productFailure?.details.requestId;
+    if (!requestId) return;
+    try {
+      await navigator.clipboard.writeText(requestId);
+      showToast("错误编号已复制");
+    } catch {
+      showToast(`请手动复制错误编号：${requestId}`);
+    }
+  }
+
+  function rememberProductField(field: ProductField, element: HTMLElement | null) {
+    if (element) productFieldRefs.current[field] = element;
+    else delete productFieldRefs.current[field];
+  }
+
+  function issueFor(field: ProductField): ProductIssue | undefined {
+    return productFailure?.details.issues.find((issue) => issue.field === field);
+  }
+
+  function fieldErrorId(field: ProductField): string | undefined {
+    return issueFor(field) ? `product-${field}-error` : undefined;
+  }
+
+  function renderFieldError(field: ProductField) {
+    const issue = issueFor(field);
+    if (!issue) return null;
+    return <small className="product-field-error" id={`product-${field}-error`}>{issue.message}；{issue.resolution}</small>;
+  }
+
+  function renderProductFailure() {
+    if (!productFailure) return null;
+    const { details, operation } = productFailure;
+    return (
+      <div className="product-save-failure" ref={productFailureRef} role="alert" aria-live="assertive" tabIndex={-1}>
+        <div className="product-save-failure-heading">
+          <CircleAlert size={20} aria-hidden="true" />
+          <div><strong>{details.title}</strong><span>{details.code}</span></div>
+        </div>
+        <p><strong>失败原因：</strong>{details.reason}</p>
+        <p><strong>解决办法：</strong>{details.solution}</p>
+        {details.issues.length > 0 && (
+          <ul className="product-issue-list">
+            {details.issues.map((issue) => (
+              <li key={`${issue.field}-${issue.code}`}>
+                <button type="button" onClick={() => (productFieldRefs.current[issue.field] ?? productFailureRef.current)?.focus()}>
+                  <strong>{issue.message}</strong><span>{issue.resolution}</span>
+                </button>
+              </li>
+            ))}
+          </ul>
+        )}
+        <div className="product-save-failure-actions">
+          {details.requiresReauthentication && <button type="button" onClick={openReauthentication}><KeyRound size={15} />重新登录</button>}
+          {details.retryable && <button type="button" onClick={() => void (operation === "create" ? createProduct() : saveProduct())}><RefreshCw size={15} />重试</button>}
+          {details.requestId && <button type="button" onClick={() => void copyRequestId()}><Copy size={15} />复制错误编号 <code>{details.requestId}</code></button>}
+        </div>
+      </div>
+    );
   }
 
   async function deleteProduct() {
@@ -1207,7 +1454,7 @@ function ProductWorkspace({
         </div>
         <div className="rail-head">
           <strong>商品管理</strong>
-          <button className="icon-button" type="button" onClick={createProduct} title="新建商品"><Plus size={17} /></button>
+          <button className="icon-button" type="button" onClick={() => void createProduct()} title="新建商品" aria-label="新建商品" disabled={isCreatingProduct}>{isCreatingProduct ? <LoaderCircle className="spin" size={17} /> : <Plus size={17} />}</button>
         </div>
         <div className="rail-actions">
           <button type="button" onClick={() => void onRefresh()}><RefreshCw size={15} />刷新</button>
@@ -1229,35 +1476,49 @@ function ProductWorkspace({
             <header className="editor-topbar"><div><strong>{activeProduct.title}</strong><span>/market/{activeProduct.slug}</span></div></header>
             <div className="editor-workspace product-workspace">
               <div className="product-form-grid">
-                <label className="title-field product-title-field"><span>商品名称</span><input value={activeProduct.title} onChange={(event) => patchProduct({ title: event.target.value })} /></label>
-                <label><span>分类</span><select value={activeProduct.category} onChange={(event) => patchProduct({ category: event.target.value })}><option value="service">服务</option><option value="digital">数字内容</option><option value="software">软件工具</option><option value="other">其它</option></select></label>
-                <label><span>价格</span><input type="number" min="0" step="0.01" value={formatPriceInput(activeProduct.priceCents)} onChange={(event) => patchProduct({ priceCents: priceToCents(event.target.value) })} /></label>
-                <label><span>分销佣金</span><input type="number" min="0" step="0.01" value={formatPriceInput(activeProduct.commissionCents)} onChange={(event) => patchProduct({ commissionCents: priceToCents(event.target.value) })} /><small>每笔确认成交订单的佣金</small></label>
-                <label><span>划线价（可选）</span><input type="number" min="0" step="0.01" value={activeProduct.compareAtCents === null ? "" : formatPriceInput(activeProduct.compareAtCents)} onChange={(event) => patchProduct({ compareAtCents: event.target.value ? priceToCents(event.target.value) : null })} /></label>
-                <label><span>币种</span><select value={activeProduct.currency} onChange={(event) => patchProduct({ currency: event.target.value })}><option value="CNY">CNY</option><option value="USD">USD</option></select></label>
-                <label><span>库存</span><input type="number" min="-1" step="1" value={activeProduct.stock} onChange={(event) => patchProduct({ stock: Number(event.target.value) || 0 })} /><small>-1 表示不限量</small></label>
-                <label><span>已售出</span><input type="number" min="0" step="1" value={activeProduct.soldCount} onChange={(event) => patchProduct({ soldCount: Number(event.target.value) || 0 })} /><small>商城展示的累计销量</small></label>
-                <label><span>排序</span><input type="number" value={activeProduct.sortOrder} onChange={(event) => patchProduct({ sortOrder: Number(event.target.value) || 0 })} /></label>
-                <label><span>发布状态</span><select value={activeProduct.status} onChange={(event) => patchProduct({ status: event.target.value as AdminProduct["status"] })}><option value="draft">草稿</option><option value="published">公开发布</option></select></label>
+                <label className="title-field product-title-field"><span>商品名称</span><input ref={(element) => rememberProductField("title", element)} required maxLength={120} aria-invalid={Boolean(issueFor("title"))} aria-describedby={fieldErrorId("title")} value={activeProduct.title} onChange={(event) => patchProduct({ title: event.target.value })} />{renderFieldError("title")}</label>
+                <label><span>分类</span><select ref={(element) => rememberProductField("category", element)} aria-invalid={Boolean(issueFor("category"))} aria-describedby={fieldErrorId("category")} value={activeProduct.category} onChange={(event) => patchProduct({ category: event.target.value })}><option value="service">服务</option><option value="digital">数字内容</option><option value="software">软件工具</option><option value="other">其它</option></select>{renderFieldError("category")}</label>
+                <label><span>价格</span><input ref={(element) => rememberProductField("priceCents", element)} type="number" min="0" max="1000000" step="0.01" aria-invalid={Boolean(issueFor("priceCents"))} aria-describedby={fieldErrorId("priceCents")} value={formatPriceInput(activeProduct.priceCents)} onChange={(event) => patchProduct({ priceCents: priceToCents(event.target.value) })} />{renderFieldError("priceCents")}</label>
+                <label><span>分销佣金</span><input ref={(element) => rememberProductField("commissionCents", element)} type="number" min="0" max="1000000" step="0.01" aria-invalid={Boolean(issueFor("commissionCents"))} aria-describedby={fieldErrorId("commissionCents")} value={formatPriceInput(activeProduct.commissionCents)} onChange={(event) => patchProduct({ commissionCents: priceToCents(event.target.value) })} /><small>每笔确认成交订单的佣金</small>{renderFieldError("commissionCents")}</label>
+                <label><span>划线价（可选）</span><input ref={(element) => rememberProductField("compareAtCents", element)} type="number" min="0" max="1000000" step="0.01" aria-invalid={Boolean(issueFor("compareAtCents"))} aria-describedby={fieldErrorId("compareAtCents")} value={activeProduct.compareAtCents === null ? "" : formatPriceInput(activeProduct.compareAtCents)} onChange={(event) => patchProduct({ compareAtCents: event.target.value ? priceToCents(event.target.value) : null })} />{renderFieldError("compareAtCents")}</label>
+                <label><span>币种</span><select ref={(element) => rememberProductField("currency", element)} aria-invalid={Boolean(issueFor("currency"))} aria-describedby={fieldErrorId("currency")} value={activeProduct.currency} onChange={(event) => patchProduct({ currency: event.target.value })}><option value="CNY">CNY</option><option value="USD">USD</option></select>{renderFieldError("currency")}</label>
+                <label><span>库存</span><input ref={(element) => rememberProductField("stock", element)} type="number" min="-1" max="1000000" step="1" aria-invalid={Boolean(issueFor("stock"))} aria-describedby={fieldErrorId("stock")} value={activeProduct.stock} onChange={(event) => patchProduct({ stock: numberInputValue(event.target.value) })} /><small>-1 表示不限量</small>{renderFieldError("stock")}</label>
+                <label><span>已售出</span><input ref={(element) => rememberProductField("soldCount", element)} type="number" min="0" max="1000000" step="1" aria-invalid={Boolean(issueFor("soldCount"))} aria-describedby={fieldErrorId("soldCount")} value={activeProduct.soldCount} onChange={(event) => patchProduct({ soldCount: numberInputValue(event.target.value) })} /><small>商城展示的累计销量</small>{renderFieldError("soldCount")}</label>
+                <label><span>排序</span><input ref={(element) => rememberProductField("sortOrder", element)} type="number" min="-100000" max="100000" step="1" aria-invalid={Boolean(issueFor("sortOrder"))} aria-describedby={fieldErrorId("sortOrder")} value={activeProduct.sortOrder} onChange={(event) => patchProduct({ sortOrder: numberInputValue(event.target.value) })} />{renderFieldError("sortOrder")}</label>
+                <label><span>发布状态</span><select ref={(element) => rememberProductField("status", element)} aria-invalid={Boolean(issueFor("status"))} aria-describedby={fieldErrorId("status")} value={activeProduct.status} onChange={(event) => patchProduct({ status: event.target.value as AdminProduct["status"] })}><option value="draft">草稿</option><option value="published">公开发布</option></select>{renderFieldError("status")}</label>
               </div>
-              <label className="wide-field"><span>一句话简介</span><input maxLength={500} value={activeProduct.summary} onChange={(event) => patchProduct({ summary: event.target.value })} /></label>
-              <div className="product-cover-row">
+              <label className="wide-field"><span>一句话简介</span><input ref={(element) => rememberProductField("summary", element)} required maxLength={500} aria-invalid={Boolean(issueFor("summary"))} aria-describedby={fieldErrorId("summary")} value={activeProduct.summary} onChange={(event) => patchProduct({ summary: event.target.value })} />{renderFieldError("summary")}</label>
+              <div className={`product-cover-row${issueFor("coverUrl") ? " invalid" : ""}`}>
                 <div className="product-cover-preview">{activeProduct.coverUrl ? <img src={activeProduct.coverUrl} alt="商品封面" /> : <Package size={30} />}</div>
-                <div><strong>商品封面</strong><p>上传后的图片存入现有 R2 存储。</p><button type="button" onClick={() => coverInputRef.current?.click()}><ImagePlus size={15} />上传封面</button><input ref={coverInputRef} className="hidden-input" type="file" accept="image/*" onChange={(event) => { void uploadCover(event.target.files); event.target.value = ""; }} /></div>
+                <div><strong>商品封面</strong><p>上传后的图片存入现有 R2 存储。</p><button ref={(element) => rememberProductField("coverUrl", element)} type="button" aria-invalid={Boolean(issueFor("coverUrl"))} aria-describedby={fieldErrorId("coverUrl")} onClick={() => coverInputRef.current?.click()}><ImagePlus size={15} />上传封面</button>{renderFieldError("coverUrl")}<input ref={coverInputRef} className="hidden-input" type="file" accept="image/*" onChange={(event) => { void uploadCover(event.target.files); event.target.value = ""; }} /></div>
               </div>
-              <label className="wide-field"><span>商品详情</span><textarea rows={12} maxLength={12000} value={activeProduct.description} onChange={(event) => patchProduct({ description: event.target.value })} /></label>
+              <label className="wide-field"><span>商品详情</span><textarea ref={(element) => rememberProductField("description", element)} required rows={12} maxLength={12000} aria-invalid={Boolean(issueFor("description"))} aria-describedby={fieldErrorId("description")} value={activeProduct.description} onChange={(event) => patchProduct({ description: event.target.value })} />{renderFieldError("description")}</label>
             </div>
-            <div className="toolbar product-toolbar"><span className="product-status-note">{activeProduct.status === "published" ? "公开页可见" : "仅后台可见"}</span><span className="toolbar-fill" /><button className="danger-button" type="button" onClick={() => void deleteProduct()}><Trash2 size={15} />删除</button><button className="primary" type="button" onClick={() => void saveProduct()}><Save size={15} />保存</button></div>
+            {renderProductFailure()}
+            <div className="toolbar product-toolbar"><span className="product-status-note">{activeProduct.status === "published" ? "公开页可见" : "仅后台可见"}</span><span className="toolbar-fill" /><button className="danger-button" type="button" onClick={() => void deleteProduct()} disabled={isSavingProduct}><Trash2 size={15} />删除</button><button ref={saveProductButtonRef} className="primary" type="button" onClick={() => void saveProduct()} disabled={isSavingProduct}>{isSavingProduct ? <LoaderCircle className="spin" size={15} /> : <Save size={15} />}{isSavingProduct ? "保存中…" : "保存"}</button></div>
           </>
-        ) : <div className="empty-state">暂无商品，点击左上角加号创建第一个商品。</div>}
+        ) : <><div className="empty-state">暂无商品，点击左上角加号创建第一个商品。</div>{renderProductFailure()}</>}
       </section>
-      {toast && <div className="toast">{toast.text}</div>}
+      {isReauthenticationOpen && (
+        <div className="reauth-backdrop">
+          <section ref={reauthDialogRef} className="reauth-dialog" role="dialog" aria-modal="true" aria-labelledby="reauth-title" aria-describedby="reauth-description">
+            <div className="reauth-heading"><KeyRound size={22} aria-hidden="true" /><div><h2 id="reauth-title">重新登录</h2><p id="reauth-description">登录状态已过期。重新登录不会刷新页面或清除未保存的商品内容。</p></div></div>
+            <form onSubmit={reauthenticate}>
+              <label><span>用户名</span><input autoComplete="username" value={reauthUsername} onChange={(event) => setReauthUsername(event.target.value)} /></label>
+              <label><span>密码</span><input ref={reauthPasswordRef} type="password" autoComplete="current-password" value={reauthPassword} onChange={(event) => setReauthPassword(event.target.value)} /></label>
+              {reauthError && <p className="reauth-error" role="alert">{reauthError}</p>}
+              <div className="reauth-actions"><button type="button" onClick={closeReauthentication} disabled={isReauthenticating}>稍后处理</button><button className="primary" type="submit" disabled={isReauthenticating || !reauthUsername.trim() || !reauthPassword}>{isReauthenticating ? <LoaderCircle className="spin" size={15} /> : <KeyRound size={15} />}{isReauthenticating ? "登录中…" : "重新登录"}</button></div>
+            </form>
+          </section>
+        </div>
+      )}
+      {toast && <div className="toast" role="status" aria-live="polite">{toast.text}</div>}
     </main>
   );
 }
 
 function defaultProductPayload(): Omit<AdminProduct, "id" | "slug" | "createdAt" | "updatedAt"> {
-  return { title: "未命名商品", summary: "请填写商品简介", description: "请填写商品详情", category: "service", priceCents: 0, commissionCents: 0, compareAtCents: null, currency: "CNY", stock: -1, soldCount: 0, coverUrl: null, status: "draft", sortOrder: 0 };
+  return { title: "未命名商品", summary: "请填写商品简介", description: "请填写商品详情", category: "service", priceCents: 0, commissionCents: 0, compareAtCents: null, currency: "CNY", stock: -1, soldCount: 0, coverUrl: null, linkUrl: "", status: "draft", sortOrder: 0 };
 }
 
 function ToolWorkspace({
@@ -1561,9 +1822,23 @@ function productPayload(product: AdminProduct) {
   return payload;
 }
 
+async function readAdminProductResponse(response: Response): Promise<AdminProduct | null> {
+  const body = await response.json().catch(() => null) as unknown;
+  if (!body || typeof body !== "object") return null;
+  const record = body as Record<string, unknown>;
+  const candidate = record.product && typeof record.product === "object" ? record.product as Record<string, unknown> : record;
+  if (typeof candidate.id !== "string" || typeof candidate.slug !== "string" || typeof candidate.title !== "string") return null;
+  return { ...candidate, linkUrl: typeof candidate.linkUrl === "string" ? candidate.linkUrl : "" } as AdminProduct;
+}
+
+function numberInputValue(value: string): number {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
 function priceToCents(value: string): number {
   const price = Number(value);
-  return Number.isFinite(price) && price >= 0 ? Math.round(price * 100) : 0;
+  return Number.isFinite(price) ? Math.round(price * 100) : 0;
 }
 
 function formatPriceInput(cents: number): string {
@@ -2002,4 +2277,5 @@ function formatDate(value: string): string {
   }).format(new Date(value));
 }
 
-createRoot(document.getElementById("root")!).render(<App />);
+const appRoot = document.getElementById("root");
+if (appRoot) createRoot(appRoot).render(<App />);
