@@ -78,6 +78,11 @@ func TestRenderBasicMarkdown(t *testing.T) {
 			contains: []string{"<img"},
 		},
 		{
+			name:     "local upload image",
+			input:    "![已转存图片](/api/uploads/owned-image.png)",
+			contains: []string{`src="/api/uploads/owned-image.png"`},
+		},
+		{
 			name:     "horizontal rule",
 			input:    "---",
 			contains: []string{"<hr"},

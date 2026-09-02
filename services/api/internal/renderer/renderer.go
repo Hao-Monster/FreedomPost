@@ -363,10 +363,13 @@ func buildPolicy() *bluemonday.Policy {
 	// Links
 	p.AllowAttrs("href", "target", "rel", "class", "download").OnElements("a")
 	p.AllowURLSchemes("http", "https", "mailto")
+	// Imported and locally uploaded assets are served from /api/uploads. These
+	// same-origin paths have no URL scheme, so they must be explicitly allowed
+	// or the sanitizer removes an image's src before the post save can claim it.
+	p.AllowRelativeURLs(true)
 
 	// Images (title for hover tooltip, matching TS renderer)
 	p.AllowAttrs("src", "alt", "title", "loading", "class").OnElements("img")
-	p.AllowURLSchemes("http", "https", "/")
 
 	// Code blocks (our custom markup — no <button>; TS sanitizer strips buttons)
 	p.AllowAttrs("class", "data-lang").OnElements("div", "span", "code", "pre")
