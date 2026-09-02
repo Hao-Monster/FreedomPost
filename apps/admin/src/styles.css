@@ -565,6 +565,43 @@ button:hover {
   text-align: center;
 }
 
+.editor-media-import-error {
+  display: grid;
+  gap: 8px;
+  margin: 16px 0;
+  padding: 14px;
+  border: 1px solid #d9988e;
+  border-radius: 8px;
+  background: #fff7f5;
+  color: #792d24;
+  font-family: ui-sans-serif, system-ui, "Microsoft YaHei", sans-serif;
+  font-size: 14px;
+}
+
+.editor-media-import-error > span {
+  color: #744b45;
+}
+
+.editor-media-import-error > div {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.editor-media-import-error button {
+  padding: 5px 9px;
+  border: 1px solid #c7786e;
+  border-radius: 5px;
+  background: #fff;
+  color: #792d24;
+  cursor: pointer;
+}
+
+.editor-media-import-error.is-retrying {
+  opacity: 0.65;
+  pointer-events: none;
+}
+
 .editor-youtube {
   position: relative;
   width: 100%;

@@ -41,6 +41,14 @@ import {
   youtubeDirective
 } from "@freedompost/shared";
 import { editorCalloutHtml } from "./editor-callout.js";
+import {
+  imageImportFailureHtml,
+  localizePastedImages,
+  type ImageImportFailure,
+  type ImportedImageClaim,
+  type ImportedImageFile,
+  type PendingImageImport
+} from "./editor-image-import.js";
 import { editorImageHtml, editorImagesMarkdown, editorYouTubeHtml } from "./editor-media.js";
 import { sanitizePastedEditorHtml } from "./editor-paste.js";
 import { focusEditorStart, insertBlockPlaceholderAtSelection } from "./editor-selection.js";
@@ -90,6 +98,7 @@ type UploadedFile = {
   storageProvider: "local" | "oss" | "r2";
   storageKey: string;
   storedFilename: string;
+  claimToken?: string;
 };
 
 type AdminProduct = {
@@ -211,9 +220,13 @@ function App() {
   const [isSavingPost, setSavingPost] = useState(false);
   const editorRef = useRef<HTMLDivElement | null>(null);
   const attachmentInputRef = useRef<HTMLInputElement | null>(null);
+  const imageReplacementInputRef = useRef<HTMLInputElement | null>(null);
+  const imageReplacementTargetRef = useRef<string | null>(null);
   const savedRangeRef = useRef<Range | null>(null);
   const focusCreatedPostRef = useRef<string | null>(null);
   const pendingMediaRef = useRef(new PendingTaskBarrier());
+  const importedImageClaimsRef = useRef(new Map<string, ImportedImageClaim>());
+  const failedImageImportsRef = useRef(new Map<string, PendingImageImport>());
   const activePost = useMemo(() => posts.find((post) => post.id === activeId) ?? posts[0], [posts, activeId]);
 
   useEffect(() => {
@@ -222,6 +235,8 @@ function App() {
 
   useEffect(() => {
     if (!activePost || !editorRef.current) return;
+    importedImageClaimsRef.current.clear();
+    failedImageImportsRef.current.clear();
     editorRef.current.innerHTML = markdownToEditorHtml(activePost.markdown);
     if (focusCreatedPostRef.current === activePost.id) {
       focusCreatedPostRef.current = null;
@@ -371,19 +386,28 @@ function App() {
       }
 
       const markdown = editorRef.current ? editorHtmlToMarkdown(editorRef.current) : activePost.markdown;
+      const unresolvedImageCount = editorRef.current?.querySelectorAll('[data-fp-type="image-import-error"]').length ?? 0;
+      if (unresolvedImageCount > 0) {
+        showToast(`有 ${unresolvedImageCount} 张图片尚未转存；请重试、上传本地图片或删除后再保存`);
+        return;
+      }
+      const importedImages = [...importedImageClaimsRef.current.values()]
+        .filter((claim) => markdown.includes(claim.url))
+        .map(({ id, claimToken }) => ({ id, claimToken }));
       const response = await fetch(`/api/admin/posts/${activePost.id}`, {
         method: "PUT",
         headers: { "content-type": "application/json" },
         credentials: "include",
-        body: JSON.stringify({ title: activePost.title, markdown, visibility: activePost.visibility, priceCents: activePost.priceCents, currency: activePost.currency })
+        body: JSON.stringify({ title: activePost.title, markdown, visibility: activePost.visibility, priceCents: activePost.priceCents, currency: activePost.currency, importedImages })
       });
 
       if (!response.ok) {
-        showToast("保存失败");
+        showToast(await readImageImportApiMessage(response, "保存失败"));
         return;
       }
 
       const saved = (await response.json()) as AdminPost;
+      importedImageClaimsRef.current.clear();
       setPosts((items) => items.map((item) => (item.id === saved.id ? saved : item)));
       showToast(saved.visibility === "private" ? "保存成功，仅自己可见" : saved.visibility === "paid" ? "保存成功，购买后可见" : "保存成功，文章已公开");
     } finally {
@@ -461,16 +485,30 @@ function App() {
     }
 
     try {
+      let pastedResult: Awaited<ReturnType<typeof localizePastedImages>> = null;
+      let pastedFailureCount = 0;
+      let pastedImageCount = 0;
       await trackPendingMedia(
         insertPendingMediaAtCaret(async () => {
-          const htmlWithImages = await pastedHtmlToEditorHtml(pastedHtml);
-          if (!htmlWithImages) throw new Error("No supported images in pasted HTML");
-          return sanitizePastedEditorHtml(htmlWithImages, location.href);
+          pastedResult = await localizePastedImages(pastedHtml, location.href, {
+            uploadEmbeddedImage,
+            importRemoteImages: (items) => importRemoteImages(activePost?.id ?? "", items)
+          });
+          if (!pastedResult) throw new Error("No images in pasted HTML");
+          for (const image of pastedResult.importedImages) {
+            importedImageClaimsRef.current.set(image.id, image);
+          }
+          for (const failedImage of pastedResult.failedImages) {
+            failedImageImportsRef.current.set(failedImage.id, failedImage);
+          }
+          pastedFailureCount = pastedResult.failedImages.length;
+          pastedImageCount = pastedResult.importedImages.length + pastedResult.failedImages.length;
+          return pastedResult.html;
         })
       );
-      showToast("图片已上传并插入");
+      showToast(pastedFailureCount > 0 ? `${pastedFailureCount} 张图片未能转存，已显示原因和处理方式` : pastedImageCount > 0 ? "图片已转存并插入" : "图片已处理");
     } catch {
-      showToast("图片上传失败");
+      showToast("图片处理失败；请重试或上传本地图片");
     }
   }
 
@@ -714,6 +752,33 @@ function App() {
 
   function handleEditorClick(event: ReactMouseEvent<HTMLDivElement>) {
     const target = event.target instanceof Element ? event.target : null;
+    const imageImportAction = target?.closest<HTMLButtonElement>("[data-image-import-action]");
+    if (imageImportAction) {
+      event.preventDefault();
+      const card = imageImportAction.closest<HTMLElement>('[data-fp-type="image-import-error"]');
+      const importID = card?.dataset.importId;
+      if (!card || !importID) return;
+      if (imageImportAction.dataset.imageImportAction === "remove") {
+        card.remove();
+        failedImageImportsRef.current.delete(importID);
+        syncEditorMarkdown();
+        return;
+      }
+      if (imageImportAction.dataset.imageImportAction === "upload-local") {
+        imageReplacementTargetRef.current = importID;
+        imageReplacementInputRef.current?.click();
+        return;
+      }
+      if (imageImportAction.dataset.imageImportAction === "retry") {
+        const pending = failedImageImportsRef.current.get(importID);
+        if (!pending) {
+          showToast("原始图片地址仅在本次粘贴期间保留，请重新粘贴或上传本地图片");
+          return;
+        }
+        void trackPendingMedia(retryFailedImageImport(card, pending));
+        return;
+      }
+    }
     const option = target?.closest<HTMLButtonElement>("[data-callout-emoji-option]");
     if (option) {
       event.preventDefault();
@@ -812,6 +877,60 @@ function App() {
   function syncEditorMarkdown() {
     if (!activePost || !editorRef.current) return;
     patchActivePost({ markdown: editorHtmlToMarkdown(editorRef.current) });
+  }
+
+  async function retryFailedImageImport(card: HTMLElement, pending: PendingImageImport) {
+    card.classList.add("is-retrying");
+    try {
+      const results = await importRemoteImages(activePost?.id ?? "", [{ clientId: pending.id, url: pending.source, name: pending.name }]);
+      const result = results.get(pending.id);
+      if (result && "url" in result) {
+        replaceFailedImageCard(card, result, pending.id);
+        return;
+      }
+      const failure = result ?? { code: "IMPORT_UNAVAILABLE", message: "图片转存服务暂时不可用", resolution: "请稍后重试，或上传本地图片" };
+      failedImageImportsRef.current.set(pending.id, { ...pending, failure });
+      replaceFailedImageCardWithHtml(card, imageImportFailureHtml(pending.id, failure));
+    } catch {
+      const failure = { code: "IMPORT_UNAVAILABLE", message: "图片转存服务暂时不可用", resolution: "请稍后重试，或上传本地图片" };
+      failedImageImportsRef.current.set(pending.id, { ...pending, failure });
+      replaceFailedImageCardWithHtml(card, imageImportFailureHtml(pending.id, failure));
+    }
+  }
+
+  async function replaceFailedImageWithLocalFile(file: File) {
+    const targetID = imageReplacementTargetRef.current;
+    imageReplacementTargetRef.current = null;
+    if (!targetID || !editorRef.current) return;
+    const card = editorRef.current.querySelector<HTMLElement>(`[data-fp-type="image-import-error"][data-import-id="${CSS.escape(targetID)}"]`);
+    if (!card) return;
+    try {
+      const uploaded = await uploadFile(file);
+      if (!uploaded.mimeType.startsWith("image/")) {
+        showToast("请选择图片文件");
+        return;
+      }
+      replaceFailedImageCard(card, uploaded, targetID);
+      showToast("本地图片已上传并替换");
+    } catch {
+      showToast("本地图片上传失败，请重试");
+    }
+  }
+
+  function replaceFailedImageCard(card: HTMLElement, uploaded: ImportedImageFile | UploadedFile, importID: string) {
+    if ("claimToken" in uploaded && uploaded.claimToken) {
+      importedImageClaimsRef.current.set(uploaded.id, { id: uploaded.id, claimToken: uploaded.claimToken, url: uploaded.url });
+    }
+    failedImageImportsRef.current.delete(importID);
+    replaceFailedImageCardWithHtml(card, `${editorImageHtml(uploaded.url, uploaded.name)}<p><br></p>`);
+  }
+
+  function replaceFailedImageCardWithHtml(card: HTMLElement, html: string) {
+    if (!editorRef.current?.contains(card)) return;
+    const template = document.createElement("template");
+    template.innerHTML = html;
+    card.replaceWith(template.content);
+    syncEditorMarkdown();
   }
 
   function showToast(text: string) {
@@ -1071,6 +1190,17 @@ function App() {
                 multiple
                 onChange={(event) => {
                   void handleAttachmentFiles(event.target.files);
+                  event.target.value = "";
+                }}
+              />
+              <input
+                ref={imageReplacementInputRef}
+                className="hidden-input"
+                type="file"
+                accept="image/jpeg,image/png,image/gif,image/webp,image/avif"
+                onChange={(event) => {
+                  const [file] = [...(event.target.files ?? [])];
+                  if (file) void trackPendingMedia(replaceFailedImageWithLocalFile(file));
                   event.target.value = "";
                 }}
               />
@@ -1858,37 +1988,7 @@ async function fileToEditorHtml(file: File): Promise<string> {
   return `<div class="editor-attachment" data-fp-type="attachment" data-name="${escapeAttribute(uploaded.name)}" data-href="${escapeAttribute(uploaded.url)}" contenteditable="false"><span>${escapeHtml(uploaded.name)}</span><a href="${escapeAttribute(uploaded.url)}" download="${escapeAttribute(uploaded.name)}">下载 / 查看</a></div><p><br></p>`;
 }
 
-async function pastedHtmlToEditorHtml(html: string): Promise<string | null> {
-  if (!html || !/<img[\s>]/i.test(html)) return null;
-
-  const template = document.createElement("template");
-  template.innerHTML = html;
-  template.content.querySelectorAll("script,style").forEach((node) => node.remove());
-  const images = [...template.content.querySelectorAll<HTMLImageElement>("img")];
-  let replaced = false;
-
-  for (const image of images) {
-    const src = image.getAttribute("src") ?? "";
-    const alt = image.getAttribute("alt") || image.getAttribute("title") || filenameFromUrl(src) || "image.png";
-    const uploaded = await uploadEmbeddedImage(src, alt);
-    const imageUrl = uploaded?.url ?? normalizeImageSource(src);
-
-    if (!imageUrl) continue;
-
-    const replacement = document.createElement("template");
-    replacement.innerHTML = editorImageHtml(imageUrl, uploaded?.name ?? alt);
-    image.replaceWith(replacement.content);
-    replaced = true;
-  }
-
-  return replaced ? template.innerHTML : null;
-}
-
-async function uploadEmbeddedImage(src: string, name: string): Promise<UploadedFile | null> {
-  if (!src.startsWith("data:") && !src.startsWith("blob:")) {
-    return null;
-  }
-
+async function uploadEmbeddedImage(src: string, name: string): Promise<UploadedFile> {
   const response = await fetch(src);
   const blob = await response.blob();
   const file = new File([blob], filenameWithImageExtension(name, blob.type), { type: blob.type || "image/png" });
@@ -1913,25 +2013,40 @@ async function uploadFile(file: File): Promise<UploadedFile> {
   return payload.file;
 }
 
-function normalizeImageSource(src: string): string | null {
-  if (!src) return null;
-
-  try {
-    const url = new URL(src, location.origin);
-    return url.protocol === "http:" || url.protocol === "https:" ? url.toString() : null;
-  } catch {
-    return null;
+async function importRemoteImages(postID: string, items: ReadonlyArray<{ clientId: string; url: string; name: string }>): Promise<ReadonlyMap<string, ImportedImageFile | ImageImportFailure>> {
+  if (!postID || items.length === 0) return new Map();
+  const response = await fetch(`/api/admin/posts/${postID}/image-imports`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    credentials: "include",
+    body: JSON.stringify({ items })
+  });
+  if (!response.ok) {
+    throw new Error(await readImageImportApiMessage(response, "图片转存失败"));
   }
+  const payload = (await response.json()) as {
+    items?: Array<{ clientId?: string; file?: ImportedImageFile; error?: ImageImportFailure }>;
+  };
+  const results = new Map<string, ImportedImageFile | ImageImportFailure>();
+  for (const item of payload.items ?? []) {
+    if (!item.clientId) continue;
+    if (item.file?.url && item.file.claimToken) {
+      results.set(item.clientId, item.file);
+    } else if (item.error?.message && item.error.resolution) {
+      results.set(item.clientId, item.error);
+    }
+  }
+  return results;
 }
 
-function filenameFromUrl(src: string): string | null {
-  if (!src) return null;
-
+async function readImageImportApiMessage(response: Response, fallback: string): Promise<string> {
   try {
-    const url = new URL(src, location.origin);
-    return decodeURIComponent(url.pathname.split("/").pop() || "") || null;
+    const payload = (await response.json()) as { error?: { message?: string; resolution?: string } };
+    const message = payload.error?.message?.trim();
+    const resolution = payload.error?.resolution?.trim();
+    return message ? `${message}${resolution ? `。${resolution}` : ""}` : fallback;
   } catch {
-    return null;
+    return fallback;
   }
 }
 
@@ -2095,6 +2210,10 @@ function nodeToMarkdown(node: Node): string {
     return "";
   }
 
+  if (node.matches('[data-fp-type="image-import-error"]')) {
+    return "";
+  }
+
   if (node.matches('[data-fp-type="callout"]')) {
     const content = node.querySelector<HTMLElement>(":scope > .editor-callout-content");
     if (!content) return "";
@@ -2179,7 +2298,7 @@ function inlineNodeToMarkdown(node: Node): string {
     return `![${escapeMarkdown(img.alt || "图片")}](${img.src})`;
   }
 
-  if (node.matches("figure.editor-image,figure.editor-youtube,.editor-attachment")) {
+  if (node.matches("figure.editor-image,figure.editor-youtube,.editor-attachment,[data-fp-type=\"image-import-error\"]")) {
     return nodeToMarkdown(node);
   }
 

@@ -57,8 +57,11 @@ type Config struct {
 	R2Prefix          string
 
 	// Upload limits
-	UploadMaxBytes    int64
-	APIBodyLimitBytes int64
+	UploadMaxBytes             int64
+	APIBodyLimitBytes          int64
+	RemoteImageImportMaxBytes  int64
+	RemoteImageImportTimeoutMS int
+	RemoteImageImportStageTTL  time.Duration
 
 	// Proxy
 	TrustProxy bool
@@ -186,8 +189,11 @@ func Load() (*Config, error) {
 		R2PublicBaseURL:   os.Getenv("R2_PUBLIC_BASE_URL"),
 		R2Prefix:          optionalEnv("R2_PREFIX", "freedompost/uploads"),
 
-		UploadMaxBytes:    parseInt64("UPLOAD_MAX_BYTES", 524288000),   // 500 MB
-		APIBodyLimitBytes: parseInt64("API_BODY_LIMIT_BYTES", 16*1024), // 16 KB default for JSON
+		UploadMaxBytes:             parseInt64("UPLOAD_MAX_BYTES", 524288000),   // 500 MB
+		APIBodyLimitBytes:          parseInt64("API_BODY_LIMIT_BYTES", 16*1024), // 16 KB default for JSON
+		RemoteImageImportMaxBytes:  parseInt64("REMOTE_IMAGE_IMPORT_MAX_BYTES", 20*1024*1024),
+		RemoteImageImportTimeoutMS: parseInt("REMOTE_IMAGE_IMPORT_TIMEOUT_MS", 15000),
+		RemoteImageImportStageTTL:  time.Duration(parseInt("REMOTE_IMAGE_IMPORT_STAGE_TTL_HOURS", 24)) * time.Hour,
 
 		TrustProxy: parseBool("TRUST_PROXY", false),
 
@@ -226,6 +232,15 @@ func Load() (*Config, error) {
 	}
 	if cfg.UploadMaxBytes <= 0 || cfg.UploadMaxBytes > 500*1024*1024 {
 		errs = append(errs, "UPLOAD_MAX_BYTES must be between 1 and 524288000")
+	}
+	if cfg.RemoteImageImportMaxBytes <= 0 || cfg.RemoteImageImportMaxBytes > 50*1024*1024 {
+		errs = append(errs, "REMOTE_IMAGE_IMPORT_MAX_BYTES must be between 1 and 52428800")
+	}
+	if cfg.RemoteImageImportTimeoutMS < 1000 || cfg.RemoteImageImportTimeoutMS > 60000 {
+		errs = append(errs, "REMOTE_IMAGE_IMPORT_TIMEOUT_MS must be between 1000 and 60000")
+	}
+	if cfg.RemoteImageImportStageTTL < time.Hour || cfg.RemoteImageImportStageTTL > 7*24*time.Hour {
+		errs = append(errs, "REMOTE_IMAGE_IMPORT_STAGE_TTL_HOURS must be between 1 and 168")
 	}
 
 	if cfg.StorageDriver == "oss" {
