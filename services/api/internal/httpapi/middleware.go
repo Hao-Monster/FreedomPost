@@ -1,12 +1,34 @@
 package httpapi
 
 import (
+	"context"
 	"log/slog"
 	"net"
 	"net/http"
 	"runtime"
 	"time"
+
+	"github.com/google/uuid"
 )
+
+const requestIDHeader = "X-Request-ID"
+
+type requestIDContextKey struct{}
+
+// requestIDMiddleware creates a server-authoritative identifier so an error
+// shown in the admin UI can be correlated with the corresponding server logs.
+func requestIDMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestID := uuid.NewString()
+		w.Header().Set(requestIDHeader, requestID)
+		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), requestIDContextKey{}, requestID)))
+	})
+}
+
+func requestIDFromRequest(r *http.Request) string {
+	requestID, _ := r.Context().Value(requestIDContextKey{}).(string)
+	return requestID
+}
 
 // ─── Recovery middleware ──────────────────────────────────────────────────────
 
@@ -18,6 +40,7 @@ func recovery(logger *slog.Logger) func(http.Handler) http.Handler {
 					buf := make([]byte, 8192)
 					n := runtime.Stack(buf, false)
 					logger.Error("panic recovered",
+						"request_id", requestIDFromRequest(r),
 						"panic", rec,
 						"stack", string(buf[:n]),
 						"method", r.Method,
@@ -49,6 +72,7 @@ func requestLogger(logger *slog.Logger) func(http.Handler) http.Handler {
 			// Hash IP for logs (never log raw IP)
 			ip := realIP(r)
 			logger.Info("request",
+				"request_id", requestIDFromRequest(r),
 				"method", r.Method,
 				"path", r.URL.Path,
 				"status", ww.status,
@@ -167,6 +191,7 @@ func corsMiddleware(allowedOrigins map[string]bool) func(http.Handler) http.Hand
 					w.Header().Set("Access-Control-Allow-Credentials", "true")
 					w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
 					w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+					w.Header().Set("Access-Control-Expose-Headers", requestIDHeader)
 					w.Header().Set("Vary", "Origin")
 				}
 				if r.Method == http.MethodOptions {

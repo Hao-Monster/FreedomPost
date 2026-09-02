@@ -262,7 +262,26 @@ type ProductInput struct {
 // zero values. Admin create/update requests must carry the complete product
 // contract so omission cannot silently turn unlimited inventory into sold out.
 func (p ProductInput) HasRequiredJSONFields() bool {
-	return p.priceCentsSet && p.compareAtSet && p.stockSet && p.sortOrderSet
+	return len(p.MissingRequiredJSONFields()) == 0
+}
+
+// MissingRequiredJSONFields reports numeric fields whose omission would be
+// indistinguishable from a legitimate zero value after JSON decoding.
+func (p ProductInput) MissingRequiredJSONFields() []string {
+	missing := make([]string, 0, 4)
+	if !p.priceCentsSet {
+		missing = append(missing, "priceCents")
+	}
+	if !p.compareAtSet {
+		missing = append(missing, "compareAtCents")
+	}
+	if !p.stockSet {
+		missing = append(missing, "stock")
+	}
+	if !p.sortOrderSet {
+		missing = append(missing, "sortOrder")
+	}
+	return missing
 }
 
 // UnmarshalJSON preserves the legacy imageUrl input while keeping strict

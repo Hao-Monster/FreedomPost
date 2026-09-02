@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"fmt"
 	"net/http"
 	"net/url"
 	"strings"
@@ -24,7 +25,7 @@ func (s *Server) requireAdmin(w http.ResponseWriter, r *http.Request) *domain.Ad
 	tokenHash := security.HashToken(cookie.Value)
 	session, err := s.sessions.GetAdminSession(r.Context(), tokenHash)
 	if err != nil {
-		s.logger.Error("get admin session", "error", err)
+		s.logger.Error("get admin session", "request_id", requestIDFromRequest(r), "error", err)
 		writeError(w, http.StatusUnauthorized, "UNAUTHENTICATED", "未登录")
 		return nil
 	}
@@ -328,9 +329,9 @@ func (s *Server) adminCreateProduct(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &input) {
 		return
 	}
-	input, valid := normalizeProductInput(input)
-	if !valid {
-		writeError(w, http.StatusBadRequest, "INVALID_PRODUCT", "商品信息不完整或格式不正确")
+	input, issues := normalizeProductInputWithIssues(input)
+	if len(issues) > 0 {
+		writeProductValidationError(w, issues)
 		return
 	}
 	product, err := s.repo.CreateProduct(r.Context(), input)
@@ -349,9 +350,9 @@ func (s *Server) adminUpdateProduct(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &input) {
 		return
 	}
-	input, valid := normalizeProductInput(input)
-	if !valid {
-		writeError(w, http.StatusBadRequest, "INVALID_PRODUCT", "商品信息不完整或格式不正确")
+	input, issues := normalizeProductInputWithIssues(input)
+	if len(issues) > 0 {
+		writeProductValidationError(w, issues)
 		return
 	}
 	product, err := s.repo.UpdateProduct(r.Context(), r.PathValue("id"), input)
@@ -367,6 +368,21 @@ func (s *Server) adminUpdateProduct(w http.ResponseWriter, r *http.Request) {
 }
 
 func normalizeProductInput(input domain.ProductInput) (domain.ProductInput, bool) {
+	normalized, issues := normalizeProductInputWithIssues(input)
+	if len(issues) > 0 {
+		return domain.ProductInput{}, false
+	}
+	return normalized, true
+}
+
+type productInputIssue struct {
+	Field      string `json:"field"`
+	Code       string `json:"code"`
+	Message    string `json:"message"`
+	Resolution string `json:"resolution"`
+}
+
+func normalizeProductInputWithIssues(input domain.ProductInput) (domain.ProductInput, []productInputIssue) {
 	input.Title = strings.TrimSpace(input.Title)
 	input.Summary = strings.TrimSpace(input.Summary)
 	input.Description = strings.TrimSpace(input.Description)
@@ -381,24 +397,89 @@ func normalizeProductInput(input domain.ProductInput) (domain.ProductInput, bool
 	if input.Currency == "" {
 		input.Currency = "CNY"
 	}
-	if !input.HasRequiredJSONFields() ||
-		input.Title == "" || utf8.RuneCountInString(input.Title) > 120 ||
-		input.Summary == "" || utf8.RuneCountInString(input.Summary) > 500 ||
-		input.Description == "" || utf8.RuneCountInString(input.Description) > 12000 ||
-		utf8.RuneCountInString(input.Category) > 32 || utf8.RuneCountInString(input.Currency) > 8 ||
-		(input.Status != "draft" && input.Status != "published") ||
-		input.PriceCents < 0 || input.PriceCents > 100_000_000 ||
-		input.CommissionCents < 0 || input.CommissionCents > 100_000_000 ||
-		input.Stock < -1 || input.Stock > 1_000_000 ||
-		input.SoldCount < 0 || input.SoldCount > 1_000_000 ||
-		input.SortOrder < -100_000 || input.SortOrder > 100_000 ||
-		!validProductURL(input.CoverURL) || !validProductURL(input.LinkURL) {
-		return domain.ProductInput{}, false
+
+	issues := make([]productInputIssue, 0)
+	addIssue := func(field, code, message, resolution string) {
+		issues = append(issues, productInputIssue{Field: field, Code: code, Message: message, Resolution: resolution})
 	}
-	if input.CompareAtCents != nil && (*input.CompareAtCents < input.PriceCents || *input.CompareAtCents > 100_000_000) {
-		return domain.ProductInput{}, false
+
+	for _, field := range input.MissingRequiredJSONFields() {
+		switch field {
+		case "priceCents":
+			addIssue(field, "REQUIRED", "价格不能为空", "请填写商品价格")
+		case "compareAtCents":
+			addIssue(field, "REQUIRED", "划线价字段缺失", "不设置划线价时请明确留空")
+		case "stock":
+			addIssue(field, "REQUIRED", "库存不能为空", "请填写库存，-1 表示不限量")
+		case "sortOrder":
+			addIssue(field, "REQUIRED", "排序不能为空", "请填写 -100000 到 100000 之间的整数")
+		}
 	}
-	return input, true
+
+	if input.Title == "" {
+		addIssue("title", "REQUIRED", "商品名称不能为空", "请输入商品名称（最多 120 个字符）")
+	} else if utf8.RuneCountInString(input.Title) > 120 {
+		addIssue("title", "TOO_LONG", "商品名称不能超过 120 个字符", "请缩短商品名称后重试")
+	}
+	if input.Summary == "" {
+		addIssue("summary", "REQUIRED", "一句话简介不能为空", "请输入一句话简介（最多 500 个字符）")
+	} else if utf8.RuneCountInString(input.Summary) > 500 {
+		addIssue("summary", "TOO_LONG", "一句话简介不能超过 500 个字符", "请缩短简介后重试")
+	}
+	if input.Description == "" {
+		addIssue("description", "REQUIRED", "商品详情不能为空", "请输入商品详情（最多 12000 个字符）")
+	} else if utf8.RuneCountInString(input.Description) > 12000 {
+		addIssue("description", "TOO_LONG", "商品详情不能超过 12000 个字符", "请缩短商品详情后重试")
+	}
+	if utf8.RuneCountInString(input.Category) > 32 {
+		addIssue("category", "TOO_LONG", "商品分类不能超过 32 个字符", "请选择有效的商品分类")
+	}
+	if utf8.RuneCountInString(input.Currency) > 8 {
+		addIssue("currency", "TOO_LONG", "币种代码不能超过 8 个字符", "请选择支持的币种")
+	}
+	if input.Status != "draft" && input.Status != "published" {
+		addIssue("status", "INVALID_VALUE", "发布状态无效", "请选择草稿或公开发布")
+	}
+	if input.PriceCents < 0 || input.PriceCents > 100_000_000 {
+		addIssue("priceCents", "OUT_OF_RANGE", "价格必须在 0 到 1000000.00 之间", "请修改商品价格后重试")
+	}
+	if input.CommissionCents < 0 || input.CommissionCents > 100_000_000 {
+		addIssue("commissionCents", "OUT_OF_RANGE", "分销佣金必须在 0 到 1000000.00 之间", "请修改分销佣金后重试")
+	}
+	if input.Stock < -1 || input.Stock > 1_000_000 {
+		addIssue("stock", "OUT_OF_RANGE", "库存必须是 -1 到 1000000 之间的整数", "请修改库存，-1 表示不限量")
+	}
+	if input.SoldCount < 0 || input.SoldCount > 1_000_000 {
+		addIssue("soldCount", "OUT_OF_RANGE", "已售出数量必须是 0 到 1000000 之间的整数", "请修改已售出数量后重试")
+	}
+	if input.SortOrder < -100_000 || input.SortOrder > 100_000 {
+		addIssue("sortOrder", "OUT_OF_RANGE", "排序必须是 -100000 到 100000 之间的整数", "请修改排序后重试")
+	}
+	if !validProductURL(input.CoverURL) {
+		addIssue("coverUrl", "INVALID_URL", "商品封面地址无效", "请重新上传封面，或清空无效地址")
+	}
+	if !validProductURL(input.LinkURL) {
+		addIssue("linkUrl", "INVALID_URL", "商品链接地址无效", "请使用站内路径或 http/https 地址")
+	}
+	if input.CompareAtCents != nil {
+		if *input.CompareAtCents > 100_000_000 {
+			addIssue("compareAtCents", "OUT_OF_RANGE", "划线价不能超过 1000000.00", "请降低划线价，或留空")
+		} else if *input.CompareAtCents < input.PriceCents {
+			minimum := fmt.Sprintf("%.2f %s", float64(input.PriceCents)/100, input.Currency)
+			addIssue("compareAtCents", "COMPARE_AT_BELOW_PRICE", "划线价不能低于售价", fmt.Sprintf("请将划线价设为不低于 %s，或留空", minimum))
+		}
+	}
+	return input, issues
+}
+
+func writeProductValidationError(w http.ResponseWriter, issues []productInputIssue) {
+	writeJSON(w, http.StatusBadRequest, map[string]any{
+		"error": map[string]any{
+			"code":    "INVALID_PRODUCT",
+			"message": fmt.Sprintf("请修正 %d 项商品信息", len(issues)),
+			"issues":  issues,
+		},
+	})
 }
 
 func validProductURL(value string) bool {

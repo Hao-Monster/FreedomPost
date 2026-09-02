@@ -100,7 +100,15 @@ export interface ApiErrorBody {
   error: {
     code: string;
     message: string;
+    issues?: ApiErrorIssue[];
   };
+}
+
+export interface ApiErrorIssue {
+  field: string;
+  code: string;
+  message: string;
+  resolution: string;
 }
 
 export interface YouTubeVideo {

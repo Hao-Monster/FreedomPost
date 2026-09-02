@@ -88,6 +88,7 @@ func (s *Server) Handler() http.Handler {
 	h = securityHeaders(h)
 	h = requestLogger(s.logger)(h)
 	h = recovery(s.logger)(h)
+	h = requestIDMiddleware(h)
 	return h
 }
 
@@ -190,6 +191,7 @@ func (s *Server) healthReady(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) internalError(w http.ResponseWriter, r *http.Request, err error) {
 	s.logger.Error("request failed",
+		"request_id", requestIDFromRequest(r),
 		"method", r.Method,
 		"path", r.URL.Path,
 		"error", err,
