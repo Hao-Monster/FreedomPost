@@ -87,6 +87,7 @@ type UpdatePostInput struct {
 	ContentHTML     string
 	SearchText      string
 	Excerpt         string
+	ImportedImages  []PendingPostImage
 }
 
 type RecordViewInput struct {
@@ -156,27 +157,36 @@ type PendingAttachment struct {
 	SHA256          string
 }
 
+// PendingPostImage is a short-lived, one-time claim for an image imported from
+// clipboard HTML. It is bound to the post in the same transaction as its save.
+type PendingPostImage struct {
+	ID         string `json:"id"`
+	ClaimToken string `json:"claimToken"`
+}
+
 // ─── Attachment ──────────────────────────────────────────────────────────────
 
 type Attachment struct {
-	ID               string    `json:"id"`
-	OwnerType        string    `json:"ownerType"`
-	OwnerID          *string   `json:"ownerId"`
-	OriginalFilename string    `json:"originalFilename"`
-	StoredFilename   string    `json:"storedFilename"`
-	StorageProvider  string    `json:"storageProvider"`
-	StorageKey       string    `json:"storageKey"`
-	PublicURL        string    `json:"publicUrl"`
-	MimeType         string    `json:"mimeType"`
-	DetectedMime     string    `json:"detectedMimeType,omitempty"`
-	SizeBytes        int64     `json:"sizeBytes"`
-	Width            *int      `json:"width,omitempty"`
-	Height           *int      `json:"height,omitempty"`
-	SHA256           string    `json:"sha256,omitempty"`
-	ClaimToken       string    `json:"claimToken,omitempty"`
-	ClaimTokenHash   string    `json:"-"`
-	UploaderType     string    `json:"uploaderType,omitempty"`
-	CreatedAt        time.Time `json:"createdAt"`
+	ID               string     `json:"id"`
+	OwnerType        string     `json:"ownerType"`
+	OwnerID          *string    `json:"ownerId"`
+	OriginalFilename string     `json:"originalFilename"`
+	StoredFilename   string     `json:"storedFilename"`
+	StorageProvider  string     `json:"storageProvider"`
+	StorageKey       string     `json:"storageKey"`
+	PublicURL        string     `json:"publicUrl"`
+	MimeType         string     `json:"mimeType"`
+	DetectedMime     string     `json:"detectedMimeType,omitempty"`
+	SizeBytes        int64      `json:"sizeBytes"`
+	Width            *int       `json:"width,omitempty"`
+	Height           *int       `json:"height,omitempty"`
+	SHA256           string     `json:"sha256,omitempty"`
+	ClaimToken       string     `json:"claimToken,omitempty"`
+	ClaimTokenHash   string     `json:"-"`
+	UploaderType     string     `json:"uploaderType,omitempty"`
+	PendingUntil     *time.Time `json:"pendingUntil,omitempty"`
+	SourceHost       string     `json:"sourceHost,omitempty"`
+	CreatedAt        time.Time  `json:"createdAt"`
 }
 
 // ─── Product ─────────────────────────────────────────────────────────────────

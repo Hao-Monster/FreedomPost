@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"html"
 	"strings"
 	"time"
 
@@ -191,18 +192,61 @@ func (p *Postgres) CreatePost(ctx context.Context, input domain.CreatePostInput)
 }
 
 func (p *Postgres) UpdatePost(ctx context.Context, input domain.UpdatePostInput) (*domain.Post, error) {
-	existing, err := p.GetPostByID(ctx, input.ID)
-	if err != nil || existing == nil {
-		return nil, err
+	tx, err := p.pool.Begin(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("begin update post: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	var existingSlug string
+	if err := tx.QueryRow(ctx, `SELECT slug FROM posts WHERE id = $1 FOR UPDATE`, input.ID).Scan(&existingSlug); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("lock post: %w", err)
 	}
 
-	// Slug changes: no alias table in schema, just update directly
+	// Slug changes: no alias table in schema, just update directly.
 	newSlug := input.Slug
 	if newSlug == "" {
-		newSlug = existing.Slug
+		newSlug = existingSlug
 	}
 
-	row := p.pool.QueryRow(ctx,
+	claimedIDs := make([]string, 0, len(input.ImportedImages))
+	seenClaims := make(map[string]struct{}, len(input.ImportedImages))
+	for _, claim := range input.ImportedImages {
+		if claim.ID == "" || claim.ClaimToken == "" {
+			return nil, domain.ErrInvalidAttachment
+		}
+		if _, duplicate := seenClaims[claim.ID]; duplicate {
+			return nil, domain.ErrInvalidAttachment
+		}
+		seenClaims[claim.ID] = struct{}{}
+
+		var publicURL string
+		err := tx.QueryRow(ctx, `
+			SELECT public_url
+			FROM attachments
+			WHERE id = $1
+			  AND owner_type = 'post'
+			  AND owner_id IS NULL
+			  AND uploader_type = 'admin-image-import'
+			  AND claim_token_hash = $2
+			  AND pending_until > NOW()
+			FOR UPDATE`, claim.ID, security.HashToken(claim.ClaimToken)).Scan(&publicURL)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, domain.ErrInvalidAttachment
+		}
+		if err != nil {
+			return nil, fmt.Errorf("lock imported image: %w", err)
+		}
+		if !strings.Contains(input.ContentHTML, `src="`+html.EscapeString(publicURL)+`"`) {
+			return nil, domain.ErrInvalidAttachment
+		}
+		claimedIDs = append(claimedIDs, claim.ID)
+	}
+
+	row := tx.QueryRow(ctx,
 		`UPDATE posts SET
 		    title=$2, slug=$3, visibility=$4, price_cents=$5, currency=$6,
 		    content_markdown=$7, content_html=$8, search_text=$9, excerpt=$10,
@@ -215,7 +259,23 @@ func (p *Postgres) UpdatePost(ctx context.Context, input domain.UpdatePostInput)
 		input.ContentMarkdown, input.ContentHTML, input.SearchText, input.Excerpt,
 		time.Now(),
 	)
-	return scanPost(row)
+	post, err := scanPost(row)
+	if err != nil {
+		return nil, err
+	}
+	for _, attachmentID := range claimedIDs {
+		result, err := tx.Exec(ctx, `
+			UPDATE attachments
+			SET owner_id = $2, claim_token_hash = NULL, pending_until = NULL
+			WHERE id = $1 AND owner_id IS NULL`, attachmentID, input.ID)
+		if err != nil || result.RowsAffected() != 1 {
+			return nil, domain.ErrInvalidAttachment
+		}
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("commit update post: %w", err)
+	}
+	return post, nil
 }
 
 func (p *Postgres) DeletePost(ctx context.Context, id string) (bool, error) {
@@ -504,12 +564,12 @@ func (p *Postgres) CreateAttachment(ctx context.Context, a domain.Attachment) (*
 		`INSERT INTO attachments (id, owner_type, owner_id, uploader_type,
 		                          original_filename, stored_filename, storage_provider,
 		                          storage_key, public_url, mime_type, detected_mime_type,
-		                          size_bytes, sha256, claim_token_hash, created_at)
-		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
+		                          size_bytes, sha256, claim_token_hash, pending_until, source_host, created_at)
+		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)
 		 RETURNING id`,
 		id, a.OwnerType, a.OwnerID, coalesce(a.UploaderType, "admin"), a.OriginalFilename,
 		a.StoredFilename, a.StorageProvider, a.StorageKey, a.PublicURL, a.MimeType,
-		a.DetectedMime, a.SizeBytes, a.SHA256, nullStr(a.ClaimTokenHash), now,
+		a.DetectedMime, a.SizeBytes, a.SHA256, nullStr(a.ClaimTokenHash), a.PendingUntil, nullStr(a.SourceHost), now,
 	).Scan(&a.ID)
 	if err != nil {
 		return nil, fmt.Errorf("create attachment: %w", err)
@@ -517,6 +577,43 @@ func (p *Postgres) CreateAttachment(ctx context.Context, a domain.Attachment) (*
 	a.ID = id
 	a.CreatedAt = now
 	return &a, nil
+}
+
+func (p *Postgres) ListExpiredPostImageImports(ctx context.Context, limit int) ([]domain.Attachment, error) {
+	if limit <= 0 || limit > 200 {
+		limit = 200
+	}
+	rows, err := p.pool.Query(ctx, `
+		SELECT id, owner_type, owner_id, original_filename, stored_filename,
+		       storage_provider, storage_key, public_url, mime_type,
+		       COALESCE(detected_mime_type, mime_type), size_bytes, COALESCE(sha256,''),
+		       pending_until, COALESCE(source_host, ''), created_at
+		FROM attachments
+		WHERE owner_type = 'post'
+		  AND owner_id IS NULL
+		  AND uploader_type = 'admin-image-import'
+		  AND pending_until <= NOW()
+		ORDER BY pending_until
+		LIMIT $1`, limit)
+	if err != nil {
+		return nil, fmt.Errorf("list expired post image imports: %w", err)
+	}
+	defer rows.Close()
+	var attachments []domain.Attachment
+	for rows.Next() {
+		var attachment domain.Attachment
+		if err := rows.Scan(
+			&attachment.ID, &attachment.OwnerType, &attachment.OwnerID, &attachment.OriginalFilename,
+			&attachment.StoredFilename, &attachment.StorageProvider, &attachment.StorageKey,
+			&attachment.PublicURL, &attachment.MimeType, &attachment.DetectedMime,
+			&attachment.SizeBytes, &attachment.SHA256, &attachment.PendingUntil,
+			&attachment.SourceHost, &attachment.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		attachments = append(attachments, attachment)
+	}
+	return attachments, rows.Err()
 }
 
 func (p *Postgres) DeleteAttachmentsByIDs(ctx context.Context, ids []string) error {

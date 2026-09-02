@@ -127,6 +127,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/admin/posts", s.adminListPosts)
 	s.mux.HandleFunc("POST /api/admin/posts", s.adminCreatePost)
 	s.mux.HandleFunc("PUT /api/admin/posts/{id}", s.adminUpdatePost)
+	s.mux.HandleFunc("POST /api/admin/posts/{id}/image-imports", s.adminImportPostImages)
 	s.mux.HandleFunc("DELETE /api/admin/posts/{id}", s.adminDeletePost)
 	s.mux.HandleFunc("POST /api/admin/attachments", s.adminUploadAttachment)
 	s.mux.HandleFunc("GET /api/admin/products", s.adminListProducts)

@@ -34,6 +34,7 @@ type Repository interface {
 	// ─── Attachments ────────────────────────────────────────────────────────
 	CreateAttachment(ctx context.Context, a Attachment) (*Attachment, error)
 	DeleteAttachmentsByIDs(ctx context.Context, ids []string) error
+	ListExpiredPostImageImports(ctx context.Context, limit int) ([]Attachment, error)
 
 	// ─── Products ───────────────────────────────────────────────────────────
 	ListProducts(ctx context.Context, publishedOnly bool) ([]Product, error)

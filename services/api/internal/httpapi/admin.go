@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -175,6 +176,10 @@ func (s *Server) adminCreatePost(w http.ResponseWriter, r *http.Request) {
 	}
 
 	rendered := renderMarkdown(content)
+	if hosts := s.unmanagedArticleImageHosts(rendered.HTML); len(hosts) > 0 {
+		writeImageImportError(w, http.StatusBadRequest, "EXTERNAL_IMAGE_NOT_IMPORTED", "文章包含尚未转存的外链图片", "请重新粘贴图片并等待转存完成，或上传本地图片后再保存")
+		return
+	}
 	slug, err := security.GenerateSlug()
 	if err != nil {
 		s.internalError(w, r, err)
@@ -222,13 +227,14 @@ func (s *Server) adminUpdatePost(w http.ResponseWriter, r *http.Request) {
 	}
 	id := r.PathValue("id")
 	var input struct {
-		Title      string `json:"title"`
-		Slug       string `json:"slug"`
-		Visibility string `json:"visibility"`
-		PriceCents int    `json:"priceCents"`
-		Currency   string `json:"currency"`
-		Content    string `json:"content"`
-		Markdown   string `json:"markdown"`
+		Title          string                    `json:"title"`
+		Slug           string                    `json:"slug"`
+		Visibility     string                    `json:"visibility"`
+		PriceCents     int                       `json:"priceCents"`
+		Currency       string                    `json:"currency"`
+		Content        string                    `json:"content"`
+		Markdown       string                    `json:"markdown"`
+		ImportedImages []domain.PendingPostImage `json:"importedImages"`
 	}
 	if !decodeJSON(w, r, &input) {
 		return
@@ -239,6 +245,10 @@ func (s *Server) adminUpdatePost(w http.ResponseWriter, r *http.Request) {
 	}
 
 	rendered := renderMarkdown(content)
+	if hosts := s.unmanagedArticleImageHosts(rendered.HTML); len(hosts) > 0 {
+		writeImageImportError(w, http.StatusBadRequest, "EXTERNAL_IMAGE_NOT_IMPORTED", "文章包含尚未转存的外链图片", "请重新粘贴图片并等待转存完成，或上传本地图片后再保存")
+		return
+	}
 	post, err := s.repo.UpdatePost(r.Context(), domain.UpdatePostInput{
 		ID:              id,
 		Title:           sanitizeTitle(input.Title),
@@ -250,7 +260,12 @@ func (s *Server) adminUpdatePost(w http.ResponseWriter, r *http.Request) {
 		ContentHTML:     rendered.HTML,
 		SearchText:      rendered.SearchText,
 		Excerpt:         rendered.Excerpt,
+		ImportedImages:  input.ImportedImages,
 	})
+	if errors.Is(err, domain.ErrInvalidAttachment) {
+		writeImageImportError(w, http.StatusBadRequest, "INVALID_IMPORTED_IMAGE", "已转存图片无效、已过期或未插入文章", "请重新粘贴该图片，或上传本地图片后再保存")
+		return
+	}
 	if err != nil {
 		s.internalError(w, r, err)
 		return
