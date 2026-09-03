@@ -21,7 +21,7 @@ import (
 const (
 	defaultMaxBytes int64 = 20 * 1024 * 1024
 	defaultTimeout        = 15 * time.Second
-	maxRedirects          = 3
+	maxRedirects          = 5
 )
 
 // Failure is a bounded, user-actionable import failure. The wrapped error is
@@ -187,7 +187,12 @@ func parsePublicHTTPSURL(ctx context.Context, resolver Resolver, rawURL string) 
 	if err != nil || parsed == nil || parsed.Scheme == "" || parsed.Host == "" || parsed.User != nil {
 		return nil, &Failure{Code: "INVALID_SOURCE_URL", Message: "图片地址无效", Resolution: "请重新粘贴图片，或上传本地图片", err: err}
 	}
-	if parsed.Scheme != "https" {
+	// Silently upgrade http:// to https://. The vast majority of CDNs and image
+	// hosts serve the same content over HTTPS, so this avoids hard failures for
+	// images from older sites while still connecting exclusively over TLS.
+	if parsed.Scheme == "http" {
+		parsed.Scheme = "https"
+	} else if parsed.Scheme != "https" {
 		return nil, &Failure{Code: "HTTPS_REQUIRED", Message: "只能转存 HTTPS 图片", Resolution: "请使用 HTTPS 图片链接，或上传本地图片"}
 	}
 	if port := parsed.Port(); port != "" && port != "443" {

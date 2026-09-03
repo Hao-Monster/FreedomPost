@@ -42,6 +42,7 @@ import {
 } from "@freedompost/shared";
 import { editorCalloutHtml } from "./editor-callout.js";
 import {
+  createClientID,
   imageImportFailureHtml,
   localizePastedImages,
   type ImageImportFailure,
@@ -238,6 +239,13 @@ function App() {
     importedImageClaimsRef.current.clear();
     failedImageImportsRef.current.clear();
     editorRef.current.innerHTML = markdownToEditorHtml(activePost.markdown);
+    // Auto-import external images already in the markdown so the user
+    // doesn't hit a save rejection when opening an existing article.
+    if (/!\[[^\]]*\]\(https?:\/\//i.test(activePost.markdown) && activePost.id) {
+      const postID = activePost.id;
+      const editor = editorRef.current;
+      void trackPendingMedia(autoImportEditorImages(postID, editor));
+    }
     if (focusCreatedPostRef.current === activePost.id) {
       focusCreatedPostRef.current = null;
       savedRangeRef.current = focusEditorStart(editorRef.current)?.cloneRange() ?? null;
@@ -385,21 +393,49 @@ function App() {
         return;
       }
 
-      const markdown = editorRef.current ? editorHtmlToMarkdown(editorRef.current) : activePost.markdown;
-      const unresolvedImageCount = editorRef.current?.querySelectorAll('[data-fp-type="image-import-error"]').length ?? 0;
-      if (unresolvedImageCount > 0) {
-        showToast(`有 ${unresolvedImageCount} 张图片尚未转存；请重试、上传本地图片或删除后再保存`);
-        return;
+      const getMarkdown = () => editorRef.current ? editorHtmlToMarkdown(editorRef.current) : activePost.markdown;
+      const checkUnresolved = () => {
+        const count = editorRef.current?.querySelectorAll('[data-fp-type="image-import-error"]').length ?? 0;
+        if (count > 0) {
+          showToast(`有 ${count} 张图片尚未转存；请重试、上传本地图片或删除后再保存`);
+          return true;
+        }
+        return false;
+      };
+      const doSave = (markdown: string) => {
+        const importedImages = [...importedImageClaimsRef.current.values()]
+          .filter((claim) => markdown.includes(claim.url))
+          .map(({ id, claimToken }) => ({ id, claimToken }));
+        return fetch(`/api/admin/posts/${activePost.id}`, {
+          method: "PUT",
+          headers: { "content-type": "application/json" },
+          credentials: "include",
+          body: JSON.stringify({ title: activePost.title, markdown, visibility: activePost.visibility, priceCents: activePost.priceCents, currency: activePost.currency, importedImages })
+        });
+      };
+
+      if (checkUnresolved()) return;
+
+      let markdown = getMarkdown();
+      let response = await doSave(markdown);
+
+      // Auto-import external images and retry once when the backend rejects the
+      // article because it contains unmanaged image hosts.
+      if (!response.ok && editorRef.current) {
+        const errorBody = await response.json().catch(() => null) as { error?: { code?: string; message?: string; resolution?: string } } | null;
+        if (errorBody?.error?.code === "EXTERNAL_IMAGE_NOT_IMPORTED") {
+          showToast("检测到外链图片，正在自动转存…");
+          await autoImportEditorImages(activePost.id, editorRef.current);
+          if (checkUnresolved()) return;
+          markdown = getMarkdown();
+          response = await doSave(markdown);
+        } else {
+          const msg = errorBody?.error?.message?.trim();
+          const res = errorBody?.error?.resolution?.trim();
+          showToast(msg ? `${msg}${res ? `。${res}` : ""}` : "保存失败");
+          return;
+        }
       }
-      const importedImages = [...importedImageClaimsRef.current.values()]
-        .filter((claim) => markdown.includes(claim.url))
-        .map(({ id, claimToken }) => ({ id, claimToken }));
-      const response = await fetch(`/api/admin/posts/${activePost.id}`, {
-        method: "PUT",
-        headers: { "content-type": "application/json" },
-        credentials: "include",
-        body: JSON.stringify({ title: activePost.title, markdown, visibility: activePost.visibility, priceCents: activePost.priceCents, currency: activePost.currency, importedImages })
-      });
 
       if (!response.ok) {
         showToast(await readImageImportApiMessage(response, "保存失败"));
@@ -453,6 +489,37 @@ function App() {
     }
   }
 
+  // Shared image paste logic used by both HTML clipboard and synthetic HTML
+  // generated from plain-text Markdown pastes (e.g. from VS Code / Typora).
+  async function pasteHtmlWithImages(html: string) {
+    try {
+      let pastedResult: Awaited<ReturnType<typeof localizePastedImages>> = null;
+      let pastedFailureCount = 0;
+      let pastedImageCount = 0;
+      await trackPendingMedia(
+        insertPendingMediaAtCaret(async () => {
+          pastedResult = await localizePastedImages(html, location.href, {
+            uploadEmbeddedImage,
+            importRemoteImages: (items) => importRemoteImages(activePost?.id ?? "", items)
+          });
+          if (!pastedResult) throw new Error("No images in pasted HTML");
+          for (const image of pastedResult.importedImages) {
+            importedImageClaimsRef.current.set(image.id, image);
+          }
+          for (const failedImage of pastedResult.failedImages) {
+            failedImageImportsRef.current.set(failedImage.id, failedImage);
+          }
+          pastedFailureCount = pastedResult.failedImages.length;
+          pastedImageCount = pastedResult.importedImages.length + pastedResult.failedImages.length;
+          return pastedResult.html;
+        })
+      );
+      showToast(pastedFailureCount > 0 ? `${pastedFailureCount} 张图片未能转存，已显示原因和处理方式` : pastedImageCount > 0 ? "图片已转存并插入" : "图片已处理");
+    } catch {
+      showToast("图片处理失败；请重试或上传本地图片");
+    }
+  }
+
   async function handleEditorPaste(event: ClipboardEvent<HTMLDivElement>) {
     const files = [...event.clipboardData.items]
       .filter((item) => item.kind === "file" && item.type.startsWith("image/"))
@@ -475,7 +542,19 @@ function App() {
     }
 
     const pastedHtml = event.clipboardData.getData("text/html");
-    if (!pastedHtml) return;
+
+    // If no HTML in clipboard, check if plain text contains Markdown image syntax.
+    // This handles pastes from VS Code, Typora, Obsidian, GitHub raw markdown, etc.
+    if (!pastedHtml) {
+      const pastedText = event.clipboardData.getData("text/plain");
+      const syntheticHtml = markdownImagesToPasteHtml(pastedText);
+      if (syntheticHtml) {
+        event.preventDefault();
+        await pasteHtmlWithImages(syntheticHtml);
+      }
+      // else: let the browser handle plain text naturally (no preventDefault)
+      return;
+    }
 
     event.preventDefault();
     if (!/<img[\s>]/i.test(pastedHtml)) {
@@ -484,32 +563,7 @@ function App() {
       return;
     }
 
-    try {
-      let pastedResult: Awaited<ReturnType<typeof localizePastedImages>> = null;
-      let pastedFailureCount = 0;
-      let pastedImageCount = 0;
-      await trackPendingMedia(
-        insertPendingMediaAtCaret(async () => {
-          pastedResult = await localizePastedImages(pastedHtml, location.href, {
-            uploadEmbeddedImage,
-            importRemoteImages: (items) => importRemoteImages(activePost?.id ?? "", items)
-          });
-          if (!pastedResult) throw new Error("No images in pasted HTML");
-          for (const image of pastedResult.importedImages) {
-            importedImageClaimsRef.current.set(image.id, image);
-          }
-          for (const failedImage of pastedResult.failedImages) {
-            failedImageImportsRef.current.set(failedImage.id, failedImage);
-          }
-          pastedFailureCount = pastedResult.failedImages.length;
-          pastedImageCount = pastedResult.importedImages.length + pastedResult.failedImages.length;
-          return pastedResult.html;
-        })
-      );
-      showToast(pastedFailureCount > 0 ? `${pastedFailureCount} 张图片未能转存，已显示原因和处理方式` : pastedImageCount > 0 ? "图片已转存并插入" : "图片已处理");
-    } catch {
-      showToast("图片处理失败；请重试或上传本地图片");
-    }
+    await pasteHtmlWithImages(pastedHtml);
   }
 
   function trackPendingMedia<T>(task: Promise<T>): Promise<T> {
@@ -896,6 +950,67 @@ function App() {
       failedImageImportsRef.current.set(pending.id, { ...pending, failure });
       replaceFailedImageCardWithHtml(card, imageImportFailureHtml(pending.id, failure));
     }
+  }
+
+  // Scans the editor DOM for figure.editor-image elements whose <img> has an
+  // external (http/https) src that hasn't been imported yet, imports them via
+  // the server API, then either replaces the src in-place (success) or swaps
+  // the figure for an actionable error card (failure).
+  // Returns the number of items processed.
+  async function autoImportEditorImages(postID: string, editor: HTMLElement): Promise<number> {
+    if (!postID) return 0;
+
+    const figures = [...editor.querySelectorAll<HTMLElement>("figure.editor-image")];
+    const toImport: Array<{ figure: HTMLElement; clientId: string; src: string; alt: string }> = [];
+
+    for (const figure of figures) {
+      const img = figure.querySelector("img");
+      if (!img) continue;
+      const src = img.getAttribute("src") ?? "";
+      if (!src.startsWith("http://") && !src.startsWith("https://")) continue;
+      // Skip images that were already successfully imported this session
+      if ([...importedImageClaimsRef.current.values()].some((c) => c.url === src)) continue;
+      toImport.push({ figure, clientId: createClientID(), src, alt: img.getAttribute("alt") ?? "图片" });
+    }
+
+    if (toImport.length === 0) return 0;
+
+    try {
+      const results = await importRemoteImages(
+        postID,
+        toImport.map((item) => ({ clientId: item.clientId, url: item.src, name: item.alt }))
+      );
+      for (const item of toImport) {
+        const result = results.get(item.clientId);
+        if (result && "url" in result) {
+          // Success: update the img and anchor in-place, record the claim token
+          item.figure.querySelector("img")?.setAttribute("src", result.url);
+          item.figure.querySelector("a")?.setAttribute("href", result.url);
+          if (result.claimToken) {
+            importedImageClaimsRef.current.set(result.id, { id: result.id, claimToken: result.claimToken, url: result.url });
+          }
+        } else {
+          // Failure: replace the figure with an actionable error card
+          const failure: ImageImportFailure = result ?? { code: "IMPORT_UNAVAILABLE", message: "图片转存失败", resolution: "请上传本地图片" };
+          failedImageImportsRef.current.set(item.clientId, { id: item.clientId, source: item.src, name: item.alt, failure });
+          const tpl = document.createElement("template");
+          tpl.innerHTML = imageImportFailureHtml(item.clientId, failure);
+          item.figure.replaceWith(tpl.content);
+        }
+      }
+    } catch {
+      // If the API call itself fails, mark every figure as an error card
+      for (const item of toImport) {
+        const failure: ImageImportFailure = { code: "IMPORT_UNAVAILABLE", message: "图片转存服务暂时不可用", resolution: "请稍后重试，或上传本地图片" };
+        failedImageImportsRef.current.set(item.clientId, { id: item.clientId, source: item.src, name: item.alt, failure });
+        const tpl = document.createElement("template");
+        tpl.innerHTML = imageImportFailureHtml(item.clientId, failure);
+        item.figure.replaceWith(tpl.content);
+      }
+    }
+
+    syncEditorMarkdown();
+    return toImport.length;
   }
 
   async function replaceFailedImageWithLocalFile(file: File) {
@@ -2226,7 +2341,7 @@ function nodeToMarkdown(node: Node): string {
 
   if (node.matches("figure.editor-image")) {
     const images = [...node.querySelectorAll("img")].map((image) => ({
-      src: image.src,
+      src: image.getAttribute("src") ?? "",
       alt: image.alt || "图片"
     }));
     return editorImagesMarkdown(images);
@@ -2247,7 +2362,7 @@ function nodeToMarkdown(node: Node): string {
 
   if (node.tagName === "IMG") {
     const img = node as HTMLImageElement;
-    return `![${escapeMarkdown(img.alt || "图片")}](${img.src})`;
+    return `![${escapeMarkdown(img.alt || "图片")}](${img.getAttribute("src") ?? ""})`;
   }
 
   if (node.querySelector("figure.editor-image,figure.editor-youtube,img,.editor-attachment")) {
@@ -2369,6 +2484,35 @@ function sanitizeInlineClassList(value: string): string {
     .map((className) => className.trim())
     .filter((className) => allowedClasses.has(className))
     .join(" ");
+}
+
+// Converts plain-text Markdown (containing image references like ![alt](url))
+// into a synthetic HTML string suitable for localizePastedImages. Only called
+// when the clipboard has no text/html data (e.g. pastes from VS Code / Typora).
+// Images are emitted as standalone <img> elements; surrounding text becomes <p>.
+// Returns null when the text contains no external Markdown image syntax.
+function markdownImagesToPasteHtml(text: string): string | null {
+  if (!text || !/!\[[^\]]*\]\(https?:\/\//i.test(text)) return null;
+
+  const parts: string[] = [];
+  for (const rawLine of text.split(/\r?\n/)) {
+    const line = rawLine.trim();
+    if (!line) continue;
+
+    const images: Array<{ alt: string; url: string }> = [];
+    const textWithoutImages = line
+      .replace(/!\[([^\]]*)\]\((https?:\/\/[^)]+)\)/gi, (_, alt: string, url: string) => {
+        images.push({ alt, url });
+        return "";
+      })
+      .trim();
+
+    if (textWithoutImages) parts.push(`<p>${escapeHtml(textWithoutImages)}</p>`);
+    for (const { alt, url } of images) {
+      parts.push(`<img src="${escapeAttribute(url)}" alt="${escapeAttribute(alt)}">`);
+    }
+  }
+  return parts.length > 0 ? parts.join("") : null;
 }
 
 function escapeMarkdown(value: string): string {
