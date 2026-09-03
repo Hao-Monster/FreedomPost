@@ -168,7 +168,12 @@ function imageSourceFromClipboard(image: HTMLImageElement, baseUrl: string): str
     image.getAttribute("data-original"),
     image.getAttribute("data-lazy-src"),
     bestSourceSetCandidate(image.getAttribute("srcset")),
-    bestSourceSetCandidate(image.getAttribute("data-srcset"))
+    bestSourceSetCandidate(image.getAttribute("data-srcset")),
+    // <picture><source srcset="..."> – modern responsive image pattern used by WeChat articles,
+    // Zhihu, and other sites that wrap <img> in a <picture> element.
+    ...[...image.closest("picture")?.querySelectorAll<HTMLSourceElement>("source") ?? []].map(
+      (source) => bestSourceSetCandidate(source.getAttribute("srcset"))
+    )
   ];
   // Many editors put a transparent data URI in src and the real image in a
   // lazy-load attribute. Prefer the latter only in that specific case; a real
@@ -207,7 +212,7 @@ function isEmbeddedImageSource(source: string): boolean {
   return source.startsWith("data:") || source.startsWith("blob:");
 }
 
-function createClientID(): string {
+export function createClientID(): string {
   return globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(36).slice(2)}`;
 }
 

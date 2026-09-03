@@ -54,8 +54,29 @@ func TestFetchValidatesImageAndDoesNotForwardCredentials(t *testing.T) {
 }
 
 func TestFetchRejectsNonHTTPSAndOversizedOrNonImageResponses(t *testing.T) {
-	t.Run("non HTTPS", func(t *testing.T) {
-		_, err := (Importer{Resolver: resolverFunc(publicResolver)}).Fetch(context.Background(), "http://images.example/photo.png")
+	t.Run("http is silently upgraded to https", func(t *testing.T) {
+		var requestedURL string
+		png, _ := base64.StdEncoding.DecodeString("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9WlD3p8AAAAASUVORK5CYII=")
+		importer := Importer{
+			Resolver: resolverFunc(publicResolver),
+			newClient: func(_ time.Duration, _ Resolver) *http.Client {
+				return &http.Client{Transport: roundTripperFunc(func(request *http.Request) (*http.Response, error) {
+					requestedURL = request.URL.String()
+					return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(string(png))), ContentLength: int64(len(png)), Request: request}, nil
+				})}
+			},
+		}
+		_, err := importer.Fetch(context.Background(), "http://images.example/photo.png")
+		if err != nil {
+			t.Fatalf("expected http→https upgrade to succeed, got error: %v", err)
+		}
+		if !strings.HasPrefix(requestedURL, "https://") {
+			t.Fatalf("expected upgraded https:// request, got %q", requestedURL)
+		}
+	})
+
+	t.Run("non-http non-https scheme is rejected", func(t *testing.T) {
+		_, err := (Importer{Resolver: resolverFunc(publicResolver)}).Fetch(context.Background(), "ftp://images.example/photo.png")
 		assertFailureCode(t, err, "HTTPS_REQUIRED")
 	})
 
