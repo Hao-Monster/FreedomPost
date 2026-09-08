@@ -56,9 +56,7 @@
 	}
 
 	handle /admin/* {
-		header Cache-Control "no-store"
-		try_files {path} {path}/ /admin/index.html
-		file_server
+		respond 404
 	}
 
 	handle /p/* {
@@ -75,6 +73,35 @@
 
 	handle {
 		header Cache-Control "public, max-age=60, stale-while-revalidate=600"
+		try_files {path} {path}/ /index.html
+		file_server
+	}
+}
+
+# Dedicated admin origin. Cloudflare Access must protect this entire hostname
+# (including /api/*); application-level requireAdmin remains mandatory.
+{$ADMIN_DOMAIN} {
+	root * /var/www/freedompost/admin
+	encode gzip
+	request_body {
+		max_size 512MB
+	}
+	header {
+		Cache-Control "no-store"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "no-referrer"
+		Content-Security-Policy "default-src 'self'; img-src 'self' data: https: blob:; media-src 'self' https: blob:; script-src 'self'; connect-src 'self'; style-src 'self' 'unsafe-inline'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'"
+	}
+	handle /api/* {
+		reverse_proxy api-go:3000 {
+			header_up X-Forwarded-For {remote_host}
+		}
+	}
+	handle /health {
+		reverse_proxy api-go:3000
+	}
+	handle {
 		try_files {path} {path}/ /index.html
 		file_server
 	}
