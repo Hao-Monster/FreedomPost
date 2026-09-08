@@ -81,6 +81,8 @@
 # Dedicated admin origin. Cloudflare Access must protect this entire hostname
 # (including /api/*); application-level requireAdmin remains mandatory.
 admin.freedompost.thinderbox.uk {
+	# Cloudflare terminates public TLS; avoid ACME challenges through the proxy.
+	tls internal
 	root * /var/www/freedompost/admin
 	encode gzip
 	request_body {
