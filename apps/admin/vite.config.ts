@@ -2,7 +2,8 @@ import react from "@vitejs/plugin-react";
 import { defineConfig } from "vite";
 
 export default defineConfig({
-  base: "/admin/",
+  // The admin app is served from the root of the dedicated admin hostname.
+  base: "/",
   plugins: [react()],
   server: {
     proxy: {

@@ -84,6 +84,7 @@ func New(
 // Handler returns the HTTP handler with all middleware applied.
 func (s *Server) Handler() http.Handler {
 	var h http.Handler = s.mux
+	h = adminOriginProtection(s.cfg.AllowedOrigins())(h)
 	h = corsMiddleware(s.cfg.AllowedOrigins())(h)
 	h = securityHeaders(h)
 	h = requestLogger(s.logger)(h)

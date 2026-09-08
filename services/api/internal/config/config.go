@@ -28,7 +28,7 @@ type Config struct {
 	CookieSecret      string
 	CookieSecure      bool
 	AdminUsername     string
-	AdminPasswordHash string // bcrypt hash, derived from ADMIN_PASSWORD at startup
+	AdminPasswordHash string // bcrypt hash from ADMIN_PASSWORD_HASH
 
 	// Visitor tracking
 	VisitorHashSalt string
@@ -96,6 +96,7 @@ type Config struct {
 	// Origin for CORS validation
 	PublicSiteURL  string
 	OriginTestHost string
+	AdminOrigin    string
 
 	// Public site
 	PreviewDomain string
@@ -221,6 +222,7 @@ func Load() (*Config, error) {
 
 		PublicSiteURL:  os.Getenv("PUBLIC_SITE_URL"),
 		OriginTestHost: os.Getenv("ORIGIN_TEST_HOST"),
+		AdminOrigin:    os.Getenv("ADMIN_ORIGIN"),
 		PreviewDomain:  os.Getenv("PREVIEW_DOMAIN"),
 	}
 
@@ -274,16 +276,20 @@ func Load() (*Config, error) {
 	}
 
 	// Parse admin password.
-	// Priority: ADMIN_PASSWORD_HASH (bcrypt) > ADMIN_PASSWORD (plaintext, dev only)
+	// Production requires ADMIN_PASSWORD_HASH; plaintext is retained only for local development.
 	adminPasswordHash := os.Getenv("ADMIN_PASSWORD_HASH")
 	adminPassword := os.Getenv("ADMIN_PASSWORD")
 	switch {
 	case adminPasswordHash != "":
 		cfg.AdminPasswordHash = adminPasswordHash // production: pre-hashed
 	case adminPassword != "":
-		cfg.AdminPasswordHash = adminPassword // dev: stored as plaintext, compared with constant-time
+		if os.Getenv("NODE_ENV") == "production" {
+			errs = append(errs, "ADMIN_PASSWORD_HASH is required in production; plaintext ADMIN_PASSWORD is not allowed")
+		} else {
+			cfg.AdminPasswordHash = adminPassword // development-only fallback
+		}
 	default:
-		errs = append(errs, "ADMIN_PASSWORD or ADMIN_PASSWORD_HASH is required")
+		errs = append(errs, "ADMIN_PASSWORD_HASH (or development-only ADMIN_PASSWORD) is required")
 	}
 
 	// Validate PublicSiteURL
@@ -320,6 +326,11 @@ func (c *Config) AllowedOrigins() map[string]bool {
 	}
 	if c.PreviewDomain != "" {
 		origins["https://"+c.PreviewDomain] = true
+	}
+	if c.AdminOrigin != "" {
+		if u, err := url.Parse(c.AdminOrigin); err == nil {
+			origins[u.Scheme+"://"+u.Host] = true
+		}
 	}
 	return origins
 }

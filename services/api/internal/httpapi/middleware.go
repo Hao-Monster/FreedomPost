@@ -6,6 +6,7 @@ import (
 	"net"
 	"net/http"
 	"runtime"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -196,6 +197,23 @@ func corsMiddleware(allowedOrigins map[string]bool) func(http.Handler) http.Hand
 				}
 				if r.Method == http.MethodOptions {
 					w.WriteHeader(http.StatusNoContent)
+					return
+				}
+			}
+			next.ServeHTTP(w, r)
+		})
+	}
+}
+
+// adminOriginProtection rejects cross-site state-changing requests to the
+// cookie-authenticated admin API. SameSite cookies remain defense in depth.
+func adminOriginProtection(allowedOrigins map[string]bool) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if strings.HasPrefix(r.URL.Path, "/api/admin/") && r.Method != http.MethodGet && r.Method != http.MethodHead && r.Method != http.MethodOptions {
+				origin := r.Header.Get("Origin")
+				if origin != "" && !allowedOrigins[origin] {
+					writeError(w, http.StatusForbidden, "ORIGIN_FORBIDDEN", "请求来源不被允许")
 					return
 				}
 			}

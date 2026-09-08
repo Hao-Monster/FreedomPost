@@ -3,7 +3,7 @@ import { fileURLToPath } from "node:url";
 const SIMPLE_SECRET_NAMES = [
   "COOKIE_SECRET",
   "VISITOR_HASH_SALT",
-  "ADMIN_PASSWORD",
+  "ADMIN_PASSWORD_HASH",
   "POSTGRES_PASSWORD",
   "PAID_ACCESS_INTERNAL_SECRET",
   "TURNSTILE_SECRET_KEY",
@@ -53,7 +53,6 @@ export function validateRuntimeEnvironment(environment = process.env) {
   const minimumLengths = {
     COOKIE_SECRET: 32,
     VISITOR_HASH_SALT: 32,
-    ADMIN_PASSWORD: 8,
     POSTGRES_PASSWORD: 12,
     PAID_ACCESS_INTERNAL_SECRET: 32,
     TURNSTILE_SECRET_KEY: 20,
@@ -65,6 +64,9 @@ export function validateRuntimeEnvironment(environment = process.env) {
     if (secret.length < minimumLengths[name] || secret.length > 4_096 || /[\r\n]/.test(secret)) {
       add(name, `must contain ${minimumLengths[name]} to 4096 characters without line breaks`);
     }
+  }
+  if (!/^\$2[aby]\$\d{2}\$[./A-Za-z0-9]{53}$/.test(value("ADMIN_PASSWORD_HASH"))) {
+    add("ADMIN_PASSWORD_HASH", "must be a valid bcrypt hash");
   }
 
   const storageDriver = value("STORAGE_DRIVER");

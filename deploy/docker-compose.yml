@@ -16,6 +16,7 @@ services:
       args:
         PUBLIC_SITE_URL: ${PUBLIC_SITE_URL:-https://example.com}
         VITE_PUBLIC_SITE_URL: ${VITE_PUBLIC_SITE_URL:-https://example.com}
+        ADMIN_DOMAIN: ${ADMIN_DOMAIN:-admin.freedompost.thinderbox.uk}
     env_file:
       - ../.env
     ports:

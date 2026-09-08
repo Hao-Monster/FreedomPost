@@ -18,7 +18,7 @@ function validEnvironment() {
     DEPLOY_PATH: "/srv/freedompost",
     COOKIE_SECRET: "c".repeat(32),
     VISITOR_HASH_SALT: "v".repeat(32),
-    ADMIN_PASSWORD: "a".repeat(16),
+    ADMIN_PASSWORD_HASH: "$2b$12$C6UzMDM.H6dfI/f/IKcEe.1QqKQqKQqKQqKQqKQqKQqKQqKQqKQqK",
     POSTGRES_PASSWORD: "p".repeat(32),
     PAID_ARTICLES_ENABLED: "true",
     PAID_ACCESS_INTERNAL_URL: "http://paid-access:8080",
