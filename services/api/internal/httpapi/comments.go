@@ -237,7 +237,8 @@ func isAllowedAttachmentURL(rawURL string, allowedBases ...string) bool {
 		if err != nil || baseURL.Scheme == "" || baseURL.Host == "" {
 			continue
 		}
-		basePath := strings.TrimRight(path.Clean(baseURL.Path), "/")
+		// A storage origin without a path means the root, not path.Clean("")'s ".".
+		basePath := strings.TrimRight(path.Clean("/"+baseURL.Path), "/")
 		candidatePath := path.Clean(parsed.Path)
 		pathMatches := candidatePath == basePath || strings.HasPrefix(candidatePath, basePath+"/")
 		if parsed.Scheme == baseURL.Scheme && parsed.Host == baseURL.Host && pathMatches {
