@@ -33,8 +33,8 @@ if [ ! -f .env ]; then
     printf '%s\n' "HOST=0.0.0.0"
     printf '%s\n' "LOG_LEVEL=info"
     printf 'PREVIEW_DOMAIN=%s\n' "$PREVIEW_DOMAIN"
-    printf 'ADMIN_DOMAIN=%s\n' "${ADMIN_DOMAIN:-admin.freedompost.thinderbox.uk}"
-    printf 'ADMIN_ORIGIN=%s\n' "${ADMIN_ORIGIN:-https://admin.freedompost.thinderbox.uk}"
+    printf 'ADMIN_DOMAIN=%s\n' "${ADMIN_DOMAIN:-admin-freedompost.thinderbox.uk}"
+    printf 'ADMIN_ORIGIN=%s\n' "${ADMIN_ORIGIN:-https://admin-freedompost.thinderbox.uk}"
     printf 'ORIGIN_TEST_HOST=%s\n' "$DEPLOY_HOST"
     printf 'PUBLIC_SITE_URL=https://%s\n' "$PREVIEW_DOMAIN"
     printf 'VITE_PUBLIC_SITE_URL=https://%s\n' "$PREVIEW_DOMAIN"
@@ -108,8 +108,8 @@ set_env_if_present() {
 }
 
 set_env "PREVIEW_DOMAIN" "$PREVIEW_DOMAIN"
-set_env "ADMIN_DOMAIN" "${ADMIN_DOMAIN:-admin.freedompost.thinderbox.uk}"
-set_env "ADMIN_ORIGIN" "${ADMIN_ORIGIN:-https://admin.freedompost.thinderbox.uk}"
+set_env "ADMIN_DOMAIN" "${ADMIN_DOMAIN:-admin-freedompost.thinderbox.uk}"
+set_env "ADMIN_ORIGIN" "${ADMIN_ORIGIN:-https://admin-freedompost.thinderbox.uk}"
 set_env "ORIGIN_TEST_HOST" "$DEPLOY_HOST"
 set_env "PUBLIC_SITE_URL" "https://$PREVIEW_DOMAIN"
 set_env "VITE_PUBLIC_SITE_URL" "https://$PREVIEW_DOMAIN"
@@ -285,6 +285,9 @@ docker_cmd system df || true
 
 echo "=== Building pre-compiled lightweight containers ==="
 compose --env-file .env -f deploy/docker-compose.yml build paid-access nginx api-go
+
+# Validate certificate loading before replacing the running public gateway.
+compose --env-file .env -f deploy/docker-compose.yml run --rm --no-deps nginx caddy validate --config /etc/caddy/Caddyfile
 
 # Wait for PostgreSQL to finish initializing and recovery
 for attempt in $(seq 1 30); do
