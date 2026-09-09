@@ -24,6 +24,11 @@
 	header @benefitApi Cache-Control "no-store"
 	@readerApi path /api/reader/*
 	header @readerApi Cache-Control "private, no-store"
+	# Admin APIs must share the dedicated hostname's Access boundary.
+	@adminApi path /api/admin /api/admin/*
+	handle @adminApi {
+		respond 404
+	}
 
 	@legacyTopics path /topics /topics/
 	redir @legacyTopics /benefit/?{query} permanent
@@ -80,9 +85,9 @@
 
 # Dedicated admin origin. Cloudflare Access must protect this entire hostname
 # (including /api/*); application-level requireAdmin remains mandatory.
-admin.freedompost.thinderbox.uk {
-	# Cloudflare terminates public TLS; avoid ACME challenges through the proxy.
-	tls internal
+admin-freedompost.thinderbox.uk {
+	# Full (strict) requires a trusted origin certificate covering this hostname.
+	tls /etc/caddy/certs/admin-origin.crt /etc/caddy/certs/admin-origin.key
 	root * /var/www/freedompost/admin
 	encode gzip
 	request_body {

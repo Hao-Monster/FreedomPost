@@ -156,8 +156,8 @@ jobs:
           COOKIE_SECRET: ${{ secrets.COOKIE_SECRET }}
           VISITOR_HASH_SALT: ${{ secrets.VISITOR_HASH_SALT }}
           ADMIN_PASSWORD_HASH: ${{ secrets.ADMIN_PASSWORD_HASH }}
-          ADMIN_ORIGIN: https://admin.freedompost.thinderbox.uk
-          ADMIN_DOMAIN: admin.freedompost.thinderbox.uk
+          ADMIN_ORIGIN: https://admin-freedompost.thinderbox.uk
+          ADMIN_DOMAIN: admin-freedompost.thinderbox.uk
           POSTGRES_PASSWORD: ${{ secrets.POSTGRES_PASSWORD }}
           PAID_ARTICLES_ENABLED: "true"
           PAID_ACCESS_INTERNAL_URL: http://paid-access:8080
@@ -217,8 +217,8 @@ jobs:
           COOKIE_SECRET: ${{ secrets.COOKIE_SECRET }}
           VISITOR_HASH_SALT: ${{ secrets.VISITOR_HASH_SALT }}
           ADMIN_PASSWORD_HASH: ${{ secrets.ADMIN_PASSWORD_HASH }}
-          ADMIN_ORIGIN: https://admin.freedompost.thinderbox.uk
-          ADMIN_DOMAIN: admin.freedompost.thinderbox.uk
+          ADMIN_ORIGIN: https://admin-freedompost.thinderbox.uk
+          ADMIN_DOMAIN: admin-freedompost.thinderbox.uk
           POSTGRES_PASSWORD: ${{ secrets.POSTGRES_PASSWORD }}
           PAID_ACCESS_INTERNAL_SECRET: ${{ secrets.PAID_ACCESS_INTERNAL_SECRET }}
           PREVIEW_DOMAIN: ${{ secrets.PREVIEW_DOMAIN }}

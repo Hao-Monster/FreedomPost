@@ -10,6 +10,29 @@ import {
 
 const repositoryRoot = fileURLToPath(new URL("../", import.meta.url));
 
+test("admin deployment uses one-level DNS and a mounted certificate for strict origin TLS", () => {
+  const hostname = "admin-freedompost.thinderbox.uk";
+  const caddy = readFileSync(`${repositoryRoot}deploy/caddy/Caddyfile`, "utf8");
+  const compose = readFileSync(`${repositoryRoot}deploy/docker-compose.yml`, "utf8");
+  const workflow = readFileSync(`${repositoryRoot}.github/workflows/deploy.yml`, "utf8");
+  const remote = readFileSync(`${repositoryRoot}deploy/remote-deploy.sh`, "utf8");
+  const adminBlock = caddy.split(`${hostname} {`)[1]?.split("{$PREVIEW_DOMAIN}")[0];
+  assert.ok(adminBlock, "dedicated admin host must exist");
+  assert.match(adminBlock, /tls \/etc\/caddy\/certs\/admin-origin\.crt \/etc\/caddy\/certs\/admin-origin\.key/);
+  assert.doesNotMatch(adminBlock, /tls internal/);
+  assert.match(compose, /\/etc\/caddy\/certs:\/etc\/caddy\/certs:ro/);
+  for (const config of [caddy, compose, workflow, remote]) {
+    assert.ok(config.includes(hostname));
+    assert.ok(!config.includes("admin.freedompost.thinderbox.uk"));
+  }
+  assert.match(workflow, /ADMIN_ORIGIN: https:\/\/admin-freedompost\.thinderbox\.uk/);
+  assert.match(caddy.split(`${hostname} {`)[0], /@adminApi path \/api\/admin \/api\/admin\/\*/);
+  assert.match(caddy, /handle @adminApi\s*\{\s*respond 404/);
+  const validation = remote.indexOf("run --rm --no-deps nginx caddy validate");
+  assert.ok(validation >= 0);
+  assert.ok(validation < remote.indexOf("up -d --force-recreate"));
+});
+
 function validEnvironment() {
   return {
     DEPLOY_HOST: "203.0.113.10",
