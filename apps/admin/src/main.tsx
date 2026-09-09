@@ -203,7 +203,7 @@ const colorOptions = [
   { label: "金色", className: "fp-color-gold" }
 ] as const;
 
-function App() {
+export function App() {
   const [isAuthed, setAuthed] = useState(false);
   const [username, setUsername] = useState("admin");
   const [password, setPassword] = useState("");
@@ -239,13 +239,8 @@ function App() {
     importedImageClaimsRef.current.clear();
     failedImageImportsRef.current.clear();
     editorRef.current.innerHTML = markdownToEditorHtml(activePost.markdown);
-    // Auto-import external images already in the markdown so the user
-    // doesn't hit a save rejection when opening an existing article.
-    if (/!\[[^\]]*\]\(https?:\/\//i.test(activePost.markdown) && activePost.id) {
-      const postID = activePost.id;
-      const editor = editorRef.current;
-      void trackPendingMedia(autoImportEditorImages(postID, editor));
-    }
+    // Opening saved content must not rewrite its images. Absolute URLs may
+    // already belong to managed storage; the save API validates that boundary.
     if (focusCreatedPostRef.current === activePost.id) {
       focusCreatedPostRef.current = null;
       savedRangeRef.current = focusEditorStart(editorRef.current)?.cloneRange() ?? null;
