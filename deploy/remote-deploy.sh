@@ -79,7 +79,8 @@ fi
 
 set_env() {
   key="$1"
-  value="$2"
+  # Compose interpolates dollar signs even in service env_file values.
+  value="${2//\$/\$\$}"
   env_tmp="$(mktemp)"
   awk -v key="$key" -v value="$value" '
     BEGIN { found = 0 }
