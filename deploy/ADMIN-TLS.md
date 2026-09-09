@@ -47,11 +47,31 @@ switched during this check. Local deployment tests passed (12 tests), and the
 Go HTTP module tests passed with the existing module cache path overridden to
 the current E: workspace. The config package has no tests.
 
-Public DNS, Access policy, application login, and production rollout remain
-pending until Cloudflare account access is available. Origin checks do not
-prove these public-facing acceptance criteria. Preserve the former hostname's
-Access protection until migration is complete; its invalid TLS prevents relying
-on an HTTPS redirect as a migration mechanism.
+Production was subsequently switched on 2026-09-09. The proxied A record points
+to the existing origin, and the existing Access application covers both names
+with the original administrator MFA policy. Full (strict) was verified in the
+Cloudflare dashboard. All seven origin checks passed again on production port
+443; the new public hostname reaches the Access login screen with valid HTTPS.
+Application login after Access verification remains pending user verification.
+
+The stored bcrypt hash was valid but its unquoted dollar signs were interpolated
+by Compose, producing a truncated runtime hash. The runtime hash is now restored
+from the stored value without changing the password. `set_env` escapes dollar
+signs for future deployments. A synthetic bcrypt value round-tripped through
+the actual shell function and Docker Compose 2.26.1 successfully. Compose's
+`config` serialization doubles dollar signs; account for that when comparing it
+to container runtime values without printing either value.
+
+Production rollback backup: `/home/admin/freedompost/backups/admin-tls-20260909T101130Z`.
+Only nginx and api-go were recreated; PostgreSQL, Redis and paid-access were
+left running. The origin's outbound resolver temporarily retained NXDOMAIN for
+the new hostname, while the in-app browser successfully reached Access. A
+public-reader request from the origin received 403; the origin reader itself
+returned 200. Public authenticated browser checks and direct-origin Access
+bypass prevention are not yet verified.
+
+Preserve the former hostname's Access protection until migration is complete;
+its invalid TLS prevents relying on an HTTPS redirect as a migration mechanism.
 
 For rollback, restore the backed-up gateway configuration/image and environment
 as a matched set, then validate and reload/recreate only the affected services.
