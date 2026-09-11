@@ -823,13 +823,23 @@ func (p *Postgres) DeleteTool(ctx context.Context, id string) (bool, error) {
 func (p *Postgres) ListAffiliates(ctx context.Context) ([]domain.AffiliateListItem, error) {
 	rows, err := p.pool.Query(ctx,
 		`SELECT a.id, a.wechat_id, a.status, a.default_markup_percent, a.created_at, a.updated_at,
-		        COUNT(ac.id)::int AS total_clicks,
-		        COALESCE(SUM(ac.is_unique), 0)::int AS unique_clicks,
-		        COUNT(ao.id)::int AS order_count
+		        COALESCE(clicks.total_clicks, 0)::int AS total_clicks,
+		        COALESCE(clicks.unique_clicks, 0)::int AS unique_clicks,
+		        COALESCE(orders.order_count, 0)::int AS order_count
 		 FROM affiliates a
-		 LEFT JOIN affiliate_clicks ac ON ac.affiliate_id = a.id
-		 LEFT JOIN affiliate_orders ao ON ao.affiliate_id = a.id
-		 GROUP BY a.id ORDER BY a.created_at DESC`,
+		 LEFT JOIN (
+			 SELECT affiliate_id,
+			        COUNT(*)::int AS total_clicks,
+			        COALESCE(SUM(is_unique), 0)::int AS unique_clicks
+			 FROM affiliate_clicks
+			 GROUP BY affiliate_id
+		 ) clicks ON clicks.affiliate_id = a.id
+		 LEFT JOIN (
+			 SELECT affiliate_id, COUNT(*)::int AS order_count
+			 FROM affiliate_orders
+			 GROUP BY affiliate_id
+		 ) orders ON orders.affiliate_id = a.id
+		 ORDER BY a.created_at DESC`,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("list affiliates: %w", err)
