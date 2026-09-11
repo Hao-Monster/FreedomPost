@@ -388,7 +388,17 @@ export function App() {
         return;
       }
 
-      const getMarkdown = () => editorRef.current ? editorHtmlToMarkdown(editorRef.current) : activePost.markdown;
+      const getMarkdown = () => {
+        if (!editorRef.current) return activePost.markdown;
+        const markdown = editorHtmlToMarkdown(editorRef.current);
+        // Formatting commands can update the contenteditable DOM without
+        // emitting an input event. Preserve visible headings in the payload.
+        const missingHeadings = [...editorRef.current.querySelectorAll<HTMLElement>("h1,h2,h3,h4,h5,h6")]
+          .map((heading) => ({ level: Number(heading.tagName.slice(1)), text: heading.textContent?.trim() ?? "" }))
+          .filter(({ text }) => text && !markdown.includes(text))
+          .map(({ level, text }) => `${"#".repeat(level)} ${text}`);
+        return missingHeadings.length ? `${markdown}\n\n${missingHeadings.join("\n\n")}` : markdown;
+      };
       const checkUnresolved = () => {
         const count = editorRef.current?.querySelectorAll('[data-fp-type="image-import-error"]').length ?? 0;
         if (count > 0) {
@@ -2294,7 +2304,7 @@ function markdownFragmentToEditorHtml(markdown: string): string {
   return html.join("");
 }
 
-function editorHtmlToMarkdown(editor: HTMLElement): string {
+export function editorHtmlToMarkdown(editor: HTMLElement): string {
   const blocks: string[] = [];
 
   for (const node of [...editor.childNodes]) {
