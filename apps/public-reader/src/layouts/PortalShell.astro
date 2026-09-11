@@ -1,5 +1,6 @@
 ---
 import "../styles/portal.css";
+import ChatwootWidget from "../components/ChatwootWidget.astro";
 import {
   portalMobileActivePath,
   portalMobileNavItems,
@@ -109,6 +110,7 @@ const mobileActivePath = portalMobileActivePath(Astro.url.pathname);
     </nav>
 
     <div id="portalToast" class="portal-toast" role="status" aria-live="polite"></div>
+    <ChatwootWidget />
     <script>
       import "../scripts/portal.ts";
     </script>
