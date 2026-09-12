@@ -290,7 +290,8 @@ func (s *Server) createOrder(w http.ResponseWriter, r *http.Request) {
 		if err := s.chatwoot.SendOrder(r.Context(), input.VisitorID, content); err == nil {
 			status = "sent"
 		} else {
-			status = "error:" + err.Error()\n\t\t\ts.logger.Warn("chatwoot order message failed", "error", err, "order_id", order.ID)
+			status = "error:" + err.Error()
+			s.logger.Warn("chatwoot order message failed", "error", err, "order_id", order.ID)
 		}
 	}
 	writeJSON(w, http.StatusCreated, map[string]any{"order": order, "supportMessageStatus": status})
