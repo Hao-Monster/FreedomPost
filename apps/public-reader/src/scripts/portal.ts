@@ -11,6 +11,7 @@ import { portalActivePath, portalMobileActivePath } from "../lib/portal-routes.j
 import { createPortalPageLifecycle, eventPathIncludes } from "../lib/portal-page-lifecycle.js";
 import { formatCommissionEarnings } from "../lib/market-commission.js";
 import { renderOrderReferralField } from "../lib/market-order.js";
+import { waitForChatwootReady } from "../lib/chatwoot-ready.js";
 
 type PostListItem = {
   slug: string;
@@ -798,13 +799,16 @@ async function waitForChatwootConversation(timeoutMs: number): Promise<boolean> 
 }
 
 async function openChatwootWidget(): Promise<void> {
-  const deadline = Date.now() + 5000;
-  while (!window.$chatwoot && Date.now() < deadline) {
-    await new Promise((resolve) => window.setTimeout(resolve, 100));
-  }
-  if (!window.$chatwoot) throw new Error("chatwoot-not-ready");
-  window.$chatwoot.setUser?.(getChatwootVisitorId(), { name: "FreedomPost访客" });
-  window.$chatwoot.toggle("open");
+  const widget = await waitForChatwootReady(
+    () => window.$chatwoot,
+    (listener) => {
+      const handler = () => listener();
+      window.addEventListener("chatwoot:ready", handler);
+      return () => window.removeEventListener("chatwoot:ready", handler);
+    }
+  );
+  widget.setUser?.(getChatwootVisitorId(), { name: "FreedomPost访客" });
+  widget.toggle("open");
 }
 
 async function hydrateAffiliateDashboard() {

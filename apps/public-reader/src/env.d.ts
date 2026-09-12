@@ -2,6 +2,7 @@
 
 interface Window {
   $chatwoot?: {
+    hasLoaded: boolean;
     toggle: (state?: "open" | "close") => void;
     setUser?: (identifier: string, attributes?: Record<string, string>) => void;
   };
