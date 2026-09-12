@@ -97,6 +97,12 @@ type Config struct {
 	PublicSiteURL  string
 	OriginTestHost string
 	AdminOrigin    string
+	// Chatwoot integration
+	ChatwootBaseURL   string
+	ChatwootAPIToken  string
+	ChatwootAccountID int64
+	ChatwootInboxID   int64
+	ChatwootTimeoutMS int
 
 	// Public site
 	PreviewDomain string
@@ -220,10 +226,15 @@ func Load() (*Config, error) {
 
 		ViewBufferFlushInterval: 30 * time.Second,
 
-		PublicSiteURL:  os.Getenv("PUBLIC_SITE_URL"),
-		OriginTestHost: os.Getenv("ORIGIN_TEST_HOST"),
-		AdminOrigin:    os.Getenv("ADMIN_ORIGIN"),
-		PreviewDomain:  os.Getenv("PREVIEW_DOMAIN"),
+		PublicSiteURL:     os.Getenv("PUBLIC_SITE_URL"),
+		OriginTestHost:    os.Getenv("ORIGIN_TEST_HOST"),
+		AdminOrigin:       os.Getenv("ADMIN_ORIGIN"),
+		PreviewDomain:     os.Getenv("PREVIEW_DOMAIN"),
+		ChatwootBaseURL:   os.Getenv("CHATWOOT_BASE_URL"),
+		ChatwootAPIToken:  os.Getenv("CHATWOOT_API_TOKEN"),
+		ChatwootAccountID: int64(parseInt("CHATWOOT_ACCOUNT_ID", 0)),
+		ChatwootInboxID:   int64(parseInt("CHATWOOT_INBOX_ID", 0)),
+		ChatwootTimeoutMS: parseInt("CHATWOOT_TIMEOUT_MS", 3000),
 	}
 
 	// Validate storage driver

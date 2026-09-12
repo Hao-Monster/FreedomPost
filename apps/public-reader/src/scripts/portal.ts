@@ -705,11 +705,11 @@ async function submitAffiliateOrder(event: SubmitEvent, product: StoreProduct, c
     const response = await fetch("/api/orders", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ productSlug: product.slug, recommenderWechatId })
+      body: JSON.stringify({ productSlug: product.slug, recommenderWechatId, visitorId: getChatwootVisitorId() })
     });
-    const result = await response.json() as { order?: AffiliateOrder; error?: { message?: string } };
+    const result = await response.json() as { order?: AffiliateOrder; supportMessageStatus?: string; error?: { message?: string } };
     if (!response.ok || !result.order) throw new Error(result.error?.message || "下单失败");
-    content.innerHTML = renderContactPanel(result.order);
+    content.innerHTML = renderContactPanel(result.order, result.supportMessageStatus === "sent");
     createPortalIcons();
     bindOrderSupportAction(content, result.order);
   } catch (reason) {
@@ -721,12 +721,19 @@ async function submitAffiliateOrder(event: SubmitEvent, product: StoreProduct, c
   }
 }
 
-function renderContactPanel(order: AffiliateOrder) {
-  return `<p class="section-kicker">Order created</p><h2>订单已登记</h2><div class="order-code"><span>订单号</span><strong>${escapeHtml(order.orderCode)}</strong><small>客服会根据订单号处理</small></div><div class="order-support-panel"><p>点击下方按钮打开在线客服，订单号和商品信息会自动复制，粘贴后发送即可。</p><button class="button primary" type="button" data-order-support>打开客服并复制订单信息</button><small>如果客服回复不及时，请拨打微信电话联系。</small><span class="form-error" data-order-support-feedback hidden></span></div><p class="settlement-note">请先等待客服确认订单，再按照客服回复完成后续操作。</p>`;
+function renderContactPanel(order: AffiliateOrder, sent = false) {
+  return `<p class="section-kicker">Order created</p><h2>订单已登记</h2><div class="order-code"><span>订单号</span><strong>${escapeHtml(order.orderCode)}</strong><small>客服会根据订单号处理</small></div><div class="order-support-panel"><p>点击下方按钮打开在线客服，订单号和商品信息会自动发送给客服。</p><button class="button primary" type="button" data-order-support>打开客服并复制订单信息</button><small>如果客服回复不及时，请拨打微信电话联系。</small><span class="form-error" data-order-support-feedback hidden></span></div><p class="settlement-note">请先等待客服确认订单，再按照客服回复完成后续操作。</p>`;
 }
 
 function orderSupportMessage(order: AffiliateOrder) {
   return `你好，我刚刚创建了订单。\n订单号：${order.orderCode}\n商品：${order.productTitle}\n请协助处理，谢谢。`;
+}
+
+function getChatwootVisitorId(): string {
+  const key = "fp_chatwoot_visitor_id";
+  let id = localStorage.getItem(key);
+  if (!id) { id = crypto.randomUUID(); localStorage.setItem(key, id); }
+  return id;
 }
 
 function bindOrderSupportAction(content: HTMLElement, order: AffiliateOrder) {
@@ -744,7 +751,7 @@ function bindOrderSupportAction(content: HTMLElement, order: AffiliateOrder) {
       }
       await openChatwootWidget();
       if (feedback) {
-        feedback.textContent = "订单信息已复制，客服窗口已打开，请粘贴并发送。";
+        feedback.textContent = "订单信息已自动发送，客服窗口已打开。";
         feedback.hidden = false;
       }
     } catch {

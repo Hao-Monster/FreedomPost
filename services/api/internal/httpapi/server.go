@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/fenghaoyun-monster/freedompost/services/api/internal/benefit"
+	"github.com/fenghaoyun-monster/freedompost/services/api/internal/chatwoot"
 	"github.com/fenghaoyun-monster/freedompost/services/api/internal/config"
 	"github.com/fenghaoyun-monster/freedompost/services/api/internal/domain"
 	"github.com/fenghaoyun-monster/freedompost/services/api/internal/paidaccess"
@@ -45,6 +46,7 @@ type Server struct {
 	searchCache *searchindex.Cache
 	paidAccess  *paidaccess.Client
 	benefit     *BenefitRuntime // nil = feature disabled
+	chatwoot    *chatwoot.Client
 	logger      *slog.Logger
 	mux         *http.ServeMux
 }
@@ -61,6 +63,7 @@ func New(
 	searchCache *searchindex.Cache,
 	paidAccess *paidaccess.Client,
 	benefitRuntime *BenefitRuntime,
+	chatwootClient *chatwoot.Client,
 	logger *slog.Logger,
 ) *Server {
 	s := &Server{
@@ -74,6 +77,7 @@ func New(
 		searchCache: searchCache,
 		paidAccess:  paidAccess,
 		benefit:     benefitRuntime,
+		chatwoot:    chatwootClient,
 		logger:      logger,
 		mux:         http.NewServeMux(),
 	}

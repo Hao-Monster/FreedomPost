@@ -27,6 +27,7 @@ import (
 	"github.com/redis/go-redis/v9"
 
 	"github.com/fenghaoyun-monster/freedompost/services/api/internal/benefit"
+	"github.com/fenghaoyun-monster/freedompost/services/api/internal/chatwoot"
 	"github.com/fenghaoyun-monster/freedompost/services/api/internal/config"
 	"github.com/fenghaoyun-monster/freedompost/services/api/internal/httpapi"
 	"github.com/fenghaoyun-monster/freedompost/services/api/internal/migrate"
@@ -289,10 +290,12 @@ func run(logger *slog.Logger) error {
 		)
 	}
 
+	chatwootClient, _ := chatwoot.New(cfg.ChatwootBaseURL, cfg.ChatwootAPIToken, cfg.ChatwootAccountID, cfg.ChatwootInboxID, time.Duration(cfg.ChatwootTimeoutMS)*time.Millisecond)
+
 	// ── 11. HTTP server ───────────────────────────────────────────────────────
 	srv := httpapi.New(
 		cfg, repo, sessions, limiter, stor, localStore,
-		viewBuf, searchCache, paidAccessClient, benefitRuntime, logger,
+		viewBuf, searchCache, paidAccessClient, benefitRuntime, chatwootClient, logger,
 	)
 
 	httpSrv := &http.Server{
