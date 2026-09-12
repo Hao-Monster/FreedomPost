@@ -1,6 +1,12 @@
 /// <reference types="astro/client" />
 
 interface Window {
+  $chatwoot?: {
+    toggle: (state?: "open" | "close") => void;
+  };
+  chatwootSDK?: {
+    run: (options: { websiteToken: string; baseUrl: string }) => void;
+  };
   __FREEDOMPOST_INITIAL__?: {
     slug: string;
     meta: {

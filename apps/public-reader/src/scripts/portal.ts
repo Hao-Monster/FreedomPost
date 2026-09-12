@@ -737,15 +737,14 @@ function bindOrderSupportAction(content: HTMLElement, order: AffiliateOrder) {
     button.disabled = true;
     try {
       await copyTextToClipboard(orderSupportMessage(order));
-      const supportWindow = window.open("https://support-freedompost.openal.uk/", "_blank", "noopener,noreferrer");
-      if (!supportWindow) throw new Error("popup-blocked");
+      await openChatwootWidget();
       if (feedback) {
-        feedback.textContent = "订单信息已复制，请在客服窗口粘贴并发送。";
+        feedback.textContent = "订单信息已复制，客服窗口已打开，请粘贴并发送。";
         feedback.hidden = false;
       }
     } catch {
       if (feedback) {
-        feedback.textContent = "客服窗口未能自动打开，请允许弹窗后重试。";
+        feedback.textContent = "客服组件还未加载，请稍后点击按钮重试。";
         feedback.hidden = false;
       }
     } finally {
@@ -754,6 +753,15 @@ function bindOrderSupportAction(content: HTMLElement, order: AffiliateOrder) {
   };
   button.addEventListener("click", () => void openSupport());
   void openSupport();
+}
+
+async function openChatwootWidget(): Promise<void> {
+  const deadline = Date.now() + 5000;
+  while (!window.$chatwoot && Date.now() < deadline) {
+    await new Promise((resolve) => window.setTimeout(resolve, 100));
+  }
+  if (!window.$chatwoot) throw new Error("chatwoot-not-ready");
+  window.$chatwoot.toggle("open");
 }
 
 async function hydrateAffiliateDashboard() {
