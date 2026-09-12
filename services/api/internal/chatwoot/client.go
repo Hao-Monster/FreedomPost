@@ -86,5 +86,5 @@ func (c *Client) SendOrder(ctx context.Context, visitor, content string) error {
 	var y struct {
 		ID int64 `json:"id"`
 	}
-	return c.req(ctx, http.MethodPost, fmt.Sprintf("/api/v1/accounts/%d/conversations", c.accountID), map[string]any{"contact_id": x.ID, "inbox_id": c.inboxID, "status": "open", "message": map[string]any{"content": content, "message_type": "incoming", "private": false}}, &y)
+	return c.req(ctx, http.MethodPost, fmt.Sprintf("/api/v1/accounts/%d/conversations", c.accountID), map[string]any{"source_id": visitor, "contact_id": x.ID, "inbox_id": c.inboxID, "status": "open", "message": map[string]any{"content": content, "message_type": "incoming", "private": false}}, &y)
 }
