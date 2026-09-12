@@ -47,6 +47,7 @@ function validEnvironment() {
     PAID_ACCESS_INTERNAL_URL: "http://paid-access:8080",
     PAID_ACCESS_INTERNAL_SECRET: "q".repeat(32),
     CHATWOOT_BASE_URL: "https://support-freedompost.openal.uk",
+    CHATWOOT_WEBSITE_TOKEN: "website-token-123",
     CHATWOOT_API_TOKEN: "chatwoot-token",
     CHATWOOT_ACCOUNT_ID: "5",
     CHATWOOT_INBOX_ID: "1",
@@ -110,9 +111,9 @@ test("rejects invalid encryption keys and unsafe proxy trust", () => {
 
 test("fails closed when Chatwoot integration is partially configured", () => {
   const environment = validEnvironment();
-  delete environment.CHATWOOT_API_TOKEN;
+  delete environment.CHATWOOT_WEBSITE_TOKEN;
   const names = validateProductionEnvironment(environment).map((error) => error.name);
-  assert.ok(names.includes("CHATWOOT_API_TOKEN"));
+  assert.ok(names.includes("CHATWOOT_WEBSITE_TOKEN"));
 });
 
 test("preflight diagnostics never contain secret values", () => {
@@ -135,6 +136,7 @@ test("deployment workflow and Caddy keep the benefit path protected", () => {
     "BENEFIT_CLAIM_HMAC_SECRET",
     "BENEFIT_LINK_ENCRYPTION_KEY",
     "PAID_ACCESS_INTERNAL_SECRET",
+    "CHATWOOT_WEBSITE_TOKEN",
     "CHATWOOT_API_TOKEN"
   ]) {
     assert.match(workflow, new RegExp(`secrets\\.${name}`));

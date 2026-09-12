@@ -98,7 +98,12 @@ type Config struct {
 	OriginTestHost string
 	AdminOrigin    string
 	// Chatwoot integration
-	ChatwootBaseURL   string
+	ChatwootBaseURL string
+	// ChatwootWebsiteToken is the public WebWidget token. The API client uses
+	// it together with the signed cw_conversation token from the browser.
+	ChatwootWebsiteToken string
+	// These legacy admin API settings remain loadable for existing deployments,
+	// but are no longer used to send visitor messages to a WebWidget inbox.
 	ChatwootAPIToken  string
 	ChatwootAccountID int64
 	ChatwootInboxID   int64
@@ -226,15 +231,16 @@ func Load() (*Config, error) {
 
 		ViewBufferFlushInterval: 30 * time.Second,
 
-		PublicSiteURL:     os.Getenv("PUBLIC_SITE_URL"),
-		OriginTestHost:    os.Getenv("ORIGIN_TEST_HOST"),
-		AdminOrigin:       os.Getenv("ADMIN_ORIGIN"),
-		PreviewDomain:     os.Getenv("PREVIEW_DOMAIN"),
-		ChatwootBaseURL:   os.Getenv("CHATWOOT_BASE_URL"),
-		ChatwootAPIToken:  os.Getenv("CHATWOOT_API_TOKEN"),
-		ChatwootAccountID: int64(parseInt("CHATWOOT_ACCOUNT_ID", 0)),
-		ChatwootInboxID:   int64(parseInt("CHATWOOT_INBOX_ID", 0)),
-		ChatwootTimeoutMS: parseInt("CHATWOOT_TIMEOUT_MS", 3000),
+		PublicSiteURL:        os.Getenv("PUBLIC_SITE_URL"),
+		OriginTestHost:       os.Getenv("ORIGIN_TEST_HOST"),
+		AdminOrigin:          os.Getenv("ADMIN_ORIGIN"),
+		PreviewDomain:        os.Getenv("PREVIEW_DOMAIN"),
+		ChatwootBaseURL:      os.Getenv("CHATWOOT_BASE_URL"),
+		ChatwootWebsiteToken: os.Getenv("CHATWOOT_WEBSITE_TOKEN"),
+		ChatwootAPIToken:     os.Getenv("CHATWOOT_API_TOKEN"),
+		ChatwootAccountID:    int64(parseInt("CHATWOOT_ACCOUNT_ID", 0)),
+		ChatwootInboxID:      int64(parseInt("CHATWOOT_INBOX_ID", 0)),
+		ChatwootTimeoutMS:    parseInt("CHATWOOT_TIMEOUT_MS", 3000),
 	}
 
 	// Validate storage driver

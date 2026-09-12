@@ -52,6 +52,9 @@ export function validateRuntimeEnvironment(environment = process.env) {
 
   const chatwootNames = [
     "CHATWOOT_BASE_URL",
+    "CHATWOOT_WEBSITE_TOKEN",
+    // Legacy administrator API settings are accepted for existing .env files,
+    // but are not used by the WebWidget message client.
     "CHATWOOT_API_TOKEN",
     "CHATWOOT_ACCOUNT_ID",
     "CHATWOOT_INBOX_ID",
@@ -64,12 +67,18 @@ export function validateRuntimeEnvironment(environment = process.env) {
     if (!validHttpsOrigin(value("CHATWOOT_BASE_URL"))) {
       add("CHATWOOT_BASE_URL", "must be an HTTPS origin without a path or credentials");
     }
-    const token = value("CHATWOOT_API_TOKEN");
-    if (!token || token.length > 4_096 || /[\r\n]/.test(token)) {
-      add("CHATWOOT_API_TOKEN", "must be present, no longer than 4096 characters, and contain no line breaks");
+    const websiteToken = value("CHATWOOT_WEBSITE_TOKEN");
+    if (!/^[A-Za-z0-9_-]{10,256}$/.test(websiteToken)) {
+      add("CHATWOOT_WEBSITE_TOKEN", "must contain 10 to 256 URL-safe characters");
     }
-    validateInteger(environment, errors, "CHATWOOT_ACCOUNT_ID", 1, 2_147_483_647);
-    validateInteger(environment, errors, "CHATWOOT_INBOX_ID", 1, 2_147_483_647);
+    const adminToken = value("CHATWOOT_API_TOKEN");
+    if (adminToken && (adminToken.length > 4_096 || /[\r\n]/.test(adminToken))) {
+      add("CHATWOOT_API_TOKEN", "must be no longer than 4096 characters and contain no line breaks");
+    }
+    if (value("CHATWOOT_ACCOUNT_ID") || value("CHATWOOT_INBOX_ID")) {
+      validateInteger(environment, errors, "CHATWOOT_ACCOUNT_ID", 1, 2_147_483_647);
+      validateInteger(environment, errors, "CHATWOOT_INBOX_ID", 1, 2_147_483_647);
+    }
     validateInteger(environment, errors, "CHATWOOT_TIMEOUT_MS", 100, 30_000);
   }
 

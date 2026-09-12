@@ -702,6 +702,10 @@ async function submitAffiliateOrder(event: SubmitEvent, product: StoreProduct, c
   const recommenderWechatId = String(new FormData(form).get("recommenderWechatId") ?? "").trim();
   if (button) button.disabled = true;
   try {
+    // Chatwoot creates the signed conversation cookie asynchronously while its
+    // widget iframe loads. Wait briefly so the API can post into this exact
+    // visitor conversation instead of falling back to a copy-only flow.
+    await waitForChatwootConversation(5000);
     const response = await fetch("/api/orders", {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -709,9 +713,9 @@ async function submitAffiliateOrder(event: SubmitEvent, product: StoreProduct, c
     });
     const result = await response.json() as { order?: AffiliateOrder; supportMessageStatus?: string; error?: { message?: string } };
     if (!response.ok || !result.order) throw new Error(result.error?.message || "下单失败");
-    content.innerHTML = renderContactPanel(result.order, result.supportMessageStatus === "sent");
+    content.innerHTML = renderContactPanel(result.order, result.supportMessageStatus ?? "unavailable");
     createPortalIcons();
-    bindOrderSupportAction(content, result.order);
+    bindOrderSupportAction(content, result.order, result.supportMessageStatus ?? "unavailable");
   } catch (reason) {
     if (error) {
       error.textContent = reason instanceof Error ? reason.message : "下单失败，请稍后再试";
@@ -721,8 +725,15 @@ async function submitAffiliateOrder(event: SubmitEvent, product: StoreProduct, c
   }
 }
 
-function renderContactPanel(order: AffiliateOrder, sent = false) {
-  return `<p class="section-kicker">Order created</p><h2>订单已登记</h2><div class="order-code"><span>订单号</span><strong>${escapeHtml(order.orderCode)}</strong><small>客服会根据订单号处理</small></div><div class="order-support-panel"><p>点击下方按钮打开在线客服，订单号和商品信息会自动发送给客服。</p><button class="button primary" type="button" data-order-support>打开客服并复制订单信息</button><small>如果客服回复不及时，请拨打微信电话联系。</small><span class="form-error" data-order-support-feedback hidden></span></div><p class="settlement-note">请先等待客服确认订单，再按照客服回复完成后续操作。</p>`;
+function renderContactPanel(order: AffiliateOrder, status = "unavailable") {
+  const sent = status === "sent";
+  const pending = status === "pending";
+  const description = sent
+    ? "订单信息已发送到当前客服会话，点击按钮打开客服窗口查看。"
+    : pending
+      ? "客服会话正在加载，点击按钮打开客服并发送已复制的订单信息。"
+      : "客服会话暂时不可用，点击按钮打开客服并发送已复制的订单信息。";
+  return `<p class="section-kicker">Order created</p><h2>订单已登记</h2><div class="order-code"><span>订单号</span><strong>${escapeHtml(order.orderCode)}</strong><small>客服会根据订单号处理</small></div><div class="order-support-panel"><p>${description}</p><button class="button primary" type="button" data-order-support>打开客服并复制订单信息</button><small>如果客服回复不及时，请拨打微信电话联系。</small><span class="form-error" data-order-support-feedback hidden></span></div><p class="settlement-note">请先等待客服确认订单，再按照客服回复完成后续操作。</p>`;
 }
 
 function orderSupportMessage(order: AffiliateOrder) {
@@ -736,14 +747,20 @@ function getChatwootVisitorId(): string {
   return id;
 }
 
-function bindOrderSupportAction(content: HTMLElement, order: AffiliateOrder) {
+function bindOrderSupportAction(content: HTMLElement, order: AffiliateOrder, status: string) {
   const button = content.querySelector<HTMLButtonElement>("[data-order-support]");
   const feedback = content.querySelector<HTMLElement>("[data-order-support-feedback]");
   if (!button) return;
   const openSupport = async () => {
     button.disabled = true;
+    let copied = false;
     try {
       await copyTextToClipboard(orderSupportMessage(order));
+      copied = true;
+    } catch {
+      // Clipboard permissions must not prevent opening the support window.
+    }
+    try {
       const dialog = content.closest("dialog");
       if (dialog?.open) {
         dialog.close();
@@ -751,7 +768,11 @@ function bindOrderSupportAction(content: HTMLElement, order: AffiliateOrder) {
       }
       await openChatwootWidget();
       if (feedback) {
-        feedback.textContent = "订单信息已自动发送，客服窗口已打开。";
+        feedback.textContent = status === "sent"
+          ? "订单信息已自动发送，客服窗口已打开。"
+          : copied
+            ? "订单信息已复制，请在客服窗口粘贴发送。"
+            : "客服窗口已打开，请手动输入订单号发送。";
         feedback.hidden = false;
       }
     } catch {
@@ -765,6 +786,15 @@ function bindOrderSupportAction(content: HTMLElement, order: AffiliateOrder) {
   };
   button.addEventListener("click", () => void openSupport());
   void openSupport();
+}
+
+async function waitForChatwootConversation(timeoutMs: number): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (document.cookie.split(";").some((item) => item.trim().startsWith("cw_conversation="))) return true;
+    await new Promise((resolve) => window.setTimeout(resolve, 100));
+  }
+  return false;
 }
 
 async function openChatwootWidget(): Promise<void> {
