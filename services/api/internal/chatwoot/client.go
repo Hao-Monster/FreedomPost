@@ -71,7 +71,7 @@ func (c *Client) SendOrder(ctx context.Context, visitor, content string) error {
 	searchPath := fmt.Sprintf("/api/v1/accounts/%d/contacts/search?q=%s", c.accountID, url.QueryEscape(visitor))
 	_ = c.req(ctx, http.MethodGet, searchPath, nil, &search)
 	if len(search.Payload) > 0 {
-		x.ID = search.Payload[0].ID
+		x.ID = search.Payload[0].ID\n\t\tx.SourceID = search.Payload[0].SourceID
 	}
 	var e error
 	if x.ID == 0 {
