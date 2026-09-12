@@ -773,6 +773,7 @@ async function openChatwootWidget(): Promise<void> {
     await new Promise((resolve) => window.setTimeout(resolve, 100));
   }
   if (!window.$chatwoot) throw new Error("chatwoot-not-ready");
+  window.$chatwoot.setUser?.(getChatwootVisitorId(), { name: "FreedomPost访客" });
   window.$chatwoot.toggle("open");
 }
 
@@ -1072,4 +1073,6 @@ function escapeHtml(value: string) {
 function escapeAttribute(value: string) {
   return escapeHtml(value);
 }
+
+
 
