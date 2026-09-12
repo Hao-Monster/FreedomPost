@@ -737,6 +737,11 @@ function bindOrderSupportAction(content: HTMLElement, order: AffiliateOrder) {
     button.disabled = true;
     try {
       await copyTextToClipboard(orderSupportMessage(order));
+      const dialog = content.closest("dialog");
+      if (dialog?.open) {
+        dialog.close();
+        await new Promise<void>((resolve) => window.requestAnimationFrame(() => resolve()));
+      }
       await openChatwootWidget();
       if (feedback) {
         feedback.textContent = "订单信息已复制，客服窗口已打开，请粘贴并发送。";
