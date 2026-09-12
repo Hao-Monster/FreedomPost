@@ -2,7 +2,8 @@
 
 interface Window {
   $chatwoot?: {
-    toggle: (state?: "open" | "close") => void;`n    setUser?: (identifier: string, attributes?: Record<string, string>) => void;
+    toggle: (state?: "open" | "close") => void;
+    setUser?: (identifier: string, attributes?: Record<string, string>) => void;
   };
   chatwootSDK?: {
     run: (options: { websiteToken: string; baseUrl: string }) => void;
@@ -25,4 +26,5 @@ interface Window {
     }>;
   };
 }
+
 
