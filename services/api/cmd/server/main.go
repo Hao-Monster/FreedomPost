@@ -290,7 +290,10 @@ func run(logger *slog.Logger) error {
 		)
 	}
 
-	chatwootClient, _ := chatwoot.New(cfg.ChatwootBaseURL, cfg.ChatwootAPIToken, cfg.ChatwootAccountID, cfg.ChatwootInboxID, time.Duration(cfg.ChatwootTimeoutMS)*time.Millisecond)
+	chatwootClient, chatwootErr := chatwoot.New(cfg.ChatwootBaseURL, cfg.ChatwootAPIToken, cfg.ChatwootAccountID, cfg.ChatwootInboxID, time.Duration(cfg.ChatwootTimeoutMS)*time.Millisecond)
+	if chatwootErr != nil {
+		logger.Error("chatwoot: integration disabled due to invalid configuration", "error", chatwootErr)
+	}
 
 	// ── 11. HTTP server ───────────────────────────────────────────────────────
 	srv := httpapi.New(

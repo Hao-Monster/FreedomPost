@@ -46,6 +46,11 @@ function validEnvironment() {
     PAID_ARTICLES_ENABLED: "true",
     PAID_ACCESS_INTERNAL_URL: "http://paid-access:8080",
     PAID_ACCESS_INTERNAL_SECRET: "q".repeat(32),
+    CHATWOOT_BASE_URL: "https://support-freedompost.openal.uk",
+    CHATWOOT_API_TOKEN: "chatwoot-token",
+    CHATWOOT_ACCOUNT_ID: "5",
+    CHATWOOT_INBOX_ID: "1",
+    CHATWOOT_TIMEOUT_MS: "3000",
     PREVIEW_DOMAIN: "www.example.com",
     STORAGE_DRIVER: "local",
     TRUST_PROXY: "true",
@@ -103,6 +108,13 @@ test("rejects invalid encryption keys and unsafe proxy trust", () => {
   assert.ok(names.includes("TRUST_PROXY"));
 });
 
+test("fails closed when Chatwoot integration is partially configured", () => {
+  const environment = validEnvironment();
+  delete environment.CHATWOOT_API_TOKEN;
+  const names = validateProductionEnvironment(environment).map((error) => error.name);
+  assert.ok(names.includes("CHATWOOT_API_TOKEN"));
+});
+
 test("preflight diagnostics never contain secret values", () => {
   const environment = validEnvironment();
   environment.OPUS8_INTEGRATION_SECRET = "leak-probe-" + "x".repeat(32);
@@ -122,7 +134,8 @@ test("deployment workflow and Caddy keep the benefit path protected", () => {
     "OPUS8_INTEGRATION_SECRET",
     "BENEFIT_CLAIM_HMAC_SECRET",
     "BENEFIT_LINK_ENCRYPTION_KEY",
-    "PAID_ACCESS_INTERNAL_SECRET"
+    "PAID_ACCESS_INTERNAL_SECRET",
+    "CHATWOOT_API_TOKEN"
   ]) {
     assert.match(workflow, new RegExp(`secrets\\.${name}`));
   }

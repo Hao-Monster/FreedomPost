@@ -50,6 +50,29 @@ export function validateRuntimeEnvironment(environment = process.env) {
     add("PAID_ACCESS_INTERNAL_SECRET", "must be distinct from the benefit HMAC secret");
   }
 
+  const chatwootNames = [
+    "CHATWOOT_BASE_URL",
+    "CHATWOOT_API_TOKEN",
+    "CHATWOOT_ACCOUNT_ID",
+    "CHATWOOT_INBOX_ID",
+    "CHATWOOT_TIMEOUT_MS"
+  ];
+  const chatwootConfigured = chatwootNames
+    .filter((name) => name !== "CHATWOOT_TIMEOUT_MS")
+    .some((name) => value(name).trim() !== "");
+  if (chatwootConfigured) {
+    if (!validHttpsOrigin(value("CHATWOOT_BASE_URL"))) {
+      add("CHATWOOT_BASE_URL", "must be an HTTPS origin without a path or credentials");
+    }
+    const token = value("CHATWOOT_API_TOKEN");
+    if (!token || token.length > 4_096 || /[\r\n]/.test(token)) {
+      add("CHATWOOT_API_TOKEN", "must be present, no longer than 4096 characters, and contain no line breaks");
+    }
+    validateInteger(environment, errors, "CHATWOOT_ACCOUNT_ID", 1, 2_147_483_647);
+    validateInteger(environment, errors, "CHATWOOT_INBOX_ID", 1, 2_147_483_647);
+    validateInteger(environment, errors, "CHATWOOT_TIMEOUT_MS", 100, 30_000);
+  }
+
   const minimumLengths = {
     COOKIE_SECRET: 32,
     VISITOR_HASH_SALT: 32,
