@@ -1072,3 +1072,4 @@ function escapeHtml(value: string) {
 function escapeAttribute(value: string) {
   return escapeHtml(value);
 }
+
