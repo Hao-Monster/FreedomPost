@@ -1856,6 +1856,10 @@ svg {
   font: 800 24px/1.3 ui-monospace, SFMono-Regular, Consolas, monospace;
 }
 
+.order-support-panel { display: grid; gap: 12px; margin-top: 20px; padding: 16px; border: 1px solid var(--portal-line); border-radius: 12px; background: color-mix(in srgb, var(--portal-accent) 8%, transparent); }
+.order-support-panel p, .order-support-panel small { margin: 0; }
+.order-support-panel small { color: var(--portal-muted); }
+
 .contact-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));

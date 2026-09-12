@@ -711,6 +711,7 @@ async function submitAffiliateOrder(event: SubmitEvent, product: StoreProduct, c
     if (!response.ok || !result.order) throw new Error(result.error?.message || "下单失败");
     content.innerHTML = renderContactPanel(result.order);
     createPortalIcons();
+    bindOrderSupportAction(content, result.order);
   } catch (reason) {
     if (error) {
       error.textContent = reason instanceof Error ? reason.message : "下单失败，请稍后再试";
@@ -721,7 +722,38 @@ async function submitAffiliateOrder(event: SubmitEvent, product: StoreProduct, c
 }
 
 function renderContactPanel(order: AffiliateOrder) {
-  return `<p class="section-kicker">Order created</p><h2>订单已登记</h2><div class="order-code"><span>订单号</span><strong>${escapeHtml(order.orderCode)}</strong><small>联系时请发送此订单号</small></div><div class="contact-grid"><figure><img src="/images/contact-wechat.jpg" alt="客服微信二维码" /><figcaption>微信：扫码添加客服</figcaption></figure><figure><img src="/images/contact-qq.jpg" alt="客服 QQ 二维码" /><figcaption>QQ：2682460530</figcaption></figure></div><p class="settlement-note">管理员确认成交后，推广佣金将在当天人工结算。</p>`;
+  return `<p class="section-kicker">Order created</p><h2>订单已登记</h2><div class="order-code"><span>订单号</span><strong>${escapeHtml(order.orderCode)}</strong><small>客服会根据订单号处理</small></div><div class="order-support-panel"><p>点击下方按钮打开在线客服，订单号和商品信息会自动复制，粘贴后发送即可。</p><button class="button primary" type="button" data-order-support>打开客服并复制订单信息</button><small>如果客服回复不及时，请拨打微信电话联系。</small><span class="form-error" data-order-support-feedback hidden></span></div><p class="settlement-note">请先等待客服确认订单，再按照客服回复完成后续操作。</p>`;
+}
+
+function orderSupportMessage(order: AffiliateOrder) {
+  return `你好，我刚刚创建了订单。\n订单号：${order.orderCode}\n商品：${order.productTitle}\n请协助处理，谢谢。`;
+}
+
+function bindOrderSupportAction(content: HTMLElement, order: AffiliateOrder) {
+  const button = content.querySelector<HTMLButtonElement>("[data-order-support]");
+  const feedback = content.querySelector<HTMLElement>("[data-order-support-feedback]");
+  if (!button) return;
+  const openSupport = async () => {
+    button.disabled = true;
+    try {
+      await copyTextToClipboard(orderSupportMessage(order));
+      const supportWindow = window.open("https://support-freedompost.openal.uk/", "_blank", "noopener,noreferrer");
+      if (!supportWindow) throw new Error("popup-blocked");
+      if (feedback) {
+        feedback.textContent = "订单信息已复制，请在客服窗口粘贴并发送。";
+        feedback.hidden = false;
+      }
+    } catch {
+      if (feedback) {
+        feedback.textContent = "客服窗口未能自动打开，请允许弹窗后重试。";
+        feedback.hidden = false;
+      }
+    } finally {
+      button.disabled = false;
+    }
+  };
+  button.addEventListener("click", () => void openSupport());
+  void openSupport();
 }
 
 async function hydrateAffiliateDashboard() {
