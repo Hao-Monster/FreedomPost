@@ -61,27 +61,28 @@ func (c *Client) req(ctx context.Context, m, p string, b, out any) error {
 }
 func (c *Client) SendOrder(ctx context.Context, visitor, content string) error {
 	var x struct {
-		ID int64 `json:"id"`
+		ID       int64  `json:"id"`
+		SourceID string `json:"source_id"`
 	}
 	var search struct {
 		Payload []struct {
-			ID int64 `json:"id"`
+			ID       int64  `json:"id"`
+			SourceID string `json:"source_id"`
 		} `json:"payload"`
 	}
 	searchPath := fmt.Sprintf("/api/v1/accounts/%d/contacts/search?q=%s", c.accountID, url.QueryEscape(visitor))
 	_ = c.req(ctx, http.MethodGet, searchPath, nil, &search)
 	if len(search.Payload) > 0 {
-		x.ID = search.Payload[0].ID\n\t\tx.SourceID = search.Payload[0].SourceID
-	}
-	var e error
-	if x.ID == 0 {
-		e = c.req(ctx, http.MethodPost, fmt.Sprintf("/api/v1/accounts/%d/contacts", c.accountID), map[string]any{"inbox_id": c.inboxID, "name": "FreedomPost访客", "identifier": visitor}, &x)
-	}
-	if e != nil {
-		return e
+		x.ID = search.Payload[0].ID
+		x.SourceID = search.Payload[0].SourceID
 	}
 	if x.ID == 0 {
-		return fmt.Errorf("missing contact id")
+		if err := c.req(ctx, http.MethodPost, fmt.Sprintf("/api/v1/accounts/%d/contacts", c.accountID), map[string]any{"inbox_id": c.inboxID, "name": "FreedomPost访客", "identifier": visitor}, &x); err != nil {
+			return err
+		}
+	}
+	if x.ID == 0 || x.SourceID == "" {
+		return fmt.Errorf("missing chatwoot contact identity")
 	}
 	var y struct {
 		ID int64 `json:"id"`
