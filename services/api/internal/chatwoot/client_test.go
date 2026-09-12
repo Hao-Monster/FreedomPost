@@ -87,11 +87,12 @@ func TestSendOrderReportsChatwootFailureWithoutResponseBody(t *testing.T) {
 
 func TestNewRejectsIncompleteOrUnsafeConfiguration(t *testing.T) {
 	for name, pair := range map[string][2]string{
-		"empty":         {"", ""},
-		"missing base":  {"", "website-token"},
-		"missing token": {"https://support.example", ""},
-		"insecure base": {"http://support.example", "website-token"},
-		"token newline": {"https://support.example", "website\ntoken"},
+		"empty":            {"", ""},
+		"missing base":     {"", "website-token"},
+		"missing token":    {"https://support.example", ""},
+		"insecure base":    {"http://support.example", "website-token"},
+		"base credentials": {"https://user:pass@support.example", "website-token"},
+		"token newline":    {"https://support.example", "website\ntoken"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			base, websiteToken := pair[0], pair[1]

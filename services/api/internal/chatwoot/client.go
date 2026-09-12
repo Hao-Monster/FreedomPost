@@ -29,7 +29,7 @@ func New(base, websiteToken string, timeout time.Duration) (*Client, error) {
 		return nil, fmt.Errorf("incomplete chatwoot configuration")
 	}
 	u, err := url.Parse(strings.TrimRight(base, "/"))
-	if err != nil || u.Scheme != "https" || u.Host == "" || u.Path != "" || u.RawQuery != "" || u.Fragment != "" {
+	if err != nil || u.Scheme != "https" || u.Host == "" || u.User != nil || u.Path != "" || u.RawQuery != "" || u.Fragment != "" {
 		return nil, fmt.Errorf("invalid chatwoot base url")
 	}
 	if err := validateWebsiteToken(websiteToken); err != nil {
