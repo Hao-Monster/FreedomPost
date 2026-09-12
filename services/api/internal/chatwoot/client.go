@@ -63,7 +63,20 @@ func (c *Client) SendOrder(ctx context.Context, visitor, content string) error {
 	var x struct {
 		ID int64 `json:"id"`
 	}
-	e := c.req(ctx, http.MethodPost, fmt.Sprintf("/api/v1/accounts/%d/contacts", c.accountID), map[string]any{"inbox_id": c.inboxID, "name": "FreedomPost访客", "identifier": visitor}, &x)
+	var search struct {
+		Payload []struct {
+			ID int64 `json:"id"`
+		} `json:"payload"`
+	}
+	searchPath := fmt.Sprintf("/api/v1/accounts/%d/contacts/search?q=%s", c.accountID, url.QueryEscape(visitor))
+	_ = c.req(ctx, http.MethodGet, searchPath, nil, &search)
+	if len(search.Payload) > 0 {
+		x.ID = search.Payload[0].ID
+	}
+	var e error
+	if x.ID == 0 {
+		e = c.req(ctx, http.MethodPost, fmt.Sprintf("/api/v1/accounts/%d/contacts", c.accountID), map[string]any{"inbox_id": c.inboxID, "name": "FreedomPost访客", "identifier": visitor}, &x)
+	}
 	if e != nil {
 		return e
 	}
