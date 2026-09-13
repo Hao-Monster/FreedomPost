@@ -86,6 +86,12 @@ Go API 读取与 TypeScript 版本**完全相同**的 `.env` 变量，额外新�
 | `R2_BUCKET` | R2 bucket 名称 | — |
 | `R2_ACCESS_KEY_ID` | R2 访问密钥 | — |
 | `R2_SECRET_ACCESS_KEY` | R2 Secret Key | — |
+| `CHANNEL_BRIDGE_ENABLED` | 企业微信/Chatwoot 桥接总开关，生产凭据齐全并完成验收后才设为 `true` | `false` |
+| `CHATWOOT_WEBHOOK_SECRET` | Chatwoot Webhook HMAC 密钥（仅桥接启用时必填） | — |
+| `WECOM_CORP_ID` / `WECOM_CORP_SECRET` | 企业微信企业凭据（仅桥接启用时必填） | — |
+| `WECOM_AGENT_ID` | 企业微信客服 Agent ID（仅桥接启用时必填） | — |
+| `WECOM_CALLBACK_TOKEN` / `WECOM_ENCODING_AES_KEY` | 企业微信回调验签密钥（仅桥接启用时必填） | — |
+| `WECOM_OPERATOR_USER_ID` | 接收网站访客消息的企业微信成员 ID（仅桥接启用时必填） | — |
 
 ### 生成 Admin 密码 Hash
 
@@ -112,6 +118,8 @@ Go API 读取与 TypeScript 版本**完全相同**的 `.env` 变量，额外新�
 | `/api/affiliate/dashboard` | GET | 推广员看板 |
 | `/api/affiliate/catalog` | GET | 推广员商品目录（含佣金）|
 | `/api/orders` | POST | 创建推广订单 |
+| `/api/integrations/chatwoot/webhook` | POST | Chatwoot 桥接 Webhook（桥接启用时） |
+| `/api/integrations/wecom/callback` | GET/POST | 企业微信 Agent 回调（桥接启用时） |
 | `/api/admin/*` | * | 管理员 API（需 cookie 认证）|
 
 ---

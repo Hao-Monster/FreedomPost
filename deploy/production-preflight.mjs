@@ -82,6 +82,41 @@ export function validateRuntimeEnvironment(environment = process.env) {
     validateInteger(environment, errors, "CHATWOOT_TIMEOUT_MS", 100, 30_000);
   }
 
+  const bridgeEnabled = value("CHANNEL_BRIDGE_ENABLED");
+  if (bridgeEnabled && !["true", "false"].includes(bridgeEnabled)) {
+    add("CHANNEL_BRIDGE_ENABLED", "must be true or false");
+  }
+  if (bridgeEnabled === "true") {
+    if (value("CHANNEL_BRIDGE_PROVIDER") !== "wecom") {
+      add("CHANNEL_BRIDGE_PROVIDER", "must be wecom when the channel bridge is enabled");
+    }
+    requireNames(environment, errors, [
+      "CHATWOOT_BASE_URL",
+      "CHATWOOT_API_TOKEN",
+      "CHATWOOT_ACCOUNT_ID",
+      "CHATWOOT_WEBHOOK_SECRET",
+      "WECOM_CORP_ID",
+      "WECOM_CORP_SECRET",
+      "WECOM_AGENT_ID",
+      "WECOM_CALLBACK_TOKEN",
+      "WECOM_ENCODING_AES_KEY",
+      "WECOM_OPERATOR_USER_ID"
+    ]);
+    if (!validHttpsOrigin(value("WECOM_BASE_URL"))) {
+      add("WECOM_BASE_URL", "must be an HTTPS origin without a path or credentials");
+    }
+    validateInteger(environment, errors, "WECOM_AGENT_ID", 1, 2_147_483_647);
+    if (!/^[A-Za-z0-9]{43}$/.test(value("WECOM_ENCODING_AES_KEY"))) {
+      add("WECOM_ENCODING_AES_KEY", "must contain exactly 43 base64 characters");
+    }
+    for (const name of ["CHATWOOT_WEBHOOK_SECRET", "WECOM_CORP_ID", "WECOM_CORP_SECRET", "WECOM_CALLBACK_TOKEN", "WECOM_OPERATOR_USER_ID"]) {
+      const secret = value(name);
+      if (secret.length > 4_096 || /[\r\n]/.test(secret)) {
+        add(name, "must be no longer than 4096 characters and contain no line breaks");
+      }
+    }
+  }
+
   const minimumLengths = {
     COOKIE_SECRET: 32,
     VISITOR_HASH_SALT: 32,

@@ -109,6 +109,19 @@ type Config struct {
 	ChatwootInboxID   int64
 	ChatwootTimeoutMS int
 
+	// Channel bridge (disabled unless explicitly enabled).
+	ChannelBridgeEnabled  bool
+	ChannelBridgeProvider string
+	ChatwootWebhookSecret string
+	WeComBaseURL          string
+	WeComCorpID           string
+	WeComCorpSecret       string
+	WeComAgentID          int64
+	WeComCallbackToken    string
+	WeComEncodingAESKey   string
+	WeComReceiveID        string
+	WeComOperatorUserID   string
+
 	// Public site
 	PreviewDomain string
 }
@@ -231,16 +244,27 @@ func Load() (*Config, error) {
 
 		ViewBufferFlushInterval: 30 * time.Second,
 
-		PublicSiteURL:        os.Getenv("PUBLIC_SITE_URL"),
-		OriginTestHost:       os.Getenv("ORIGIN_TEST_HOST"),
-		AdminOrigin:          os.Getenv("ADMIN_ORIGIN"),
-		PreviewDomain:        os.Getenv("PREVIEW_DOMAIN"),
-		ChatwootBaseURL:      os.Getenv("CHATWOOT_BASE_URL"),
-		ChatwootWebsiteToken: os.Getenv("CHATWOOT_WEBSITE_TOKEN"),
-		ChatwootAPIToken:     os.Getenv("CHATWOOT_API_TOKEN"),
-		ChatwootAccountID:    int64(parseInt("CHATWOOT_ACCOUNT_ID", 0)),
-		ChatwootInboxID:      int64(parseInt("CHATWOOT_INBOX_ID", 0)),
-		ChatwootTimeoutMS:    parseInt("CHATWOOT_TIMEOUT_MS", 3000),
+		PublicSiteURL:         os.Getenv("PUBLIC_SITE_URL"),
+		OriginTestHost:        os.Getenv("ORIGIN_TEST_HOST"),
+		AdminOrigin:           os.Getenv("ADMIN_ORIGIN"),
+		PreviewDomain:         os.Getenv("PREVIEW_DOMAIN"),
+		ChatwootBaseURL:       os.Getenv("CHATWOOT_BASE_URL"),
+		ChatwootWebsiteToken:  os.Getenv("CHATWOOT_WEBSITE_TOKEN"),
+		ChatwootAPIToken:      os.Getenv("CHATWOOT_API_TOKEN"),
+		ChatwootAccountID:     int64(parseInt("CHATWOOT_ACCOUNT_ID", 0)),
+		ChatwootInboxID:       int64(parseInt("CHATWOOT_INBOX_ID", 0)),
+		ChatwootTimeoutMS:     parseInt("CHATWOOT_TIMEOUT_MS", 3000),
+		ChannelBridgeEnabled:  parseBool("CHANNEL_BRIDGE_ENABLED", false),
+		ChannelBridgeProvider: optionalEnv("CHANNEL_BRIDGE_PROVIDER", "wecom"),
+		ChatwootWebhookSecret: os.Getenv("CHATWOOT_WEBHOOK_SECRET"),
+		WeComBaseURL:          optionalEnv("WECOM_BASE_URL", "https://qyapi.weixin.qq.com"),
+		WeComCorpID:           os.Getenv("WECOM_CORP_ID"),
+		WeComCorpSecret:       os.Getenv("WECOM_CORP_SECRET"),
+		WeComAgentID:          parseInt64("WECOM_AGENT_ID", 0),
+		WeComCallbackToken:    os.Getenv("WECOM_CALLBACK_TOKEN"),
+		WeComEncodingAESKey:   os.Getenv("WECOM_ENCODING_AES_KEY"),
+		WeComReceiveID:        os.Getenv("WECOM_RECEIVE_ID"),
+		WeComOperatorUserID:   os.Getenv("WECOM_OPERATOR_USER_ID"),
 	}
 
 	// Validate storage driver
@@ -290,6 +314,41 @@ func Load() (*Config, error) {
 	}
 	if len(cfg.PaidAccessInternalSecret) < 32 {
 		errs = append(errs, "PAID_ACCESS_INTERNAL_SECRET must contain at least 32 characters")
+	}
+	if cfg.ChannelBridgeEnabled {
+		if cfg.ChannelBridgeProvider != "wecom" {
+			errs = append(errs, "CHANNEL_BRIDGE_PROVIDER must be 'wecom' while the production adapter is enabled")
+		}
+		if cfg.ChatwootBaseURL == "" {
+			errs = append(errs, "CHATWOOT_BASE_URL is required when CHANNEL_BRIDGE_ENABLED=true")
+		}
+		if cfg.ChatwootAPIToken == "" {
+			errs = append(errs, "CHATWOOT_API_TOKEN is required when CHANNEL_BRIDGE_ENABLED=true")
+		}
+		if cfg.ChatwootAccountID <= 0 {
+			errs = append(errs, "CHATWOOT_ACCOUNT_ID must be positive when CHANNEL_BRIDGE_ENABLED=true")
+		}
+		if cfg.ChatwootWebhookSecret == "" {
+			errs = append(errs, "CHATWOOT_WEBHOOK_SECRET is required when CHANNEL_BRIDGE_ENABLED=true")
+		}
+		if cfg.WeComCorpID == "" {
+			errs = append(errs, "WECOM_CORP_ID is required when CHANNEL_BRIDGE_ENABLED=true")
+		}
+		if cfg.WeComCorpSecret == "" {
+			errs = append(errs, "WECOM_CORP_SECRET is required when CHANNEL_BRIDGE_ENABLED=true")
+		}
+		if cfg.WeComAgentID <= 0 {
+			errs = append(errs, "WECOM_AGENT_ID must be positive when CHANNEL_BRIDGE_ENABLED=true")
+		}
+		if cfg.WeComCallbackToken == "" {
+			errs = append(errs, "WECOM_CALLBACK_TOKEN is required when CHANNEL_BRIDGE_ENABLED=true")
+		}
+		if cfg.WeComEncodingAESKey == "" {
+			errs = append(errs, "WECOM_ENCODING_AES_KEY is required when CHANNEL_BRIDGE_ENABLED=true")
+		}
+		if cfg.WeComOperatorUserID == "" {
+			errs = append(errs, "WECOM_OPERATOR_USER_ID is required when CHANNEL_BRIDGE_ENABLED=true")
+		}
 	}
 
 	// Parse admin password.

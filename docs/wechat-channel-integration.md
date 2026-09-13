@@ -50,7 +50,7 @@ Chatwoot Website Inbox（现有）
         └── Weixin iLink adapter（个人微信，实验开关）
 ```
 
-Chatwoot 的 API Inbox 流程需要先创建 contact，再用 `source_id` 创建 conversation，之后通过消息 API 发送消息；消息与附件接口分别见 [创建会话](https://developers.chatwoot.com/api-reference/conversations/create-new-conversation) 和 [创建消息](https://developers.chatwoot.com/api-reference/messages/create-new-message)。桥接服务不能把浏览器提交的 account、inbox、contact 或 conversation ID 当成可信权限数据。
+如果未来要让企业微信用户直接成为 Chatwoot 外部访客，Chatwoot 的 API Inbox 流程需要先创建 contact，再用 `source_id` 创建 conversation，之后通过消息 API 发送消息；消息与附件接口分别见 [创建会话](https://developers.chatwoot.com/api-reference/conversations/create-new-conversation) 和 [创建消息](https://developers.chatwoot.com/api-reference/messages/create-new-message)。本阶段沿用网站现有 Website Inbox，桥接只处理已由 WebWidget 创建的会话；任何浏览器提交的 account、inbox、contact 或 conversation ID 都不能被当成可信权限数据。
 
 ## 4. 消息与身份映射
 
@@ -102,13 +102,20 @@ Chatwoot Webhook 事件应至少订阅 `message_created` 和 `conversation_creat
 后续桥接服务配置建议：
 
 ```text
-CHATWOOT_API_BASE_URL=https://support-freedompost.openal.uk
+CHATWOOT_BASE_URL=https://support-freedompost.openal.uk
 CHATWOOT_API_TOKEN=<server secret>
 CHATWOOT_ACCOUNT_ID=5
-CHATWOOT_API_INBOX_ID=<API inbox, not Website inbox 1>
+# 当前桥接沿用现有 Website Inbox；外部访客模式才需要单独的 API Inbox
 CHATWOOT_WEBHOOK_SECRET=<random secret>
-CHANNEL_PROVIDER=wecom|weixin
-CHANNEL_ENABLED=false
+CHANNEL_BRIDGE_ENABLED=false
+CHANNEL_BRIDGE_PROVIDER=wecom
+WECOM_BASE_URL=https://qyapi.weixin.qq.com
+WECOM_CORP_ID=<server secret>
+WECOM_CORP_SECRET=<server secret>
+WECOM_AGENT_ID=<agent id>
+WECOM_CALLBACK_TOKEN=<server secret>
+WECOM_ENCODING_AES_KEY=<43-character key>
+WECOM_OPERATOR_USER_ID=<enterprise member id>
 WEIXIN_BASE_URL=https://ilinkai.weixin.qq.com
 WEIXIN_BOT_TOKEN=<QR login secret, when provider=weixin>
 ```
@@ -116,12 +123,19 @@ WEIXIN_BOT_TOKEN=<QR login secret, when provider=weixin>
 以下条件全部满足后才允许启用生产出站：
 
 - 主通道由产品负责人明确选择；
-- Chatwoot API Inbox、contact/conversation 创建和 Webhook 验签在测试环境通过；
+- 现有 Website Inbox 的 Webhook 验签和桥接在测试环境通过；若启用外部访客模式，再完成 API Inbox、contact/conversation 创建；
 - 供应商凭据通过密钥管理注入，源码、前端 bundle、日志和数据库均无明文；
 - 文本、图片、文件、超时、重复、重启和上游 4xx/5xx 均有集成测试；
-- 有可执行的 `CHANNEL_ENABLED=false` 回滚和旧 Chatwoot WebWidget 烟囱测试；
+- 有可执行的 `CHANNEL_BRIDGE_ENABLED=false` 回滚和旧 Chatwoot WebWidget 烟囱测试；
 - 个人微信额外完成扫码授权、连续消息收发和“服务端返回成功但微信未展示”的告警验证。
 
 ## 9. 当前实现与下一步
 
-当前提交只包含协议客户端和 Webhook 验签包，未接入 `services/api`，也未写入部署环境。推荐下一步选择企业微信作为生产主通道，同时保留个人微信适配器作为关闭状态的实验实现；确认后再添加独立桥接服务、API Inbox、Redis 映射、媒体上传和测试服务器部署。
+当前代码已经包含三层可测试基础：个人微信 iLink 协议包、企业微信 Agent API 客户端，以及 Chatwoot↔企业微信的文本桥接核心。`services/api` 现在提供可选回调路由：
+
+- `POST /api/integrations/chatwoot/webhook`：先验证原始请求体的 `sha256=` HMAC，再转发访客文本；
+- `GET|POST /api/integrations/wecom/callback`：完成企业微信回调 URL 验证、AES-256-CBC 解密和客服回复路由。
+
+桥接由 `CHANNEL_BRIDGE_ENABLED` 控制，默认 `false`；关闭时回调返回明确的 disabled 响应，现有 Website WebWidget 行为不变。Redis 仅保存投递去重键和短期会话映射，不保存消息正文或凭据。为防止客服回复串到其他会话，企业微信回复必须带有服务端下发的 `FP-CW:<conversation_id>` 前缀。
+
+推荐的生产顺序是：先在 Chatwoot 为现有 Website Inbox 创建 `message_created` Webhook（未来扩展外部访客时再创建专用 API Inbox），再在企业微信创建 Agent、配置回调白名单并取得 CorpID、CorpSecret、AgentID、Token、EncodingAESKey 和客服成员 ID；在测试环境完成文本、重复投递、超时、重启和错误重试验收后，才将 `CHANNEL_BRIDGE_ENABLED` 切换为 `true`。个人微信适配器继续保持关闭状态，媒体转发和个人微信真实账号验收属于后续阶段。

@@ -52,6 +52,8 @@ function validEnvironment() {
     CHATWOOT_ACCOUNT_ID: "5",
     CHATWOOT_INBOX_ID: "1",
     CHATWOOT_TIMEOUT_MS: "3000",
+    CHANNEL_BRIDGE_ENABLED: "false",
+    CHANNEL_BRIDGE_PROVIDER: "wecom",
     PREVIEW_DOMAIN: "www.example.com",
     STORAGE_DRIVER: "local",
     TRUST_PROXY: "true",
@@ -116,6 +118,27 @@ test("fails closed when Chatwoot integration is partially configured", () => {
   assert.ok(names.includes("CHATWOOT_WEBSITE_TOKEN"));
 });
 
+test("keeps the channel bridge off by default and validates every WeCom secret when enabled", () => {
+  const disabled = validEnvironment();
+  assert.deepEqual(validateRuntimeEnvironment(disabled), []);
+
+  const enabled = validEnvironment();
+  enabled.CHANNEL_BRIDGE_ENABLED = "true";
+  enabled.CHATWOOT_WEBHOOK_SECRET = "w".repeat(32);
+  enabled.WECOM_BASE_URL = "https://qyapi.weixin.qq.com";
+  enabled.WECOM_CORP_ID = "ww123";
+  enabled.WECOM_CORP_SECRET = "corp-secret";
+  enabled.WECOM_AGENT_ID = "1001";
+  enabled.WECOM_CALLBACK_TOKEN = "callback-token";
+  enabled.WECOM_ENCODING_AES_KEY = "a".repeat(43);
+  enabled.WECOM_OPERATOR_USER_ID = "operator";
+  assert.deepEqual(validateRuntimeEnvironment(enabled), []);
+
+  delete enabled.WECOM_ENCODING_AES_KEY;
+  const names = validateRuntimeEnvironment(enabled).map((error) => error.name);
+  assert.ok(names.includes("WECOM_ENCODING_AES_KEY"));
+});
+
 test("preflight diagnostics never contain secret values", () => {
   const environment = validEnvironment();
   environment.OPUS8_INTEGRATION_SECRET = "leak-probe-" + "x".repeat(32);
@@ -137,7 +160,15 @@ test("deployment workflow and Caddy keep the benefit path protected", () => {
     "BENEFIT_LINK_ENCRYPTION_KEY",
     "PAID_ACCESS_INTERNAL_SECRET",
     "CHATWOOT_WEBSITE_TOKEN",
-    "CHATWOOT_API_TOKEN"
+    "CHATWOOT_API_TOKEN",
+    "CHANNEL_BRIDGE_ENABLED",
+    "CHATWOOT_WEBHOOK_SECRET",
+    "WECOM_CORP_ID",
+    "WECOM_CORP_SECRET",
+    "WECOM_AGENT_ID",
+    "WECOM_CALLBACK_TOKEN",
+    "WECOM_ENCODING_AES_KEY",
+    "WECOM_OPERATOR_USER_ID"
   ]) {
     assert.match(workflow, new RegExp(`secrets\\.${name}`));
   }
