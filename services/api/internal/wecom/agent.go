@@ -29,6 +29,9 @@ const (
 	maxResponseBytes      = 1 << 20
 	maxTextBytes          = 2048
 	accessTokenSafetyTime = 60 * time.Second
+	// WeCom's WXBizMsgCrypt protocol uses a 32-byte PKCS#7 padding block.
+	// This is distinct from AES's 16-byte cipher block size used by CBC.
+	wecomPKCS7BlockSize = 32
 )
 
 // Config contains the credentials and callback settings for one WeCom Agent.
@@ -325,7 +328,7 @@ func (c *Client) decrypt(encoded string) ([]byte, string, error) {
 	plain := make([]byte, len(ciphertext))
 	iv := c.aesKey[:aes.BlockSize]
 	cipher.NewCBCDecrypter(block, iv).CryptBlocks(plain, ciphertext)
-	plain, err = pkcs7Unpad(plain, aes.BlockSize)
+	plain, err = pkcs7Unpad(plain, wecomPKCS7BlockSize)
 	if err != nil || len(plain) < 20 {
 		return nil, "", errors.New("wecom decrypted payload is invalid")
 	}

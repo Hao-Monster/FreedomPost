@@ -26,6 +26,7 @@ import (
 )
 
 const httpBridgeAESKey = "abcdefghijklmnopqrstuvwxyz0123456789ABCDEFG"
+const httpBridgePKCS7BlockSize = 32
 
 func TestChatwootBridgeWebhookHandlerVerifiesAndForwards(t *testing.T) {
 	var received string
@@ -204,7 +205,9 @@ func encryptHTTPBridgePayload(t *testing.T, keyText string, message []byte, rece
 	if err != nil {
 		t.Fatal(err)
 	}
-	padded := append(append([]byte(nil), plain...), bytes.Repeat([]byte{byte(aes.BlockSize - len(plain)%aes.BlockSize)}, aes.BlockSize-len(plain)%aes.BlockSize)...)
+	// WeCom's protocol pads to 32 bytes; AES-CBC still encrypts 16-byte blocks.
+	padding := httpBridgePKCS7BlockSize - len(plain)%httpBridgePKCS7BlockSize
+	padded := append(append([]byte(nil), plain...), bytes.Repeat([]byte{byte(padding)}, padding)...)
 	ciphertext := make([]byte, len(padded))
 	cipher.NewCBCEncrypter(block, key[:aes.BlockSize]).CryptBlocks(ciphertext, padded)
 	return base64.StdEncoding.EncodeToString(ciphertext)

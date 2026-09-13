@@ -18,6 +18,7 @@ import (
 )
 
 const testAESKey = "abcdefghijklmnopqrstuvwxyz0123456789ABCDEFG"
+const protocolPKCS7BlockSize = 32
 
 func TestSendTextGetsTokenAndUsesAgentAPI(t *testing.T) {
 	var gotMessage map[string]any
@@ -120,7 +121,9 @@ func encryptTest(t *testing.T, key, message []byte, receiverID string) string {
 	if err != nil {
 		t.Fatal(err)
 	}
-	padded := pkcs7Pad(plain, aes.BlockSize)
+	// WeCom's protocol uses a 32-byte PKCS#7 padding block even though AES-CBC
+	// itself has a 16-byte cipher block size.
+	padded := pkcs7Pad(plain, protocolPKCS7BlockSize)
 	ciphertext := make([]byte, len(padded))
 	cipher.NewCBCEncrypter(block, []byte(key)[:aes.BlockSize]).CryptBlocks(ciphertext, padded)
 	return base64.StdEncoding.EncodeToString(ciphertext)
