@@ -62,6 +62,8 @@ services/api/
 │   ├── searchindex/            # 搜索索引内存缓存
 │   ├── paidaccess/             # HMAC 签名内部客户端
 │   ├── storage/                # 多存储适配器（local/OSS/R2）
+│   ├── wecom/                  # 企业微信 Agent API + 回调解密
+│   ├── channelbridge/          # Chatwoot↔企业微信文本桥接与去重
 │   └── httpapi/                # HTTP 路由 + 所有 handler
 ├── test/
 │   └── integration.mjs         # 集成测试脚本
