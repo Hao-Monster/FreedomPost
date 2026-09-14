@@ -26,6 +26,11 @@ tar -xzf /tmp/freedompost-deploy.tar.gz -C "$DEPLOY_PATH"
 rm -f /tmp/freedompost-deploy.tar.gz
 cd "$DEPLOY_PATH"
 
+if [ -f .env ]; then
+  $SUDO chown "$(id -u):$(id -g)" .env
+  chmod 600 .env
+fi
+
 if [[ ! "${ADMIN_PASSWORD_HASH:-}" =~ ^\$2[ab]\$[0-9]{2}\$[./A-Za-z0-9]{53}$ ]]; then
   echo 'ADMIN_PASSWORD_HASH must be an unquoted bcrypt $2a$/$2b$ hash' >&2
   exit 1
