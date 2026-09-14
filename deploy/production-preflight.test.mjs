@@ -79,6 +79,26 @@ test("accepts a complete production environment", () => {
   assert.deepEqual(validateRuntimeEnvironment(validEnvironment()), []);
 });
 
+test("rejects plaintext admin credential aliases in production", () => {
+  for (const name of ["ADMIN_PASSWORD", "HASH_PASSWORD"]) {
+    const environment = validEnvironment();
+    environment[name] = "legacy-credential-must-not-be-present";
+    const names = validateRuntimeEnvironment(environment).map((error) => error.name);
+    assert.ok(names.includes(name));
+  }
+});
+
+test("rejects quoted and unsupported bcrypt hashes", () => {
+  for (const hash of [
+    "'" + validEnvironment().ADMIN_PASSWORD_HASH + "'",
+    validEnvironment().ADMIN_PASSWORD_HASH.replace("$2b$", "$2y$")
+  ]) {
+    const environment = validEnvironment();
+    environment.ADMIN_PASSWORD_HASH = hash;
+    assert.ok(validateRuntimeEnvironment(environment).some((error) => error.name === "ADMIN_PASSWORD_HASH"));
+  }
+});
+
 test("fails closed when a benefit secret is missing", () => {
   const environment = validEnvironment();
   delete environment.OPUS8_INTEGRATION_SECRET;
@@ -190,4 +210,11 @@ test("deployment workflow and Caddy keep the benefit path protected", () => {
   assert.match(caddy, /frame-src[^\n]*https:\/\/challenges\.cloudflare\.com/);
   assert.match(caddy, /connect-src[^\n]*https:\/\/challenges\.cloudflare\.com/);
   assert.match(caddy, /redir @legacyTopics \/benefit\/\?\{query\} permanent/);
+});
+
+test("remote deployment removes legacy admin credential aliases", () => {
+  const remote = readFileSync(`${repositoryRoot}deploy/remote-deploy.sh`, "utf8");
+  assert.match(remote, /remove_env_key\s+"ADMIN_PASSWORD"/);
+  assert.match(remote, /remove_env_key\s+"HASH_PASSWORD"/);
+  assert.match(remote, /legacy admin credential variables remain/);
 });

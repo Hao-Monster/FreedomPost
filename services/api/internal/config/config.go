@@ -8,6 +8,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"golang.org/x/crypto/bcrypt"
 )
 
 // Config holds all runtime configuration loaded from environment variables.
@@ -351,21 +353,25 @@ func Load() (*Config, error) {
 		}
 	}
 
-	// Parse admin password.
-	// Production requires ADMIN_PASSWORD_HASH; plaintext is retained only for local development.
+	// Parse admin password. Production has one credential source: a valid bcrypt
+	// hash. Keeping a plaintext value alongside it is configuration drift and is
+	// rejected even when the hash is present.
 	adminPasswordHash := os.Getenv("ADMIN_PASSWORD_HASH")
 	adminPassword := os.Getenv("ADMIN_PASSWORD")
-	switch {
-	case adminPasswordHash != "":
-		cfg.AdminPasswordHash = adminPasswordHash // production: pre-hashed
-	case adminPassword != "":
-		if os.Getenv("NODE_ENV") == "production" {
-			errs = append(errs, "ADMIN_PASSWORD_HASH is required in production; plaintext ADMIN_PASSWORD is not allowed")
+	production := os.Getenv("NODE_ENV") == "production"
+	if production && strings.TrimSpace(adminPassword) != "" {
+		errs = append(errs, "ADMIN_PASSWORD is forbidden in production; use ADMIN_PASSWORD_HASH only")
+	}
+	if adminPasswordHash != "" {
+		if err := validateAdminPasswordHash(adminPasswordHash); err != nil {
+			errs = append(errs, fmt.Sprintf("ADMIN_PASSWORD_HASH is invalid: %v", err))
 		} else {
-			cfg.AdminPasswordHash = adminPassword // development-only fallback
+			cfg.AdminPasswordHash = adminPasswordHash
 		}
-	default:
-		errs = append(errs, "ADMIN_PASSWORD_HASH (or development-only ADMIN_PASSWORD) is required")
+	} else if !production && adminPassword != "" {
+		cfg.AdminPasswordHash = adminPassword // development-only fallback
+	} else {
+		errs = append(errs, "ADMIN_PASSWORD_HASH is required in production (or use development-only ADMIN_PASSWORD)")
 	}
 
 	// Validate PublicSiteURL
@@ -380,6 +386,19 @@ func Load() (*Config, error) {
 	}
 
 	return cfg, nil
+}
+
+// validateAdminPasswordHash accepts only the bcrypt variants understood by
+// the HTTP verifier. Quoting, Compose escaping, and other prefixes must be
+// rejected at startup instead of turning into an authentication failure.
+func validateAdminPasswordHash(hash string) error {
+	if len(hash) != 60 || !(strings.HasPrefix(hash, "$2a$") || strings.HasPrefix(hash, "$2b$")) {
+		return errors.New("must be an unquoted $2a$ or $2b$ bcrypt hash")
+	}
+	if _, err := bcrypt.Cost([]byte(hash)); err != nil {
+		return errors.New("must be a valid bcrypt hash")
+	}
+	return nil
 }
 
 // Addr returns the listen address in "host:port" format.

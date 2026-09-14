@@ -26,6 +26,11 @@ tar -xzf /tmp/freedompost-deploy.tar.gz -C "$DEPLOY_PATH"
 rm -f /tmp/freedompost-deploy.tar.gz
 cd "$DEPLOY_PATH"
 
+if [[ ! "${ADMIN_PASSWORD_HASH:-}" =~ ^\$2[ab]\$[0-9]{2}\$[./A-Za-z0-9]{53}$ ]]; then
+  echo 'ADMIN_PASSWORD_HASH must be an unquoted bcrypt $2a$/$2b$ hash' >&2
+  exit 1
+fi
+
 if [ ! -f .env ]; then
   {
     printf '%s\n' "NODE_ENV=production"
@@ -117,6 +122,13 @@ set_env() {
   rm -f "$env_tmp"
 }
 
+remove_env_key() {
+  key="$1"
+  env_tmp="$(mktemp)"
+  awk -v key="$key" 'index($0, key "=") != 1 { print }' .env > "$env_tmp"
+  mv "$env_tmp" .env
+}
+
 set_env_if_present() {
   key="$1"
   value="${2:-}"
@@ -158,6 +170,10 @@ set_env "PAID_ACCESS_INTERNAL_SECRET" "$PAID_ACCESS_INTERNAL_SECRET"
 set_env "PAID_ACCESS_WECHAT_IMAGE_URL" "/images/contact-wechat.jpg"
 set_env "COOKIE_SECRET" "$COOKIE_SECRET"
 set_env "VISITOR_HASH_SALT" "$VISITOR_HASH_SALT"
+# Remove legacy plaintext credential aliases from existing servers. The
+# bcrypt hash above is the sole production source of truth.
+remove_env_key "ADMIN_PASSWORD"
+remove_env_key "HASH_PASSWORD"
 set_env "ADMIN_PASSWORD_HASH" "$ADMIN_PASSWORD_HASH"
 set_env "POSTGRES_PASSWORD" "$POSTGRES_PASSWORD"
 set_env "DATABASE_URL" "postgres://freedompost:$POSTGRES_PASSWORD@postgres:5432/freedompost"
@@ -177,6 +193,12 @@ set_env "BENEFIT_NETWORK_DAILY_LIMIT" "3"
 set_env "BENEFIT_CLAIM_MINUTE_LIMIT" "6"
 set_env "GO_API_WEIGHT" "${GO_API_WEIGHT:-0}"
 set_env "TS_API_WEIGHT" "${TS_API_WEIGHT:-100}"
+
+chmod 600 .env
+if grep -qE '^(ADMIN_PASSWORD|HASH_PASSWORD)=' .env; then
+  echo "legacy admin credential variables remain in .env" >&2
+  exit 1
+fi
 
 if [ "$STORAGE_DRIVER" = "oss" ]; then
   set_env "ALIYUN_OSS_REGION" "$ALIYUN_OSS_REGION"

@@ -81,7 +81,8 @@ Go API 读取与 TypeScript 版本**完全相同**的 `.env` 变量，额外新�
 
 | 变量 | 说明 | 默认值 |
 |------|------|--------|
-| `ADMIN_PASSWORD_HASH` | bcrypt hash（cost=12），生产必填 | 空（回退明文） |
+| `ADMIN_PASSWORD_HASH` | 未加引号的 `$2a$`/`$2b$` bcrypt hash，生产唯一凭据来源 | 空 |
+| `ADMIN_PASSWORD` | 仅供本地开发回退；生产环境禁止设置 | 空 |
 | `VIEW_BUFFER_FLUSH_INTERVAL` | 浏览量刷新间隔 | `30s` |
 | `GRAY_RELEASE_PERCENT` | 灰度比例 0-100（Caddy 读取） | `0` |
 | `R2_ACCOUNT_ID` | Cloudflare R2 账户 ID | — |
@@ -101,6 +102,10 @@ Go API 读取与 TypeScript 版本**完全相同**的 `.env` 变量，额外新�
 ./bin/fp-api -hash-password "your-secure-password"
 # 输出：$2a$12$...  → 写入 ADMIN_PASSWORD_HASH=
 ```
+
+生产启动会拒绝 `ADMIN_PASSWORD`、`HASH_PASSWORD` 以及带引号或格式不受支持的
+`ADMIN_PASSWORD_HASH`。部署脚本会从现有服务器 `.env` 中清理这两个旧变量，保留
+`ADMIN_PASSWORD_HASH`，并在重建 API 容器前再次校验。
 
 ---
 

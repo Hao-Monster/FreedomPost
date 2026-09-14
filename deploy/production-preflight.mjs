@@ -132,7 +132,12 @@ export function validateRuntimeEnvironment(environment = process.env) {
       add(name, `must contain ${minimumLengths[name]} to 4096 characters without line breaks`);
     }
   }
-  if (!/^\$2[aby]\$\d{2}\$[./A-Za-z0-9]{53}$/.test(value("ADMIN_PASSWORD_HASH"))) {
+  for (const name of ["ADMIN_PASSWORD", "HASH_PASSWORD"]) {
+    if (value(name).trim() !== "") {
+      add(name, "must be unset in production; use ADMIN_PASSWORD_HASH only");
+    }
+  }
+  if (!/^\$2[ab]\$\d{2}\$[./A-Za-z0-9]{53}$/.test(value("ADMIN_PASSWORD_HASH"))) {
     add("ADMIN_PASSWORD_HASH", "must be a valid bcrypt hash");
   }
 
