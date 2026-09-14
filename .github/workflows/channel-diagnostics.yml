@@ -25,12 +25,13 @@ jobs:
             set -eu
             cd "$DEPLOY_PATH"
             sudo docker compose --env-file .env -f deploy/docker-compose.yml ps api-go
-            sudo docker compose --env-file .env -f deploy/docker-compose.yml logs --since 30m --no-log-prefix api-go 2>/dev/null | python3 -c '
+            sudo docker compose --env-file .env -f deploy/docker-compose.yml logs --since 30m --no-color --no-log-prefix api-go 2>&1 | python3 -c '
             import sys,json
             for line in sys.stdin:
-              try: obj=json.loads(line)
+              try: obj=json.loads(line[line.find("{"):])
               except ValueError: continue
               msg=obj.get("msg", "")
               if any(x in msg for x in ("bridge", "wecom", "chatwoot")):
                 print(json.dumps({k:obj[k] for k in ("time","level","msg","reason","error","stage","status","duration_ms") if k in obj}))
             '
+
