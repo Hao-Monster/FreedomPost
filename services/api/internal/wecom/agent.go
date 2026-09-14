@@ -318,8 +318,11 @@ func (c *Client) postJSON(ctx context.Context, path, accessToken string, payload
 
 func (c *Client) decrypt(encoded string) ([]byte, string, error) {
 	ciphertext, err := base64.StdEncoding.DecodeString(encoded)
-	if err != nil || len(ciphertext) == 0 || len(ciphertext)%aes.BlockSize != 0 {
-		return nil, "", errors.New("wecom encrypted payload is invalid")
+	if err != nil {
+		return nil, "", errors.New("wecom encrypted payload base64 is invalid")
+	}
+	if len(ciphertext) == 0 || len(ciphertext)%aes.BlockSize != 0 {
+		return nil, "", errors.New("wecom encrypted payload length is invalid")
 	}
 	block, err := aes.NewCipher(c.aesKey)
 	if err != nil {
@@ -329,8 +332,11 @@ func (c *Client) decrypt(encoded string) ([]byte, string, error) {
 	iv := c.aesKey[:aes.BlockSize]
 	cipher.NewCBCDecrypter(block, iv).CryptBlocks(plain, ciphertext)
 	plain, err = pkcs7Unpad(plain, wecomPKCS7BlockSize)
-	if err != nil || len(plain) < 20 {
-		return nil, "", errors.New("wecom decrypted payload is invalid")
+	if err != nil {
+		return nil, "", errors.New("wecom decrypted payload padding is invalid")
+	}
+	if len(plain) < 20 {
+		return nil, "", errors.New("wecom decrypted payload header is invalid")
 	}
 	messageLength := binary.BigEndian.Uint32(plain[16:20])
 	end := uint64(20) + uint64(messageLength)
