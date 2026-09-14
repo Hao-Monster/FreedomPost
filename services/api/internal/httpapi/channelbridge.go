@@ -23,7 +23,13 @@ type wecomCallbackEnvelope struct {
 // It verifies the raw body before decoding it and returns 5xx for downstream
 // failures so Chatwoot can retry without exposing implementation details.
 func (s *Server) chatwootBridgeWebhook(w http.ResponseWriter, r *http.Request) {
+	logger := s.logger
+	if logger == nil {
+		logger = slog.Default()
+	}
+	logger.Info("chatwoot webhook received", "has_signature", r.Header.Get("X-Chatwoot-Signature") != "", "has_timestamp", r.Header.Get("X-Chatwoot-Timestamp") != "")
 	if s.channelBridge == nil {
+		logger.Warn("chatwoot webhook rejected", "reason", "bridge_disabled")
 		writeError(w, http.StatusNotFound, "CHANNEL_BRIDGE_DISABLED", "客服通道未启用")
 		return
 	}
@@ -35,6 +41,7 @@ func (s *Server) chatwootBridgeWebhook(w http.ResponseWriter, r *http.Request) {
 	timestamp := r.Header.Get("X-Chatwoot-Timestamp")
 	signature := r.Header.Get("X-Chatwoot-Signature")
 	if !channelbridge.VerifyWebhookSignature(string(body), timestamp, signature, s.channelBridge.WebhookSecret(), time.Now(), 0) {
+		logger.Warn("chatwoot webhook rejected", "reason", "signature_invalid")
 		writeError(w, http.StatusUnauthorized, "WEBHOOK_SIGNATURE_INVALID", "Webhook 签名无效")
 		return
 	}
@@ -43,9 +50,11 @@ func (s *Server) chatwootBridgeWebhook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := s.channelBridge.HandleChatwootWebhook(r.Context(), string(body), timestamp, signature); err != nil {
+		logger.Error("chatwoot bridge failed", "error", err.Error())
 		writeError(w, http.StatusServiceUnavailable, "CHANNEL_BRIDGE_UNAVAILABLE", "客服通道暂时不可用")
 		return
 	}
+	logger.Info("chatwoot webhook processed", "status", http.StatusNoContent)
 	w.WriteHeader(http.StatusNoContent)
 }
 
