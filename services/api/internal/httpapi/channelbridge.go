@@ -5,6 +5,7 @@ import (
 	"encoding/xml"
 	"errors"
 	"io"
+	"log/slog"
 	"net/http"
 	"strings"
 	"time"
@@ -53,7 +54,18 @@ func (s *Server) chatwootBridgeWebhook(w http.ResponseWriter, r *http.Request) {
 // acknowledged so WeCom does not retry them indefinitely; downstream errors
 // return 5xx and are eligible for provider retry.
 func (s *Server) wecomCallback(w http.ResponseWriter, r *http.Request) {
+	logger := s.logger
+	if logger == nil {
+		logger = slog.Default()
+	}
+	query := r.URL.Query()
+	logger.Info("wecom callback received", "method", r.Method,
+		"has_signature", query.Get("msg_signature") != "",
+		"has_timestamp", query.Get("timestamp") != "",
+		"has_nonce", query.Get("nonce") != "",
+		"has_echo", query.Get("echostr") != "")
 	if s.channelBridge == nil {
+		logger.Warn("wecom callback rejected", "reason", "bridge_disabled")
 		writeError(w, http.StatusNotFound, "CHANNEL_BRIDGE_DISABLED", "客服通道未启用")
 		return
 	}
@@ -71,6 +83,7 @@ func (s *Server) wecomCallback(w http.ResponseWriter, r *http.Request) {
 			r.URL.Query().Get("echostr"),
 		)
 		if err != nil {
+			logger.Warn("wecom callback verification failed", "reason", err.Error())
 			writeError(w, http.StatusUnauthorized, "WECOM_SIGNATURE_INVALID", "企业微信回调验证失败")
 			return
 		}
