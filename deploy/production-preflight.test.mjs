@@ -10,6 +10,29 @@ import {
 
 const repositoryRoot = fileURLToPath(new URL("../", import.meta.url));
 
+test("admin deployment uses one-level DNS and a mounted certificate for strict origin TLS", () => {
+  const hostname = "admin-freedompost.thinderbox.uk";
+  const caddy = readFileSync(`${repositoryRoot}deploy/caddy/Caddyfile`, "utf8");
+  const compose = readFileSync(`${repositoryRoot}deploy/docker-compose.yml`, "utf8");
+  const workflow = readFileSync(`${repositoryRoot}.github/workflows/deploy.yml`, "utf8");
+  const remote = readFileSync(`${repositoryRoot}deploy/remote-deploy.sh`, "utf8");
+  const adminBlock = caddy.split(`${hostname} {`)[1]?.split("{$PREVIEW_DOMAIN}")[0];
+  assert.ok(adminBlock, "dedicated admin host must exist");
+  assert.match(adminBlock, /tls \/etc\/caddy\/certs\/admin-origin\.crt \/etc\/caddy\/certs\/admin-origin\.key/);
+  assert.doesNotMatch(adminBlock, /tls internal/);
+  assert.match(compose, /\/etc\/caddy\/certs:\/etc\/caddy\/certs:ro/);
+  for (const config of [caddy, compose, workflow, remote]) {
+    assert.ok(config.includes(hostname));
+    assert.ok(!config.includes("admin.freedompost.thinderbox.uk"));
+  }
+  assert.match(workflow, /ADMIN_ORIGIN: https:\/\/admin-freedompost\.thinderbox\.uk/);
+  assert.match(caddy.split(`${hostname} {`)[0], /@adminApi path \/api\/admin \/api\/admin\/\*/);
+  assert.match(caddy, /handle @adminApi\s*\{\s*respond 404/);
+  const validation = remote.indexOf("run --rm --no-deps nginx caddy validate");
+  assert.ok(validation >= 0);
+  assert.ok(validation < remote.indexOf("up -d --force-recreate"));
+});
+
 function validEnvironment() {
   return {
     DEPLOY_HOST: "203.0.113.10",
@@ -23,6 +46,14 @@ function validEnvironment() {
     PAID_ARTICLES_ENABLED: "true",
     PAID_ACCESS_INTERNAL_URL: "http://paid-access:8080",
     PAID_ACCESS_INTERNAL_SECRET: "q".repeat(32),
+    CHATWOOT_BASE_URL: "https://support-freedompost.openal.uk",
+    CHATWOOT_WEBSITE_TOKEN: "website-token-123",
+    CHATWOOT_API_TOKEN: "chatwoot-token",
+    CHATWOOT_ACCOUNT_ID: "5",
+    CHATWOOT_INBOX_ID: "1",
+    CHATWOOT_TIMEOUT_MS: "3000",
+    CHANNEL_BRIDGE_ENABLED: "false",
+    CHANNEL_BRIDGE_PROVIDER: "wecom",
     PREVIEW_DOMAIN: "www.example.com",
     STORAGE_DRIVER: "local",
     TRUST_PROXY: "true",
@@ -46,6 +77,26 @@ function validEnvironment() {
 test("accepts a complete production environment", () => {
   assert.deepEqual(validateProductionEnvironment(validEnvironment()), []);
   assert.deepEqual(validateRuntimeEnvironment(validEnvironment()), []);
+});
+
+test("rejects plaintext admin credential aliases in production", () => {
+  for (const name of ["ADMIN_PASSWORD", "HASH_PASSWORD"]) {
+    const environment = validEnvironment();
+    environment[name] = "legacy-credential-must-not-be-present";
+    const names = validateRuntimeEnvironment(environment).map((error) => error.name);
+    assert.ok(names.includes(name));
+  }
+});
+
+test("rejects quoted and unsupported bcrypt hashes", () => {
+  for (const hash of [
+    "'" + validEnvironment().ADMIN_PASSWORD_HASH + "'",
+    validEnvironment().ADMIN_PASSWORD_HASH.replace("$2b$", "$2y$")
+  ]) {
+    const environment = validEnvironment();
+    environment.ADMIN_PASSWORD_HASH = hash;
+    assert.ok(validateRuntimeEnvironment(environment).some((error) => error.name === "ADMIN_PASSWORD_HASH"));
+  }
 });
 
 test("fails closed when a benefit secret is missing", () => {
@@ -80,6 +131,34 @@ test("rejects invalid encryption keys and unsafe proxy trust", () => {
   assert.ok(names.includes("TRUST_PROXY"));
 });
 
+test("fails closed when Chatwoot integration is partially configured", () => {
+  const environment = validEnvironment();
+  delete environment.CHATWOOT_WEBSITE_TOKEN;
+  const names = validateProductionEnvironment(environment).map((error) => error.name);
+  assert.ok(names.includes("CHATWOOT_WEBSITE_TOKEN"));
+});
+
+test("keeps the channel bridge off by default and validates every WeCom secret when enabled", () => {
+  const disabled = validEnvironment();
+  assert.deepEqual(validateRuntimeEnvironment(disabled), []);
+
+  const enabled = validEnvironment();
+  enabled.CHANNEL_BRIDGE_ENABLED = "true";
+  enabled.CHATWOOT_WEBHOOK_SECRET = "w".repeat(32);
+  enabled.WECOM_BASE_URL = "https://qyapi.weixin.qq.com";
+  enabled.WECOM_CORP_ID = "ww123";
+  enabled.WECOM_CORP_SECRET = "corp-secret";
+  enabled.WECOM_AGENT_ID = "1001";
+  enabled.WECOM_CALLBACK_TOKEN = "callback-token";
+  enabled.WECOM_ENCODING_AES_KEY = "a".repeat(43);
+  enabled.WECOM_OPERATOR_USER_ID = "operator";
+  assert.deepEqual(validateRuntimeEnvironment(enabled), []);
+
+  delete enabled.WECOM_ENCODING_AES_KEY;
+  const names = validateRuntimeEnvironment(enabled).map((error) => error.name);
+  assert.ok(names.includes("WECOM_ENCODING_AES_KEY"));
+});
+
 test("preflight diagnostics never contain secret values", () => {
   const environment = validEnvironment();
   environment.OPUS8_INTEGRATION_SECRET = "leak-probe-" + "x".repeat(32);
@@ -99,7 +178,17 @@ test("deployment workflow and Caddy keep the benefit path protected", () => {
     "OPUS8_INTEGRATION_SECRET",
     "BENEFIT_CLAIM_HMAC_SECRET",
     "BENEFIT_LINK_ENCRYPTION_KEY",
-    "PAID_ACCESS_INTERNAL_SECRET"
+    "PAID_ACCESS_INTERNAL_SECRET",
+    "CHATWOOT_WEBSITE_TOKEN",
+    "CHATWOOT_API_TOKEN",
+    "CHANNEL_BRIDGE_ENABLED",
+    "CHATWOOT_WEBHOOK_SECRET",
+    "WECOM_CORP_ID",
+    "WECOM_CORP_SECRET",
+    "WECOM_AGENT_ID",
+    "WECOM_CALLBACK_TOKEN",
+    "WECOM_ENCODING_AES_KEY",
+    "WECOM_OPERATOR_USER_ID"
   ]) {
     assert.match(workflow, new RegExp(`secrets\\.${name}`));
   }
@@ -121,4 +210,11 @@ test("deployment workflow and Caddy keep the benefit path protected", () => {
   assert.match(caddy, /frame-src[^\n]*https:\/\/challenges\.cloudflare\.com/);
   assert.match(caddy, /connect-src[^\n]*https:\/\/challenges\.cloudflare\.com/);
   assert.match(caddy, /redir @legacyTopics \/benefit\/\?\{query\} permanent/);
+});
+
+test("remote deployment removes legacy admin credential aliases", () => {
+  const remote = readFileSync(`${repositoryRoot}deploy/remote-deploy.sh`, "utf8");
+  assert.match(remote, /remove_env_key\s+"ADMIN_PASSWORD"/);
+  assert.match(remote, /remove_env_key\s+"HASH_PASSWORD"/);
+  assert.match(remote, /legacy admin credential variables remain/);
 });

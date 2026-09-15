@@ -1,0 +1,37 @@
+name: Channel diagnostics
+on:
+  push:
+    branches: [codex/admin-domain-tls]
+    paths: [.github/workflows/channel-diagnostics.yml]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: appleboy/ssh-action@2ead5e36573f08b82fbfce1504f1a4b05a647c6f
+        env:
+          DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key: ${{ secrets.DEPLOY_KEY }}
+          password: ${{ secrets.DEPLOY_KEY == '' && secrets.DEPLOY_PASSWORD || '' }}
+          port: ${{ secrets.DEPLOY_PORT || 22 }}
+          envs: DEPLOY_PATH
+          script: |
+            set -eu
+            cd "$DEPLOY_PATH"
+            sudo docker compose --env-file .env -f deploy/docker-compose.yml ps api-go
+            sudo docker compose --env-file .env -f deploy/docker-compose.yml logs --since 30m --no-color --no-log-prefix api-go 2>&1 | python3 -c '
+            import sys,json
+            for line in sys.stdin:
+              try: obj=json.loads(line[line.find("{"):])
+              except ValueError: continue
+              msg=obj.get("msg", "")
+              if any(x in msg for x in ("bridge", "wecom", "chatwoot")):
+                print(json.dumps({k:obj[k] for k in ("time","level","msg","reason","error","stage","status","duration_ms") if k in obj}))
+            '
+

@@ -27,6 +27,8 @@ import (
 	"github.com/redis/go-redis/v9"
 
 	"github.com/fenghaoyun-monster/freedompost/services/api/internal/benefit"
+	"github.com/fenghaoyun-monster/freedompost/services/api/internal/channelbridge"
+	"github.com/fenghaoyun-monster/freedompost/services/api/internal/chatwoot"
 	"github.com/fenghaoyun-monster/freedompost/services/api/internal/config"
 	"github.com/fenghaoyun-monster/freedompost/services/api/internal/httpapi"
 	"github.com/fenghaoyun-monster/freedompost/services/api/internal/migrate"
@@ -37,6 +39,7 @@ import (
 	"github.com/fenghaoyun-monster/freedompost/services/api/internal/session"
 	"github.com/fenghaoyun-monster/freedompost/services/api/internal/storage"
 	"github.com/fenghaoyun-monster/freedompost/services/api/internal/viewcount"
+	"github.com/fenghaoyun-monster/freedompost/services/api/internal/wecom"
 )
 
 // version is injected at build time via -ldflags "-X main.version=..."
@@ -289,11 +292,55 @@ func run(logger *slog.Logger) error {
 		)
 	}
 
+	chatwootClient, chatwootErr := chatwoot.New(cfg.ChatwootBaseURL, cfg.ChatwootWebsiteToken, time.Duration(cfg.ChatwootTimeoutMS)*time.Millisecond)
+	if chatwootErr != nil {
+		logger.Error("chatwoot: integration disabled due to invalid configuration", "error", chatwootErr)
+	}
+
+	var channelBridgeService *channelbridge.Service
+	if cfg.ChannelBridgeEnabled {
+		wecomClient, bridgeErr := wecom.New(wecom.Config{
+			BaseURL:        cfg.WeComBaseURL,
+			CorpID:         cfg.WeComCorpID,
+			CorpSecret:     cfg.WeComCorpSecret,
+			AgentID:        cfg.WeComAgentID,
+			CallbackToken:  cfg.WeComCallbackToken,
+			EncodingAESKey: cfg.WeComEncodingAESKey,
+			ReceiveID:      cfg.WeComReceiveID,
+			Timeout:        time.Duration(cfg.ChatwootTimeoutMS) * time.Millisecond,
+		})
+		if bridgeErr != nil {
+			return fmt.Errorf("channel bridge: WeCom configuration invalid: %w", bridgeErr)
+		}
+		chatwootAPIClient, bridgeErr := channelbridge.NewChatwootClient(channelbridge.ChatwootConfig{
+			BaseURL:   cfg.ChatwootBaseURL,
+			APIToken:  cfg.ChatwootAPIToken,
+			AccountID: cfg.ChatwootAccountID,
+			Timeout:   time.Duration(cfg.ChatwootTimeoutMS) * time.Millisecond,
+		})
+		if bridgeErr != nil {
+			return fmt.Errorf("channel bridge: Chatwoot configuration invalid: %w", bridgeErr)
+		}
+		channelBridgeService, bridgeErr = channelbridge.NewService(channelbridge.ServiceConfig{
+			Chatwoot:       chatwootAPIClient,
+			WeCom:          wecomClient,
+			OperatorUserID: cfg.WeComOperatorUserID,
+			WebhookSecret:  cfg.ChatwootWebhookSecret,
+			Deduper:        channelbridge.RedisDeduper{Client: redisClient},
+			Mappings:       channelbridge.RedisConversationStore{Client: redisClient},
+		})
+		if bridgeErr != nil {
+			return fmt.Errorf("channel bridge: initialization failed: %w", bridgeErr)
+		}
+		logger.Info("channel bridge: WeCom adapter enabled", "operator_user_id", cfg.WeComOperatorUserID)
+	}
+
 	// ── 11. HTTP server ───────────────────────────────────────────────────────
 	srv := httpapi.New(
 		cfg, repo, sessions, limiter, stor, localStore,
-		viewBuf, searchCache, paidAccessClient, benefitRuntime, logger,
+		viewBuf, searchCache, paidAccessClient, benefitRuntime, chatwootClient, logger,
 	)
+	srv.SetChannelBridge(channelBridgeService)
 
 	httpSrv := &http.Server{
 		Addr:              cfg.Addr(),

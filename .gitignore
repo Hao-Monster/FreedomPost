@@ -19,5 +19,6 @@ docs/*
 !docs/WEBMASTER_BENEFIT_DEPLOYMENT.md
 !docs/paid-article-access.md
 !docs/security-hardening-2026-08-26.md
+!docs/wechat-channel-integration.md
 bin/
 services/*/bin/
