@@ -1,6 +1,7 @@
 (function () {
-  var baseUrl = "https://support-freedompost.openal.uk";
-  var websiteToken = atob("eTlEd3JtZEVuWkh2SEZOZXBRZUZSczVD");
+  var baseUrl = "https://chat.clawpan.online";
+  // Public WebWidget identifier for account 1 / inbox 1; not an API credential.
+  var websiteToken = "WM32VohJAYcy69Rx6qr1P2Lt";
   window.chatwootSettings = { position: "right", type: "standard", launcherTitle: "" };
   var script = document.createElement("script");
   script.src = baseUrl + "/packs/js/sdk.js";
