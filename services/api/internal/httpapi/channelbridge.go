@@ -117,6 +117,7 @@ func (s *Server) wecomCallback(w http.ResponseWriter, r *http.Request) {
 			envelope.Encrypt,
 		)
 		if err != nil {
+			logger.Warn("wecom callback rejected", "reason", "decrypt_failed", "error", err.Error())
 			writeError(w, http.StatusUnauthorized, "WECOM_SIGNATURE_INVALID", "企业微信回调验证失败")
 			return
 		}
@@ -124,12 +125,15 @@ func (s *Server) wecomCallback(w http.ResponseWriter, r *http.Request) {
 			// Unknown operators, unsupported message types, and replies without
 			// an explicit conversation reference are intentionally ignored.
 			if isIgnoredWeComMessageError(err) {
+				logger.Warn("wecom reply ignored", "reason", err.Error())
 				writeWeComSuccess(w)
 				return
 			}
+			logger.Error("wecom reply forwarding failed", "error", err.Error())
 			writeError(w, http.StatusServiceUnavailable, "CHANNEL_BRIDGE_UNAVAILABLE", "客服通道暂时不可用")
 			return
 		}
+		logger.Info("wecom callback processed", "status", http.StatusOK)
 		writeWeComSuccess(w)
 		return
 	default:
