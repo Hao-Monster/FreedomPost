@@ -56,27 +56,30 @@ type DedupReleaser interface {
 // ConversationStore persists a relationship for future routing improvements.
 type ConversationStore interface {
 	Put(context.Context, string, int64, time.Duration) error
+	Latest(context.Context, string) (int64, error)
 }
 
 // Service routes messages between Chatwoot and the configured WeCom operator.
 // It fails closed when a message has no explicit conversation reference.
 type Service struct {
-	chatwoot       *ChatwootClient
-	wecom          *wecom.Client
-	operatorUserID string
-	webhookSecret  string
-	deduper        Deduper
-	mappings       ConversationStore
-	now            func() time.Time
+	chatwoot               *ChatwootClient
+	wecom                  *wecom.Client
+	operatorUserID         string
+	webhookSecret          string
+	deduper                Deduper
+	mappings               ConversationStore
+	allowUnprefixedReplies bool
+	now                    func() time.Time
 }
 
 type ServiceConfig struct {
-	Chatwoot       *ChatwootClient
-	WeCom          *wecom.Client
-	OperatorUserID string
-	WebhookSecret  string
-	Deduper        Deduper
-	Mappings       ConversationStore
+	Chatwoot               *ChatwootClient
+	WeCom                  *wecom.Client
+	OperatorUserID         string
+	WebhookSecret          string
+	Deduper                Deduper
+	Mappings               ConversationStore
+	AllowUnprefixedReplies bool
 }
 
 // WebhookSecret returns the configured Chatwoot signing secret for the HTTP
@@ -98,13 +101,14 @@ func NewService(cfg ServiceConfig) (*Service, error) {
 		return nil, errors.New("chatwoot webhook secret is required")
 	}
 	return &Service{
-		chatwoot:       cfg.Chatwoot,
-		wecom:          cfg.WeCom,
-		operatorUserID: strings.TrimSpace(cfg.OperatorUserID),
-		webhookSecret:  strings.TrimSpace(cfg.WebhookSecret),
-		deduper:        cfg.Deduper,
-		mappings:       cfg.Mappings,
-		now:            time.Now,
+		chatwoot:               cfg.Chatwoot,
+		wecom:                  cfg.WeCom,
+		operatorUserID:         strings.TrimSpace(cfg.OperatorUserID),
+		webhookSecret:          strings.TrimSpace(cfg.WebhookSecret),
+		deduper:                cfg.Deduper,
+		mappings:               cfg.Mappings,
+		allowUnprefixedReplies: cfg.AllowUnprefixedReplies,
+		now:                    time.Now,
 	}, nil
 }
 
@@ -168,12 +172,23 @@ func (s *Service) HandleWeComMessage(ctx context.Context, message wecom.Message)
 		return nil
 	}
 	match := conversationReference.FindStringSubmatch(message.Content)
-	if len(match) != 3 {
+	content := strings.TrimSpace(message.Content)
+	conversationID := int64(0)
+	if len(match) == 3 {
+		var err error
+		conversationID, err = strconv.ParseInt(match[1], 10, 64)
+		if err != nil || conversationID <= 0 {
+			return errors.New("wecom conversation reference is invalid")
+		}
+		content = strings.TrimSpace(match[2])
+	} else if s.allowUnprefixedReplies && s.mappings != nil {
+		var err error
+		conversationID, err = s.mappings.Latest(ctx, "wecom:"+s.operatorUserID)
+		if err != nil || conversationID <= 0 {
+			return errors.New("wecom reply has no active conversation")
+		}
+	} else {
 		return errors.New("wecom reply must include FP-CW:<conversation_id>")
-	}
-	conversationID, err := strconv.ParseInt(match[1], 10, 64)
-	if err != nil || conversationID <= 0 {
-		return errors.New("wecom conversation reference is invalid")
 	}
 	deliveryKey := ""
 	if s.deduper != nil && message.MsgID != "" {
@@ -186,7 +201,7 @@ func (s *Service) HandleWeComMessage(ctx context.Context, message wecom.Message)
 			return nil
 		}
 	}
-	if err := s.chatwoot.SendOutgoingMessage(ctx, conversationID, strings.TrimSpace(match[2])); err != nil {
+	if err := s.chatwoot.SendOutgoingMessage(ctx, conversationID, content); err != nil {
 		if deliveryKey != "" {
 			s.releaseClaim(ctx, deliveryKey)
 		}
@@ -243,5 +258,24 @@ func (s RedisConversationStore) Put(ctx context.Context, key string, conversatio
 	if prefix == "" {
 		prefix = "fp:channel:mapping:"
 	}
-	return s.Client.Set(ctx, prefix+key, strconv.FormatInt(conversationID, 10), ttl).Err()
+	if err := s.Client.Set(ctx, prefix+key, strconv.FormatInt(conversationID, 10), ttl).Err(); err != nil {
+		return err
+	}
+	parts := strings.SplitN(key, ":", 3)
+	if len(parts) >= 2 {
+		return s.Client.Set(ctx, prefix+parts[0]+":"+parts[1], strconv.FormatInt(conversationID, 10), ttl).Err()
+	}
+	return nil
+}
+
+func (s RedisConversationStore) Latest(ctx context.Context, key string) (int64, error) {
+	prefix := s.Prefix
+	if prefix == "" {
+		prefix = "fp:channel:mapping:"
+	}
+	value, err := s.Client.Get(ctx, prefix+key).Result()
+	if err != nil {
+		return 0, err
+	}
+	return strconv.ParseInt(value, 10, 64)
 }

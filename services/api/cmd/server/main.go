@@ -322,12 +322,13 @@ func run(logger *slog.Logger) error {
 			return fmt.Errorf("channel bridge: Chatwoot configuration invalid: %w", bridgeErr)
 		}
 		channelBridgeService, bridgeErr = channelbridge.NewService(channelbridge.ServiceConfig{
-			Chatwoot:       chatwootAPIClient,
-			WeCom:          wecomClient,
-			OperatorUserID: cfg.WeComOperatorUserID,
-			WebhookSecret:  cfg.ChatwootWebhookSecret,
-			Deduper:        channelbridge.RedisDeduper{Client: redisClient},
-			Mappings:       channelbridge.RedisConversationStore{Client: redisClient},
+			Chatwoot:               chatwootAPIClient,
+			WeCom:                  wecomClient,
+			OperatorUserID:         cfg.WeComOperatorUserID,
+			WebhookSecret:          cfg.ChatwootWebhookSecret,
+			Deduper:                channelbridge.RedisDeduper{Client: redisClient},
+			Mappings:               channelbridge.RedisConversationStore{Client: redisClient},
+			AllowUnprefixedReplies: cfg.ChannelBridgeAllowUnprefixedReplies,
 		})
 		if bridgeErr != nil {
 			return fmt.Errorf("channel bridge: initialization failed: %w", bridgeErr)

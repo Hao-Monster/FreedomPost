@@ -112,17 +112,18 @@ type Config struct {
 	ChatwootTimeoutMS int
 
 	// Channel bridge (disabled unless explicitly enabled).
-	ChannelBridgeEnabled  bool
-	ChannelBridgeProvider string
-	ChatwootWebhookSecret string
-	WeComBaseURL          string
-	WeComCorpID           string
-	WeComCorpSecret       string
-	WeComAgentID          int64
-	WeComCallbackToken    string
-	WeComEncodingAESKey   string
-	WeComReceiveID        string
-	WeComOperatorUserID   string
+	ChannelBridgeEnabled                bool
+	ChannelBridgeProvider               string
+	ChannelBridgeAllowUnprefixedReplies bool
+	ChatwootWebhookSecret               string
+	WeComBaseURL                        string
+	WeComCorpID                         string
+	WeComCorpSecret                     string
+	WeComAgentID                        int64
+	WeComCallbackToken                  string
+	WeComEncodingAESKey                 string
+	WeComReceiveID                      string
+	WeComOperatorUserID                 string
 
 	// Public site
 	PreviewDomain string
@@ -246,27 +247,28 @@ func Load() (*Config, error) {
 
 		ViewBufferFlushInterval: 30 * time.Second,
 
-		PublicSiteURL:         os.Getenv("PUBLIC_SITE_URL"),
-		OriginTestHost:        os.Getenv("ORIGIN_TEST_HOST"),
-		AdminOrigin:           os.Getenv("ADMIN_ORIGIN"),
-		PreviewDomain:         os.Getenv("PREVIEW_DOMAIN"),
-		ChatwootBaseURL:       os.Getenv("CHATWOOT_BASE_URL"),
-		ChatwootWebsiteToken:  os.Getenv("CHATWOOT_WEBSITE_TOKEN"),
-		ChatwootAPIToken:      os.Getenv("CHATWOOT_API_TOKEN"),
-		ChatwootAccountID:     int64(parseInt("CHATWOOT_ACCOUNT_ID", 0)),
-		ChatwootInboxID:       int64(parseInt("CHATWOOT_INBOX_ID", 0)),
-		ChatwootTimeoutMS:     parseInt("CHATWOOT_TIMEOUT_MS", 3000),
-		ChannelBridgeEnabled:  parseBool("CHANNEL_BRIDGE_ENABLED", false),
-		ChannelBridgeProvider: optionalEnv("CHANNEL_BRIDGE_PROVIDER", "wecom"),
-		ChatwootWebhookSecret: os.Getenv("CHATWOOT_WEBHOOK_SECRET"),
-		WeComBaseURL:          optionalEnv("WECOM_BASE_URL", "https://qyapi.weixin.qq.com"),
-		WeComCorpID:           os.Getenv("WECOM_CORP_ID"),
-		WeComCorpSecret:       os.Getenv("WECOM_CORP_SECRET"),
-		WeComAgentID:          parseInt64("WECOM_AGENT_ID", 0),
-		WeComCallbackToken:    os.Getenv("WECOM_CALLBACK_TOKEN"),
-		WeComEncodingAESKey:   os.Getenv("WECOM_ENCODING_AES_KEY"),
-		WeComReceiveID:        os.Getenv("WECOM_RECEIVE_ID"),
-		WeComOperatorUserID:   os.Getenv("WECOM_OPERATOR_USER_ID"),
+		PublicSiteURL:                       os.Getenv("PUBLIC_SITE_URL"),
+		OriginTestHost:                      os.Getenv("ORIGIN_TEST_HOST"),
+		AdminOrigin:                         os.Getenv("ADMIN_ORIGIN"),
+		PreviewDomain:                       os.Getenv("PREVIEW_DOMAIN"),
+		ChatwootBaseURL:                     os.Getenv("CHATWOOT_BASE_URL"),
+		ChatwootWebsiteToken:                os.Getenv("CHATWOOT_WEBSITE_TOKEN"),
+		ChatwootAPIToken:                    os.Getenv("CHATWOOT_API_TOKEN"),
+		ChatwootAccountID:                   int64(parseInt("CHATWOOT_ACCOUNT_ID", 0)),
+		ChatwootInboxID:                     int64(parseInt("CHATWOOT_INBOX_ID", 0)),
+		ChatwootTimeoutMS:                   parseInt("CHATWOOT_TIMEOUT_MS", 3000),
+		ChannelBridgeEnabled:                parseBool("CHANNEL_BRIDGE_ENABLED", false),
+		ChannelBridgeProvider:               optionalEnv("CHANNEL_BRIDGE_PROVIDER", "wecom"),
+		ChannelBridgeAllowUnprefixedReplies: parseBool("CHANNEL_BRIDGE_ALLOW_UNPREFIXED_REPLIES", false),
+		ChatwootWebhookSecret:               os.Getenv("CHATWOOT_WEBHOOK_SECRET"),
+		WeComBaseURL:                        optionalEnv("WECOM_BASE_URL", "https://qyapi.weixin.qq.com"),
+		WeComCorpID:                         os.Getenv("WECOM_CORP_ID"),
+		WeComCorpSecret:                     os.Getenv("WECOM_CORP_SECRET"),
+		WeComAgentID:                        parseInt64("WECOM_AGENT_ID", 0),
+		WeComCallbackToken:                  os.Getenv("WECOM_CALLBACK_TOKEN"),
+		WeComEncodingAESKey:                 os.Getenv("WECOM_ENCODING_AES_KEY"),
+		WeComReceiveID:                      os.Getenv("WECOM_RECEIVE_ID"),
+		WeComOperatorUserID:                 os.Getenv("WECOM_OPERATOR_USER_ID"),
 	}
 
 	// Validate storage driver
