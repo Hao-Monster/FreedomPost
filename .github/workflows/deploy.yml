@@ -158,10 +158,10 @@ jobs:
           ADMIN_PASSWORD_HASH: ${{ secrets.ADMIN_PASSWORD_HASH }}
           ADMIN_ORIGIN: https://admin-freedompost.thinderbox.uk
           ADMIN_DOMAIN: admin-freedompost.thinderbox.uk
-          CHATWOOT_BASE_URL: https://support-freedompost.openal.uk
+          CHATWOOT_BASE_URL: https://chat.clawpan.online
           CHATWOOT_WEBSITE_TOKEN: ${{ secrets.CHATWOOT_WEBSITE_TOKEN }}
           CHATWOOT_API_TOKEN: ${{ secrets.CHATWOOT_API_TOKEN }}
-          CHATWOOT_ACCOUNT_ID: "5"
+          CHATWOOT_ACCOUNT_ID: "1"
           CHATWOOT_INBOX_ID: "1"
           CHATWOOT_TIMEOUT_MS: "3000"
           CHANNEL_BRIDGE_ENABLED: ${{ secrets.CHANNEL_BRIDGE_ENABLED || 'false' }}
@@ -236,10 +236,10 @@ jobs:
           ADMIN_PASSWORD_HASH: ${{ secrets.ADMIN_PASSWORD_HASH }}
           ADMIN_ORIGIN: https://admin-freedompost.thinderbox.uk
           ADMIN_DOMAIN: admin-freedompost.thinderbox.uk
-          CHATWOOT_BASE_URL: https://support-freedompost.openal.uk
+          CHATWOOT_BASE_URL: https://chat.clawpan.online
           CHATWOOT_WEBSITE_TOKEN: ${{ secrets.CHATWOOT_WEBSITE_TOKEN }}
           CHATWOOT_API_TOKEN: ${{ secrets.CHATWOOT_API_TOKEN }}
-          CHATWOOT_ACCOUNT_ID: "5"
+          CHATWOOT_ACCOUNT_ID: "1"
           CHATWOOT_INBOX_ID: "1"
           CHATWOOT_TIMEOUT_MS: "3000"
           CHANNEL_BRIDGE_ENABLED: ${{ secrets.CHANNEL_BRIDGE_ENABLED || 'false' }}
