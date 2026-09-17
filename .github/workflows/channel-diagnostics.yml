@@ -24,6 +24,9 @@ jobs:
           script: |
             set -eu
             cd "$DEPLOY_PATH"
+            printf 'production_egress_ip='
+            curl -4fsS --max-time 5 https://api.ipify.org
+            printf '\n'
             sudo docker compose --env-file .env -f deploy/docker-compose.yml ps api-go
             sudo docker compose --env-file .env -f deploy/docker-compose.yml logs --since 30m --no-color --no-log-prefix api-go 2>&1 | python3 -c '
             import sys,json
