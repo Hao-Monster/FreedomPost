@@ -35,6 +35,30 @@ jobs:
               except ValueError: continue
               msg=obj.get("msg", "")
               if any(x in msg for x in ("bridge", "wecom", "chatwoot")):
-                print(json.dumps({k:obj[k] for k in ("time","level","msg","reason","error","stage","status","duration_ms") if k in obj}))
+                print(json.dumps({k:obj[k] for k in ("time","level","msg","reason","error","stage","status","duration_ms","target_host","account_id","conversation_id","auth_header_present","response_kind","edge_present","request_id_present") if k in obj}))
+            '
+            container_id=$(sudo docker compose --env-file .env -f deploy/docker-compose.yml ps -q api-go)
+            sudo docker inspect "$container_id" | python3 -c '
+            import sys,json,urllib.request,urllib.error
+            obj=json.load(sys.stdin)[0]
+            env=dict(item.split("=",1) for item in obj["Config"]["Env"] if "=" in item)
+            base=env.get("CHATWOOT_BASE_URL","").rstrip("/")
+            token=env.get("CHATWOOT_API_TOKEN","").strip()
+            if base != "https://chat.clawpan.online":
+              print("chatwoot probe skipped: unexpected origin"); sys.exit(0)
+            class NoRedirect(urllib.request.HTTPRedirectHandler):
+              def redirect_request(self,*args,**kwargs): return None
+            opener=urllib.request.build_opener(NoRedirect)
+            for stage,path in (("profile","/api/v1/profile"),("account","/api/v1/accounts/1/inboxes")):
+              req=urllib.request.Request(base+path,headers={"api_access_token":token,"Accept":"application/json"})
+              try: response=opener.open(req,timeout=10)
+              except urllib.error.HTTPError as error: response=error
+              except Exception:
+                print(json.dumps({"stage":stage,"reason":"transport_error"})); continue
+              with response:
+                body=response.read(65536)
+                try: json.loads(body); kind="json"
+                except Exception: kind="non_json"
+                print(json.dumps({"stage":stage,"status":response.code,"response_kind":kind,"auth_header_present":bool(token),"edge_present":bool(response.headers.get("CF-Ray"))}))
             '
 

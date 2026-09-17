@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -96,18 +97,47 @@ func (c *ChatwootClient) SendOutgoingMessage(ctx context.Context, conversationID
 	}
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("api_access_token", c.apiToken)
+	started := time.Now()
+	logger := slog.Default().With("target_host", c.baseURL.Host, "account_id", c.accountID, "conversation_id", conversationID, "stage", "create_message")
+	logger.Info("chatwoot outgoing request", "auth_header_present", request.Header.Get("api_access_token") != "")
 	response, err := c.http.Do(request)
 	if err != nil {
+		kind := "transport_error"
+		if errors.Is(err, context.DeadlineExceeded) {
+			kind = "timeout"
+		}
+		var ue *url.Error
+		if errors.As(err, &ue) && strings.Contains(ue.Err.Error(), "redirects are disabled") {
+			kind = "redirect_blocked"
+		}
+		logger.Error("chatwoot outgoing transport failed", "reason", kind, "duration_ms", time.Since(started).Milliseconds())
 		return errors.New("chatwoot request failed")
 	}
 	defer response.Body.Close()
-	if _, err := readBounded(response.Body, maxWebhookBodyBytes); err != nil {
+	responseBody, err := readBounded(response.Body, maxWebhookBodyBytes)
+	if err != nil {
+		logger.Error("chatwoot outgoing response unreadable", "status", response.StatusCode)
 		return errors.New("chatwoot response exceeded size limit")
 	}
+	// Log only fixed classifications: upstream bodies and headers may contain secrets.
+	logger.Info("chatwoot outgoing response", "status", response.StatusCode, "duration_ms", time.Since(started).Milliseconds(), "response_kind", responseKind(responseBody), "edge_present", response.Header.Get("CF-Ray") != "", "request_id_present", response.Header.Get("X-Request-Id") != "")
 	if response.StatusCode < 200 || response.StatusCode > 299 {
 		return fmt.Errorf("chatwoot request failed (status %d)", response.StatusCode)
 	}
 	return nil
+}
+
+func responseKind(body []byte) string {
+	if json.Valid(body) {
+		return "json"
+	}
+	if strings.HasPrefix(strings.ToLower(strings.TrimSpace(string(body))), "<!doctype html") || strings.HasPrefix(strings.ToLower(strings.TrimSpace(string(body))), "<html") {
+		return "html"
+	}
+	if len(body) == 0 {
+		return "empty"
+	}
+	return "other"
 }
 
 // VerifyWebhookSignature validates Chatwoot's timestamped HMAC signature.
