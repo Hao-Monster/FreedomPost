@@ -75,7 +75,7 @@ func TestBridgeRoutesBothDirectionsWithConversationReference(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	service, err := NewService(ServiceConfig{Chatwoot: cc, WeCom: wc, OperatorUserID: "operator", WebhookSecret: "secret"})
+	service, err := NewService(ServiceConfig{Chatwoot: cc, WeCom: wc, OperatorUserID: "operator", WebhookSecret: "secret", Mappings: fixedConversationStore{id: 42}, AllowUnprefixedReplies: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -96,6 +96,17 @@ func TestBridgeRoutesBothDirectionsWithConversationReference(t *testing.T) {
 	if sentToChatwoot != "已收到，请稍候" {
 		t.Fatalf("sentToChatwoot = %q", sentToChatwoot)
 	}
+	if err := service.HandleWeComMessage(context.Background(), wecom.Message{FromUserName: "operator", MsgType: "text", MsgID: "m2", Content: "不带标识的回复"}); err != nil {
+		t.Fatal(err)
+	}
+	if sentToChatwoot != "不带标识的回复" {
+		t.Fatalf("unprefixed sentToChatwoot = %q", sentToChatwoot)
+	}
 }
+
+type fixedConversationStore struct{ id int64 }
+
+func (s fixedConversationStore) Put(context.Context, string, int64, time.Duration) error { return nil }
+func (s fixedConversationStore) Latest(context.Context, string) (int64, error)           { return s.id, nil }
 
 const testAESKey = "abcdefghijklmnopqrstuvwxyz0123456789ABCDEFG"
