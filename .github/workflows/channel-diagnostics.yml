@@ -50,15 +50,17 @@ jobs:
               def redirect_request(self,*args,**kwargs): return None
             opener=urllib.request.build_opener(NoRedirect)
             for stage,path in (("profile","/api/v1/profile"),("account","/api/v1/accounts/1/inboxes")):
-              req=urllib.request.Request(base+path,headers={"api_access_token":token,"Accept":"application/json"})
-              try: response=opener.open(req,timeout=10)
-              except urllib.error.HTTPError as error: response=error
-              except Exception:
-                print(json.dumps({"stage":stage,"reason":"transport_error"})); continue
-              with response:
-                body=response.read(65536)
-                try: json.loads(body); kind="json"
-                except Exception: kind="non_json"
-                print(json.dumps({"stage":stage,"status":response.code,"response_kind":kind,"auth_header_present":bool(token),"edge_present":bool(response.headers.get("CF-Ray"))}))
+              for auth_mode,headers in (("api_access_token",{"api_access_token":token}),("bearer",{"Authorization":"Bearer "+token}),("both",{"api_access_token":token,"Authorization":"Bearer "+token})):
+                headers["Accept"]="application/json"
+                req=urllib.request.Request(base+path,headers=headers)
+                try: response=opener.open(req,timeout=10)
+                except urllib.error.HTTPError as error: response=error
+                except Exception:
+                  print(json.dumps({"stage":stage,"auth_mode":auth_mode,"reason":"transport_error"})); continue
+                with response:
+                  body=response.read(65536)
+                  try: json.loads(body); kind="json"
+                  except Exception: kind="non_json"
+                  print(json.dumps({"stage":stage,"auth_mode":auth_mode,"status":response.code,"response_kind":kind,"edge_present":bool(response.headers.get("CF-Ray"))}))
             '
 
