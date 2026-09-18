@@ -58,6 +58,11 @@ func TestBridgeRoutesBothDirectionsWithConversationReference(t *testing.T) {
 	}))
 	defer wecomServer.Close()
 	chatwootServer := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Emulate an ingress that does not pass underscore-containing headers.
+		if r.Header.Get("api-access-token") != "api-token" || r.Header.Get("api_access_token") != "" {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
 		var payload map[string]any
 		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
 			t.Fatal(err)

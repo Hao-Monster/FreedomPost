@@ -96,10 +96,11 @@ func (c *ChatwootClient) SendOutgoingMessage(ctx context.Context, conversationID
 		return errors.New("chatwoot request could not be created")
 	}
 	request.Header.Set("Content-Type", "application/json")
-	request.Header.Set("api_access_token", c.apiToken)
+	// Rack normalizes hyphens to underscores; proxies may drop underscore headers.
+	request.Header.Set("api-access-token", c.apiToken)
 	started := time.Now()
 	logger := slog.Default().With("target_host", c.baseURL.Host, "account_id", c.accountID, "conversation_id", conversationID, "stage", "create_message")
-	logger.Info("chatwoot outgoing request", "auth_header_present", request.Header.Get("api_access_token") != "")
+	logger.Info("chatwoot outgoing request", "auth_header_present", request.Header.Get("api-access-token") != "")
 	response, err := c.http.Do(request)
 	if err != nil {
 		kind := "transport_error"
