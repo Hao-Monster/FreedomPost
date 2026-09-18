@@ -44,6 +44,8 @@ jobs:
             env=dict(item.split("=",1) for item in obj["Config"]["Env"] if "=" in item)
             base=env.get("CHATWOOT_BASE_URL","").rstrip("/")
             token=env.get("CHATWOOT_API_TOKEN","").strip()
+            import hashlib
+            print(json.dumps({"stage":"runtime_token_fingerprint","token_length":len(token),"sha256_prefix":hashlib.sha256(token.encode()).hexdigest()[:16]}))
             if base != "https://chat.clawpan.online":
               print("chatwoot probe skipped: unexpected origin"); sys.exit(0)
             class NoRedirect(urllib.request.HTTPRedirectHandler):
