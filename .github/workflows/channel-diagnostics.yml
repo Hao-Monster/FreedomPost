@@ -52,7 +52,7 @@ jobs:
               def redirect_request(self,*args,**kwargs): return None
             opener=urllib.request.build_opener(NoRedirect)
             for stage,path in (("profile","/api/v1/profile"),("account","/api/v1/accounts/1/inboxes")):
-              for auth_mode,headers in (("api_access_token",{"api_access_token":token}),("bearer",{"Authorization":"Bearer "+token}),("both",{"api_access_token":token,"Authorization":"Bearer "+token})):
+              for auth_mode,headers in (("api_access_token",{"api_access_token":token}),("hyphenated",{"api-access-token":token}),("bearer",{"Authorization":"Bearer "+token}),("both",{"api_access_token":token,"Authorization":"Bearer "+token})):
                 headers["Accept"]="application/json"
                 req=urllib.request.Request(base+path,headers=headers)
                 try: response=opener.open(req,timeout=10)
