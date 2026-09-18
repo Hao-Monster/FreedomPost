@@ -4,6 +4,7 @@
 package channelbridge
 
 import (
+	"bytes"
 	"context"
 	"crypto/hmac"
 	"crypto/sha256"
@@ -13,7 +14,9 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"mime/multipart"
 	"net/http"
+	"net/textproto"
 	"net/url"
 	"strconv"
 	"strings"
@@ -124,6 +127,49 @@ func (c *ChatwootClient) SendOutgoingMessage(ctx context.Context, conversationID
 	logger.Info("chatwoot outgoing response", "status", response.StatusCode, "duration_ms", time.Since(started).Milliseconds(), "response_kind", responseKind(responseBody), "edge_present", response.Header.Get("CF-Ray") != "", "request_id_present", response.Header.Get("X-Request-Id") != "")
 	if response.StatusCode < 200 || response.StatusCode > 299 {
 		return fmt.Errorf("chatwoot request failed (status %d)", response.StatusCode)
+	}
+	return nil
+}
+
+func (c *ChatwootClient) SendOutgoingImage(ctx context.Context, conversationID int64, media []byte, filename, contentType string) error {
+	if conversationID <= 0 || len(media) == 0 {
+		return errors.New("chatwoot image is invalid")
+	}
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	_ = writer.WriteField("message_type", "outgoing")
+	_ = writer.WriteField("private", "false")
+	headers := make(textproto.MIMEHeader)
+	headers.Set("Content-Disposition", fmt.Sprintf(`form-data; name="attachments[]"; filename="%s"`, strings.ReplaceAll(filename, `"`, "")))
+	headers.Set("Content-Type", contentType)
+	part, err := writer.CreatePart(headers)
+	if err != nil {
+		return errors.New("chatwoot image could not be encoded")
+	}
+	if _, err := part.Write(media); err != nil {
+		return errors.New("chatwoot image could not be encoded")
+	}
+	if err := writer.Close(); err != nil {
+		return errors.New("chatwoot image could not be encoded")
+	}
+	path := fmt.Sprintf("api/v1/accounts/%d/conversations/%d/messages", c.accountID, conversationID)
+	requestURL := c.baseURL.ResolveReference(&url.URL{Path: path})
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, requestURL.String(), &body)
+	if err != nil {
+		return errors.New("chatwoot image request could not be created")
+	}
+	request.Header.Set("Content-Type", writer.FormDataContentType())
+	request.Header.Set("api-access-token", c.apiToken)
+	response, err := c.http.Do(request)
+	if err != nil {
+		return errors.New("chatwoot image request failed")
+	}
+	defer response.Body.Close()
+	if _, err := readBounded(response.Body, maxWebhookBodyBytes); err != nil {
+		return errors.New("chatwoot image response exceeded size limit")
+	}
+	if response.StatusCode < 200 || response.StatusCode > 299 {
+		return fmt.Errorf("chatwoot image request failed (status %d)", response.StatusCode)
 	}
 	return nil
 }

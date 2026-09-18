@@ -168,6 +168,30 @@ func (s *Service) HandleWeComMessage(ctx context.Context, message wecom.Message)
 	if strings.TrimSpace(message.FromUserName) != s.operatorUserID {
 		return errors.New("wecom sender is not the configured operator")
 	}
+	if message.MsgType == "image" {
+		if s.mappings == nil {
+			return errors.New("wecom image has no active conversation")
+		}
+		conversationID, err := s.mappings.Latest(ctx, "wecom:"+s.operatorUserID)
+		if err != nil || conversationID <= 0 {
+			return errors.New("wecom image has no active conversation")
+		}
+		claimed, deliveryKey, err := s.claimWeComDelivery(ctx, message.MsgID)
+		if err != nil || !claimed {
+			return err
+		}
+		media, err := s.wecom.DownloadMedia(ctx, message.MediaID)
+		if err == nil {
+			err = s.chatwoot.SendOutgoingImage(ctx, conversationID, media.Data, media.Filename, media.ContentType)
+		}
+		if err != nil {
+			if deliveryKey != "" {
+				s.releaseClaim(ctx, deliveryKey)
+			}
+			return err
+		}
+		return nil
+	}
 	if message.MsgType != "text" {
 		return nil
 	}
@@ -208,6 +232,18 @@ func (s *Service) HandleWeComMessage(ctx context.Context, message wecom.Message)
 		return err
 	}
 	return nil
+}
+
+func (s *Service) claimWeComDelivery(ctx context.Context, msgID string) (bool, string, error) {
+	if s.deduper == nil || msgID == "" {
+		return true, "", nil
+	}
+	key := "wecom:delivery:" + msgID
+	claimed, err := s.deduper.Claim(ctx, key, deliveryTTL)
+	if err != nil {
+		return false, key, errors.New("wecom message deduplication failed")
+	}
+	return claimed, key, nil
 }
 
 func (s *Service) releaseClaim(ctx context.Context, key string) {

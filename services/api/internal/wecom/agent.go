@@ -28,11 +28,18 @@ const (
 	defaultTimeout        = 15 * time.Second
 	maxResponseBytes      = 1 << 20
 	maxTextBytes          = 2048
+	maxMediaBytes         = 10 << 20
 	accessTokenSafetyTime = 60 * time.Second
 	// WeCom's WXBizMsgCrypt protocol uses a 32-byte PKCS#7 padding block.
 	// This is distinct from AES's 16-byte cipher block size used by CBC.
 	wecomPKCS7BlockSize = 32
 )
+
+type Media struct {
+	Data        []byte
+	ContentType string
+	Filename    string
+}
 
 // Config contains the credentials and callback settings for one WeCom Agent.
 // All values are server-side secrets and must be supplied through the runtime
@@ -205,6 +212,43 @@ func (c *Client) SendText(ctx context.Context, toUserID, content string) error {
 		return fmt.Errorf("wecom send rejected (code %d)", result.ErrCode)
 	}
 	return nil
+}
+
+func (c *Client) DownloadMedia(ctx context.Context, mediaID string) (Media, error) {
+	mediaID = strings.TrimSpace(mediaID)
+	if mediaID == "" {
+		return Media{}, errors.New("wecom media ID is required")
+	}
+	token, err := c.accessToken(ctx)
+	if err != nil {
+		return Media{}, err
+	}
+	query := url.Values{"access_token": {token}, "media_id": {mediaID}}
+	requestURL := c.baseURL.ResolveReference(&url.URL{Path: "/cgi-bin/media/get", RawQuery: query.Encode()})
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, requestURL.String(), nil)
+	if err != nil {
+		return Media{}, errors.New("wecom media request could not be created")
+	}
+	response, err := c.http.Do(request)
+	if err != nil {
+		return Media{}, errors.New("wecom media request failed")
+	}
+	defer response.Body.Close()
+	data, err := readBounded(response.Body, maxMediaBytes)
+	if err != nil || response.StatusCode < 200 || response.StatusCode > 299 {
+		return Media{}, fmt.Errorf("wecom media request failed (status %d)", response.StatusCode)
+	}
+	contentType := response.Header.Get("Content-Type")
+	if strings.HasPrefix(contentType, "application/json") {
+		return Media{}, errors.New("wecom media response was an error")
+	}
+	if contentType == "" {
+		contentType = http.DetectContentType(data)
+	}
+	if !strings.HasPrefix(contentType, "image/") {
+		return Media{}, errors.New("wecom media is not an image")
+	}
+	return Media{Data: data, ContentType: contentType, Filename: "wecom-image"}, nil
 }
 
 // VerifyEcho decrypts the echostr sent by WeCom while saving a callback URL.

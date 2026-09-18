@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -36,6 +37,7 @@ func TestVerifyWebhookSignature(t *testing.T) {
 func TestBridgeRoutesBothDirectionsWithConversationReference(t *testing.T) {
 	var sentToWecom string
 	var sentToChatwoot string
+	var sentImage string
 	wecomServer := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/cgi-bin/gettoken":
@@ -52,6 +54,9 @@ func TestBridgeRoutesBothDirectionsWithConversationReference(t *testing.T) {
 			}
 			sentToWecom = payload.Touser + ":" + payload.Text.Content
 			_, _ = w.Write([]byte(`{"errcode":0}`))
+		case "/cgi-bin/media/get":
+			w.Header().Set("Content-Type", "image/png")
+			_, _ = w.Write([]byte("png-image"))
 		default:
 			http.NotFound(w, r)
 		}
@@ -61,6 +66,23 @@ func TestBridgeRoutesBothDirectionsWithConversationReference(t *testing.T) {
 		// Emulate an ingress that does not pass underscore-containing headers.
 		if r.Header.Get("api-access-token") != "api-token" || r.Header.Get("api_access_token") != "" {
 			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		if strings.HasPrefix(r.Header.Get("Content-Type"), "multipart/form-data") {
+			if err := r.ParseMultipartForm(1 << 20); err != nil {
+				t.Fatal(err)
+			}
+			file, _, err := r.FormFile("attachments[]")
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer file.Close()
+			data, err := io.ReadAll(file)
+			if err != nil {
+				t.Fatal(err)
+			}
+			sentImage = string(data)
+			w.WriteHeader(http.StatusCreated)
 			return
 		}
 		var payload map[string]any
@@ -106,6 +128,12 @@ func TestBridgeRoutesBothDirectionsWithConversationReference(t *testing.T) {
 	}
 	if sentToChatwoot != "不带标识的回复" {
 		t.Fatalf("unprefixed sentToChatwoot = %q", sentToChatwoot)
+	}
+	if err := service.HandleWeComMessage(context.Background(), wecom.Message{FromUserName: "operator", MsgType: "image", MsgID: "m3", MediaID: "media-1"}); err != nil {
+		t.Fatal(err)
+	}
+	if sentImage != "png-image" {
+		t.Fatalf("sentImage = %q", sentImage)
 	}
 }
 
