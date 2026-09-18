@@ -10,6 +10,8 @@ import (
 	"strings"
 
 	"github.com/fenghaoyun-monster/freedompost/services/api/internal/benefit"
+	"github.com/fenghaoyun-monster/freedompost/services/api/internal/channelbridge"
+	"github.com/fenghaoyun-monster/freedompost/services/api/internal/chatwoot"
 	"github.com/fenghaoyun-monster/freedompost/services/api/internal/config"
 	"github.com/fenghaoyun-monster/freedompost/services/api/internal/domain"
 	"github.com/fenghaoyun-monster/freedompost/services/api/internal/paidaccess"
@@ -35,18 +37,20 @@ type BenefitRuntime struct {
 
 // Server is the HTTP server with all dependencies wired in.
 type Server struct {
-	cfg         *config.Config
-	repo        domain.Repository
-	sessions    *session.Store
-	limiter     ratelimit.Limiter
-	storage     storage.Adapter
-	localStore  *storage.LocalAdapter // nil if not local
-	viewBuffer  *viewcount.Buffer
-	searchCache *searchindex.Cache
-	paidAccess  *paidaccess.Client
-	benefit     *BenefitRuntime // nil = feature disabled
-	logger      *slog.Logger
-	mux         *http.ServeMux
+	cfg           *config.Config
+	repo          domain.Repository
+	sessions      *session.Store
+	limiter       ratelimit.Limiter
+	storage       storage.Adapter
+	localStore    *storage.LocalAdapter // nil if not local
+	viewBuffer    *viewcount.Buffer
+	searchCache   *searchindex.Cache
+	paidAccess    *paidaccess.Client
+	benefit       *BenefitRuntime // nil = feature disabled
+	chatwoot      *chatwoot.Client
+	channelBridge *channelbridge.Service
+	logger        *slog.Logger
+	mux           *http.ServeMux
 }
 
 // New creates a new Server with all dependencies.
@@ -61,6 +65,7 @@ func New(
 	searchCache *searchindex.Cache,
 	paidAccess *paidaccess.Client,
 	benefitRuntime *BenefitRuntime,
+	chatwootClient *chatwoot.Client,
 	logger *slog.Logger,
 ) *Server {
 	s := &Server{
@@ -74,11 +79,19 @@ func New(
 		searchCache: searchCache,
 		paidAccess:  paidAccess,
 		benefit:     benefitRuntime,
+		chatwoot:    chatwootClient,
 		logger:      logger,
 		mux:         http.NewServeMux(),
 	}
 	s.routes()
 	return s
+}
+
+// SetChannelBridge installs the optional WeCom/Chatwoot bridge before the
+// server starts accepting requests. A nil value keeps the public callbacks
+// disabled and preserves the existing Website WebWidget-only behavior.
+func (s *Server) SetChannelBridge(service *channelbridge.Service) {
+	s.channelBridge = service
 }
 
 // Handler returns the HTTP handler with all middleware applied.
@@ -120,6 +133,11 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /api/affiliate/clicks", s.affiliateRecordClick)
 	s.mux.HandleFunc("POST /api/affiliate/logout", s.affiliateLogout)
 	s.mux.HandleFunc("POST /api/orders", s.createOrder)
+
+	// ── Optional channel bridge callbacks ───────────────────────────────────
+	s.mux.HandleFunc("GET /api/integrations/wecom/callback", s.wecomCallback)
+	s.mux.HandleFunc("POST /api/integrations/wecom/callback", s.wecomCallback)
+	s.mux.HandleFunc("POST /api/integrations/chatwoot/webhook", s.chatwootBridgeWebhook)
 
 	// ── Admin API ────────────────────────────────────────────────────────────
 	s.mux.HandleFunc("POST /api/admin/login", s.adminLogin)

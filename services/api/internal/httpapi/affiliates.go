@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"errors"
+	"fmt"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -250,6 +251,7 @@ func (s *Server) createOrder(w http.ResponseWriter, r *http.Request) {
 	var input struct {
 		ProductSlug         string `json:"productSlug"`
 		RecommenderWechatID string `json:"recommenderWechatId"`
+		VisitorID           string `json:"visitorId"`
 	}
 	if !decodeJSON(w, r, &input) {
 		return
@@ -282,7 +284,22 @@ func (s *Server) createOrder(w http.ResponseWriter, r *http.Request) {
 		s.internalError(w, r, err)
 		return
 	}
-	writeJSON(w, http.StatusCreated, map[string]any{"order": order})
+	status := "unavailable"
+	if s.chatwoot != nil {
+		content := fmt.Sprintf("你好，我刚刚创建了订单。\n订单号：%s\n商品：%s\n请协助处理，谢谢。", order.OrderCode, order.ProductTitle)
+		conversationToken := ""
+		if cookie, cookieErr := r.Cookie("cw_conversation"); cookieErr == nil {
+			conversationToken = cookie.Value
+		}
+		if conversationToken == "" {
+			status = "pending"
+		} else if err := s.chatwoot.SendOrder(r.Context(), conversationToken, content, r.Referer()); err == nil {
+			status = "sent"
+		} else {
+			s.logger.Warn("chatwoot order message failed", "error", err, "order_id", order.ID)
+		}
+	}
+	writeJSON(w, http.StatusCreated, map[string]any{"order": order, "supportMessageStatus": status})
 }
 
 func normalizeAffiliateWechatID(value string) string {

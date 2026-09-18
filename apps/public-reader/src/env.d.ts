@@ -1,6 +1,14 @@
 /// <reference types="astro/client" />
 
 interface Window {
+  $chatwoot?: {
+    hasLoaded: boolean;
+    toggle: (state?: "open" | "close") => void;
+    setUser?: (identifier: string, attributes?: Record<string, string>) => void;
+  };
+  chatwootSDK?: {
+    run: (options: { websiteToken: string; baseUrl: string }) => void;
+  };
   __FREEDOMPOST_INITIAL__?: {
     slug: string;
     meta: {
@@ -19,3 +27,5 @@ interface Window {
     }>;
   };
 }
+
+

@@ -203,7 +203,7 @@ const colorOptions = [
   { label: "金色", className: "fp-color-gold" }
 ] as const;
 
-function App() {
+export function App() {
   const [isAuthed, setAuthed] = useState(false);
   const [username, setUsername] = useState("admin");
   const [password, setPassword] = useState("");
@@ -239,13 +239,8 @@ function App() {
     importedImageClaimsRef.current.clear();
     failedImageImportsRef.current.clear();
     editorRef.current.innerHTML = markdownToEditorHtml(activePost.markdown);
-    // Auto-import external images already in the markdown so the user
-    // doesn't hit a save rejection when opening an existing article.
-    if (/!\[[^\]]*\]\(https?:\/\//i.test(activePost.markdown) && activePost.id) {
-      const postID = activePost.id;
-      const editor = editorRef.current;
-      void trackPendingMedia(autoImportEditorImages(postID, editor));
-    }
+    // Opening saved content must not rewrite its images. Absolute URLs may
+    // already belong to managed storage; the save API validates that boundary.
     if (focusCreatedPostRef.current === activePost.id) {
       focusCreatedPostRef.current = null;
       savedRangeRef.current = focusEditorStart(editorRef.current)?.cloneRange() ?? null;
@@ -393,7 +388,17 @@ function App() {
         return;
       }
 
-      const getMarkdown = () => editorRef.current ? editorHtmlToMarkdown(editorRef.current) : activePost.markdown;
+      const getMarkdown = () => {
+        if (!editorRef.current) return activePost.markdown;
+        const markdown = editorHtmlToMarkdown(editorRef.current);
+        // Formatting commands can update the contenteditable DOM without
+        // emitting an input event. Preserve visible headings in the payload.
+        const missingHeadings = [...editorRef.current.querySelectorAll<HTMLElement>("h1,h2,h3,h4,h5,h6")]
+          .map((heading) => ({ level: Number(heading.tagName.slice(1)), text: heading.textContent?.trim() ?? "" }))
+          .filter(({ text }) => text && !markdown.includes(text))
+          .map(({ level, text }) => `${"#".repeat(level)} ${text}`);
+        return missingHeadings.length ? `${markdown}\n\n${missingHeadings.join("\n\n")}` : markdown;
+      };
       const checkUnresolved = () => {
         const count = editorRef.current?.querySelectorAll('[data-fp-type="image-import-error"]').length ?? 0;
         if (count > 0) {
@@ -2299,7 +2304,7 @@ function markdownFragmentToEditorHtml(markdown: string): string {
   return html.join("");
 }
 
-function editorHtmlToMarkdown(editor: HTMLElement): string {
+export function editorHtmlToMarkdown(editor: HTMLElement): string {
   const blocks: string[] = [];
 
   for (const node of [...editor.childNodes]) {
