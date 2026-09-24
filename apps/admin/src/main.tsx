@@ -379,6 +379,19 @@ function App() {
 
   async function savePost() {
     if (!activePost || isSavingPost) return;
+
+    // BUG-01: Validate title before saving
+    if (!activePost.title.trim()) {
+      showToast("请填写文章标题后再保存");
+      return;
+    }
+
+    // BUG-02: Validate paid article price
+    if (activePost.visibility === "paid" && activePost.priceCents <= 0) {
+      showToast("付费文章价格必须大于 0");
+      return;
+    }
+
     setSavingPost(true);
 
     try {
@@ -724,16 +737,20 @@ function App() {
   }
 
   function createLinkAtSelection() {
-    const href = prompt("输入链接地址");
+    const href = prompt("输入链接地址（支持 http/https/mailto/tel）");
     if (!href) return;
 
+    // BUG-12: Allow mailto: and tel: in addition to http/https
+    const allowedProtocols = ["http:", "https:", "mailto:", "tel:"];
     try {
       const url = new URL(href, location.origin);
-      if (url.protocol !== "http:" && url.protocol !== "https:") {
-        showToast("只支持 http/https 链接");
+      if (!allowedProtocols.includes(url.protocol)) {
+        showToast("只支持 http、https、mailto、tel 链接");
         return;
       }
-      runEditorCommand("createLink", url.toString());
+      // For mailto/tel, use the original href directly to preserve the format
+      const finalHref = url.protocol === "mailto:" || url.protocol === "tel:" ? href.trim() : url.toString();
+      runEditorCommand("createLink", finalHref);
     } catch {
       showToast("链接地址无效");
     }
@@ -1053,7 +1070,7 @@ function App() {
     setToast({ id, text });
     window.setTimeout(() => {
       setToast((current) => (current?.id === id ? null : current));
-    }, 1800);
+    }, 3000);
   }
 
   if (!isAuthed) {

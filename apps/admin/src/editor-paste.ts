@@ -55,7 +55,8 @@ const allowedInlineClasses = new Set([
   "fp-color-red",
   "fp-color-green",
   "fp-color-blue",
-  "fp-color-purple"
+  "fp-color-purple",
+  "fp-color-gold"
 ]);
 
 /**
