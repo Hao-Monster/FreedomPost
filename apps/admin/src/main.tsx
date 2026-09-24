@@ -379,6 +379,19 @@ function App() {
 
   async function savePost() {
     if (!activePost || isSavingPost) return;
+
+    // BUG-01: Validate title before saving
+    if (!activePost.title.trim()) {
+      showToast("请填写文章标题后再保存");
+      return;
+    }
+
+    // BUG-02: Validate paid article price
+    if (activePost.visibility === "paid" && activePost.priceCents <= 0) {
+      showToast("付费文章价格必须大于 0");
+      return;
+    }
+
     setSavingPost(true);
 
     try {
@@ -724,16 +737,20 @@ function App() {
   }
 
   function createLinkAtSelection() {
-    const href = prompt("输入链接地址");
+    const href = prompt("输入链接地址（支持 http/https/mailto/tel）");
     if (!href) return;
 
+    // BUG-12: Allow mailto: and tel: in addition to http/https
+    const allowedProtocols = ["http:", "https:", "mailto:", "tel:"];
     try {
       const url = new URL(href, location.origin);
-      if (url.protocol !== "http:" && url.protocol !== "https:") {
-        showToast("只支持 http/https 链接");
+      if (!allowedProtocols.includes(url.protocol)) {
+        showToast("只支持 http、https、mailto、tel 链接");
         return;
       }
-      runEditorCommand("createLink", url.toString());
+      // For mailto/tel, use the original href directly to preserve the format
+      const finalHref = url.protocol === "mailto:" || url.protocol === "tel:" ? href.trim() : url.toString();
+      runEditorCommand("createLink", finalHref);
     } catch {
       showToast("链接地址无效");
     }
@@ -1053,7 +1070,7 @@ function App() {
     setToast({ id, text });
     window.setTimeout(() => {
       setToast((current) => (current?.id === id ? null : current));
-    }, 1800);
+    }, 3000);
   }
 
   if (!isAuthed) {
@@ -2299,7 +2316,7 @@ function markdownFragmentToEditorHtml(markdown: string): string {
   return html.join("");
 }
 
-function editorHtmlToMarkdown(editor: HTMLElement): string {
+export function editorHtmlToMarkdown(editor: HTMLElement): string {
   const blocks: string[] = [];
 
   for (const node of [...editor.childNodes]) {
@@ -2365,16 +2382,39 @@ function nodeToMarkdown(node: Node): string {
     return `![${escapeMarkdown(img.alt || "图片")}](${img.getAttribute("src") ?? ""})`;
   }
 
+  // NOTE: heading check MUST come before the generic media-container fallback.
+  // If an image is inserted inside a heading (e.g. H1 contains figure.editor-image),
+  // the old code fell into the media-container branch first and lost the # prefix.
+  // Fix: handle headings first; if the heading also contains block-level media,
+  // extract the inline text as the heading and emit media children separately.
+  if (/^H[1-6]$/.test(node.tagName)) {
+    const level = Number(node.tagName.slice(1));
+    // Check whether this heading contains any block-level media nodes.
+    const hasBlockMedia = Boolean(node.querySelector("figure.editor-image,figure.editor-youtube,.editor-attachment"));
+    if (!hasBlockMedia) {
+      // Pure text heading (normal case).
+      return `${"#".repeat(level)} ${inlineChildrenToMarkdown(node).trim()}`;
+    }
+    // Mixed heading+media: emit heading text first, then media blocks separately.
+    const headingText = [...node.childNodes]
+      .filter((child) => !(child instanceof HTMLElement && child.matches("figure.editor-image,figure.editor-youtube,.editor-attachment")))
+      .map((child) => (child instanceof HTMLElement ? inlineChildrenToMarkdown(child) : child.textContent ?? ""))
+      .join("").trim();
+    const mediaParts = [...node.childNodes]
+      .filter((child) => child instanceof HTMLElement && child.matches("figure.editor-image,figure.editor-youtube,.editor-attachment"))
+      .map((child) => nodeToMarkdown(child))
+      .filter((m) => m.trim());
+    const parts: string[] = [];
+    if (headingText) parts.push(`${"#".repeat(level)} ${headingText}`);
+    parts.push(...mediaParts);
+    return parts.join("\n\n");
+  }
+
   if (node.querySelector("figure.editor-image,figure.editor-youtube,img,.editor-attachment")) {
     const childMarkdown = [...node.childNodes].map(nodeToMarkdown).filter((value) => value.trim());
     if (childMarkdown.length) {
       return childMarkdown.join("\n\n");
     }
-  }
-
-  if (/^H[1-6]$/.test(node.tagName)) {
-    const level = Number(node.tagName.slice(1));
-    return `${"#".repeat(level)} ${inlineChildrenToMarkdown(node).trim()}`;
   }
 
   if (node.tagName === "PRE") {
