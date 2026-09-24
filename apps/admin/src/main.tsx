@@ -2299,7 +2299,7 @@ function markdownFragmentToEditorHtml(markdown: string): string {
   return html.join("");
 }
 
-function editorHtmlToMarkdown(editor: HTMLElement): string {
+export function editorHtmlToMarkdown(editor: HTMLElement): string {
   const blocks: string[] = [];
 
   for (const node of [...editor.childNodes]) {
@@ -2365,16 +2365,39 @@ function nodeToMarkdown(node: Node): string {
     return `![${escapeMarkdown(img.alt || "图片")}](${img.getAttribute("src") ?? ""})`;
   }
 
+  // NOTE: heading check MUST come before the generic media-container fallback.
+  // If an image is inserted inside a heading (e.g. H1 contains figure.editor-image),
+  // the old code fell into the media-container branch first and lost the # prefix.
+  // Fix: handle headings first; if the heading also contains block-level media,
+  // extract the inline text as the heading and emit media children separately.
+  if (/^H[1-6]$/.test(node.tagName)) {
+    const level = Number(node.tagName.slice(1));
+    // Check whether this heading contains any block-level media nodes.
+    const hasBlockMedia = Boolean(node.querySelector("figure.editor-image,figure.editor-youtube,.editor-attachment"));
+    if (!hasBlockMedia) {
+      // Pure text heading (normal case).
+      return `${"#".repeat(level)} ${inlineChildrenToMarkdown(node).trim()}`;
+    }
+    // Mixed heading+media: emit heading text first, then media blocks separately.
+    const headingText = [...node.childNodes]
+      .filter((child) => !(child instanceof HTMLElement && child.matches("figure.editor-image,figure.editor-youtube,.editor-attachment")))
+      .map((child) => (child instanceof HTMLElement ? inlineChildrenToMarkdown(child) : child.textContent ?? ""))
+      .join("").trim();
+    const mediaParts = [...node.childNodes]
+      .filter((child) => child instanceof HTMLElement && child.matches("figure.editor-image,figure.editor-youtube,.editor-attachment"))
+      .map((child) => nodeToMarkdown(child))
+      .filter((m) => m.trim());
+    const parts: string[] = [];
+    if (headingText) parts.push(`${"#".repeat(level)} ${headingText}`);
+    parts.push(...mediaParts);
+    return parts.join("\n\n");
+  }
+
   if (node.querySelector("figure.editor-image,figure.editor-youtube,img,.editor-attachment")) {
     const childMarkdown = [...node.childNodes].map(nodeToMarkdown).filter((value) => value.trim());
     if (childMarkdown.length) {
       return childMarkdown.join("\n\n");
     }
-  }
-
-  if (/^H[1-6]$/.test(node.tagName)) {
-    const level = Number(node.tagName.slice(1));
-    return `${"#".repeat(level)} ${inlineChildrenToMarkdown(node).trim()}`;
   }
 
   if (node.tagName === "PRE") {
