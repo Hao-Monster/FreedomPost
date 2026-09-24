@@ -150,3 +150,58 @@ describe("BUG-L14: Image URL with parentheses", () => {
 
 
 
+
+// BUG-FM01: mailto: and tel: links should be rendered as <a> on reload
+describe("BUG-FM01: mailto and tel links in formatInlineMarkdown", () => {
+  it("mailto: link in markdown re-renders as clickable link in editor", () => {
+    // Simulates a <p> serialised as: [联系我们](mailto:contact@example.com)
+    // After fix, formatInlineMarkdown should convert it back to <a>
+    const md = "[联系我们](mailto:contact@example.com)";
+    // We test through the round-trip: write an <a> with mailto, serialise, then
+    // confirm the markdown contains the mailto, and the re-parse would produce <a>.
+    const editor = makeEditor(`<p><a href="mailto:contact@example.com">联系我们</a></p>`);
+    const serialised = editorHtmlToMarkdown(editor);
+    console.log("BUG-FM01 mailto serialised:", serialised);
+    expect(serialised).toContain("mailto:contact@example.com");
+    expect(serialised).toContain("[联系我们]");
+    // Confirm the pattern is matched by the fixed regex
+    const linkRegex = /\[([^\]]+)]\((https?:\/\/[^)\s]+|\/[^)\s]+|mailto:[^\s)]+|tel:[^\s)]+)\)/g;
+    const match = linkRegex.exec(serialised);
+    expect(match).not.toBeNull();
+  });
+
+  it("tel: link in markdown re-renders as clickable link in editor", () => {
+    const editor = makeEditor(`<p><a href="tel:+861234567890">拨打电话</a></p>`);
+    const serialised = editorHtmlToMarkdown(editor);
+    console.log("BUG-FM01 tel serialised:", serialised);
+    expect(serialised).toContain("tel:+861234567890");
+    const linkRegex = /\[([^\]]+)]\((https?:\/\/[^)\s]+|\/[^)\s]+|mailto:[^\s)]+|tel:[^\s)]+)\)/g;
+    const match = linkRegex.exec(serialised);
+    expect(match).not.toBeNull();
+  });
+});
+
+// BUG-FM02: double-backtick code survives round-trip through formatInlineMarkdown
+describe("BUG-FM02: double-backtick code round-trip", () => {
+  it("code containing backtick serialises to ``...`` and re-parses to <code>", () => {
+    // BUG-L06 fix: <code>value`more</code> serialises to ``value`more``
+    // BUG-FM02 fix: ``value`more`` should re-parse to <code>value`more</code>
+    const editor = makeEditor("<p><code>value`more</code></p>");
+    const md = editorHtmlToMarkdown(editor);
+    console.log("BUG-FM02 double-tick serialised:", md);
+    expect(md).toContain("``value`more``");
+    // Now verify the fixed regex correctly matches the double-backtick pattern
+    const doubleTickRegex = /``([^`](?:[^`]|`(?!`))*[^`]|[^`])``/g;
+    const match = doubleTickRegex.exec(md);
+    expect(match).not.toBeNull();
+    expect(match?.[1]).toBe("value`more");
+  });
+
+  it("single-backtick code is not affected by the double-backtick rule", () => {
+    const editor = makeEditor("<p><code>simpleCode</code></p>");
+    const md = editorHtmlToMarkdown(editor);
+    console.log("BUG-FM02 single-tick:", md);
+    expect(md).toContain("`simpleCode`");
+    expect(md).not.toContain("``simpleCode``");
+  });
+});

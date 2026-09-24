@@ -505,6 +505,9 @@ function App() {
   // Shared image paste logic used by both HTML clipboard and synthetic HTML
   // generated from plain-text Markdown pastes (e.g. from VS Code / Typora).
   async function pasteHtmlWithImages(html: string) {
+    // BUG-L17: snapshot the target article ID at the start of the upload so we
+    // can detect if the user switches articles while the upload is in progress.
+    const targetPostId = activePost?.id;
     try {
       let pastedResult: Awaited<ReturnType<typeof localizePastedImages>> = null;
       let pastedFailureCount = 0;
@@ -516,6 +519,12 @@ function App() {
             importRemoteImages: (items) => importRemoteImages(activePost?.id ?? "", items)
           });
           if (!pastedResult) throw new Error("No images in pasted HTML");
+          // BUG-L17: abort if the user switched to a different article while
+          // the upload was running – inserting into the wrong article would
+          // corrupt the media-claim mapping used when saving.
+          if (activePost?.id !== targetPostId) {
+            throw new Error("ARTICLE_SWITCHED");
+          }
           for (const image of pastedResult.importedImages) {
             importedImageClaimsRef.current.set(image.id, image);
           }
@@ -528,8 +537,12 @@ function App() {
         })
       );
       showToast(pastedFailureCount > 0 ? `${pastedFailureCount} 张图片未能转存，已显示原因和处理方式` : pastedImageCount > 0 ? "图片已转存并插入" : "图片已处理");
-    } catch {
-      showToast("图片处理失败；请重试或上传本地图片");
+    } catch (err) {
+      if (String(err).includes("ARTICLE_SWITCHED")) {
+        showToast("已切换文章，图片未插入；请回到原文章重新上传");
+      } else {
+        showToast("图片处理失败；请重试或上传本地图片");
+      }
     }
   }
 
@@ -2509,11 +2522,20 @@ function inlineNodeToMarkdown(node: Node): string {
 
 function formatInlineMarkdown(value: string): string {
   return restoreSafeInlineHtml(value
-    .replace(/\[([^\]]+)]\((https?:\/\/[^)\s]+|\/[^)\s]+)\)/g, '<a href="$2">$1</a>')
+    // BUG-FM01: include mailto: and tel: so links inserted via the link tool
+    // are rendered as <a> when the article is reloaded.
+    .replace(
+      /\[([^\]]+)]\((https?:\/\/[^)\s]+|\/[^)\s]+|mailto:[^\s)]+|tel:[^\s)]+)\)/g,
+      '<a href="$2">$1</a>'
+    )
     .replace(/\*\*(.*?)\*\*/g, "<strong>$1</strong>")
     .replace(/~~(.*?)~~/g, "<del>$1</del>")
     .replace(/\*(.*?)\*/g, "<em>$1</em>")
-    .replace(/`([^`]+)`/g, "<code>$1</code>"));
+    // BUG-FM02: match double-backtick delimited code first (used when the code
+    // content contains a backtick, e.g. ``value`more``), then single-backtick.
+    // Order matters: the double-backtick rule must come before the single one.
+    .replace(/``([^`](?:[^`]|`(?!`))*[^`]|[^`])``/g, "<code>$1</code>")
+    .replace(/(?<!`)`([^`]+)`(?!`)/g, "<code>$1</code>"));
 }
 
 function restoreSafeInlineHtml(value: string): string {
