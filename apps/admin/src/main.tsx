@@ -2392,8 +2392,11 @@ function nodeToMarkdown(node: Node): string {
     // Check whether this heading contains any block-level media nodes.
     const hasBlockMedia = Boolean(node.querySelector("figure.editor-image,figure.editor-youtube,.editor-attachment"));
     if (!hasBlockMedia) {
-      // Pure text heading (normal case).
-      return `${"#".repeat(level)} ${inlineChildrenToMarkdown(node).trim()}`;
+      const headingText = inlineChildrenToMarkdown(node).trim();
+      // BUG-L10: <h1><br></h1> yields headingText="" → emit empty string so the
+      // block is filtered out by editorHtmlToMarkdown's .trim() check, not "# ".
+      if (!headingText) return "";
+      return `${"#".repeat(level)} ${headingText}`;
     }
     // Mixed heading+media: emit heading text first, then media blocks separately.
     const headingText = [...node.childNodes]
@@ -2418,7 +2421,10 @@ function nodeToMarkdown(node: Node): string {
   }
 
   if (node.tagName === "PRE") {
-    const lang = node.dataset.lang ?? "";
+    // BUG-L12: sanitize lang tag — only allow identifier-safe characters to
+    // prevent code-fence injection (e.g. data-lang="ts\nalert(1)").
+    // Mirrors the same pattern used in editor-paste.ts for pasted <pre> elements.
+    const lang = (node.dataset.lang ?? "").replace(/[^a-z0-9_+#.-]/gi, "").slice(0, 32);
     return `\`\`\`${lang}\n${node.textContent?.replace(/\n$/, "") ?? ""}\n\`\`\``;
   }
 
@@ -2469,11 +2475,13 @@ function inlineNodeToMarkdown(node: Node): string {
   }
 
   if (node.tagName === "STRONG" || node.tagName === "B") {
-    return `**${content}**`;
+    // BUG-L04: empty <strong> would produce stray "****" — skip if no content
+    return content ? `**${content}**` : "";
   }
 
   if (node.tagName === "EM" || node.tagName === "I") {
-    return `*${content}*`;
+    // BUG-L04: empty <em> would produce stray "**" — skip if no content
+    return content ? `*${content}*` : "";
   }
 
   if (node.tagName === "DEL" || node.tagName === "S" || node.tagName === "STRIKE") {
@@ -2485,7 +2493,10 @@ function inlineNodeToMarkdown(node: Node): string {
   }
 
   if (node.tagName === "CODE") {
-    return `\`${node.textContent ?? ""}\``;
+    const codeText = node.textContent ?? "";
+    // BUG-L06: if the code content contains a backtick, use double-backtick delimiters
+    const delim = codeText.includes("`") ? "``" : "`";
+    return `${delim}${codeText}${delim}`;
   }
 
   if (node.tagName === "SPAN") {
