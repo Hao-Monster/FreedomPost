@@ -5,7 +5,14 @@ const imageFilenamePattern = /(?:^|[/\\])[^/\\]+\.(?:avif|bmp|gif|heic|heif|ico|
 
 export function normalizeEditorImageAlt(value: string): string {
   const normalized = value.trim();
-  if (!normalized || imageFilenamePattern.test(normalized)) return defaultImageAlt;
+  // BUG-P10: also treat extension-only strings like ".jpg" as meaningless \u2014
+  // they arise when fileToEditorHtml strips special characters from a filename that
+  // has no alphanumeric basename (e.g. "????.jpg" \u2192 ".jpg" after cleanup).
+  // The imageFilenamePattern requires at least one character before the dot, so
+  // ".jpg" doesn\u2019t match and was returned as-is. Add a leading-dot check.
+  if (!normalized || normalized.match(/^\.[a-z0-9]+$/i) || imageFilenamePattern.test(normalized)) {
+    return defaultImageAlt;
+  }
   return normalized;
 }
 
