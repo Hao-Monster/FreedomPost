@@ -11,7 +11,7 @@ test('production release cannot run on push or implicitly select an unbound revi
   assert.match(workflow, /if: github.ref == 'refs\/heads\/main'/);
   assert.match(workflow, /environment: production/);
   assert.match(workflow, /ref: \$\{\{ inputs.release_sha \}\}/);
-  assert.match(workflow, /test "\$RELEASE_SHA" = "\$GITHUB_SHA"/);
+  assert.doesNotMatch(workflow, /test "\$RELEASE_SHA" = "\$GITHUB_SHA"/);
   assert.equal((workflow.match(/git\/ref\/heads\/main/g) ?? []).length, 2);
 });
 
