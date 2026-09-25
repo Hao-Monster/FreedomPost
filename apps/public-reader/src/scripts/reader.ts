@@ -181,10 +181,13 @@ if (initial) {
 void init();
 
 async function init() {
-  createIcons({ icons });
   applyStoredTheme();
   applyStoredListWidth();
   applyStoredTocState();
+  // Restore persisted state before replacing the icon placeholders.  Both
+  // helpers update button.innerHTML, so rendering icons first leaves the
+  // restored dark-theme buttons as empty <i data-lucide> elements.
+  createIcons({ icons });
   enhanceCodeBlocks();
   propagateReaderLinks();
   renderToc(initial?.toc ?? []);

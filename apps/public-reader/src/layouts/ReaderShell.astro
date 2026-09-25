@@ -1,6 +1,7 @@
 ---
 import type { TocItem } from "@freedompost/shared";
 import { readerBootHiddenStyle, readerBootPendingClass } from "../lib/reader-boot";
+import ChatwootWidget from "../components/ChatwootWidget.astro";
 import "../styles/global.css";
 
 interface ArticleViewModel {
@@ -188,6 +189,7 @@ const canonicalUrl = new URL(`/p/${encodeURIComponent(article.slug)}`, Astro.sit
       </nav>
     </div>
     <div id="toast" class="toast" role="status" aria-live="polite"></div>
+    <ChatwootWidget />
     <script id="initialPayload" type="application/json" is:inline set:html={initialPayload}></script>
     <script>
       import "../scripts/reader.ts";

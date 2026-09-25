@@ -8,6 +8,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"golang.org/x/crypto/bcrypt"
 )
 
 // Config holds all runtime configuration loaded from environment variables.
@@ -97,6 +99,31 @@ type Config struct {
 	PublicSiteURL  string
 	OriginTestHost string
 	AdminOrigin    string
+	// Chatwoot integration
+	ChatwootBaseURL string
+	// ChatwootWebsiteToken is the public WebWidget token. The API client uses
+	// it together with the signed cw_conversation token from the browser.
+	ChatwootWebsiteToken string
+	// These legacy admin API settings remain loadable for existing deployments,
+	// but are no longer used to send visitor messages to a WebWidget inbox.
+	ChatwootAPIToken  string
+	ChatwootAccountID int64
+	ChatwootInboxID   int64
+	ChatwootTimeoutMS int
+
+	// Channel bridge (disabled unless explicitly enabled).
+	ChannelBridgeEnabled                bool
+	ChannelBridgeProvider               string
+	ChannelBridgeAllowUnprefixedReplies bool
+	ChatwootWebhookSecret               string
+	WeComBaseURL                        string
+	WeComCorpID                         string
+	WeComCorpSecret                     string
+	WeComAgentID                        int64
+	WeComCallbackToken                  string
+	WeComEncodingAESKey                 string
+	WeComReceiveID                      string
+	WeComOperatorUserID                 string
 
 	// Public site
 	PreviewDomain string
@@ -220,10 +247,28 @@ func Load() (*Config, error) {
 
 		ViewBufferFlushInterval: 30 * time.Second,
 
-		PublicSiteURL:  os.Getenv("PUBLIC_SITE_URL"),
-		OriginTestHost: os.Getenv("ORIGIN_TEST_HOST"),
-		AdminOrigin:    os.Getenv("ADMIN_ORIGIN"),
-		PreviewDomain:  os.Getenv("PREVIEW_DOMAIN"),
+		PublicSiteURL:                       os.Getenv("PUBLIC_SITE_URL"),
+		OriginTestHost:                      os.Getenv("ORIGIN_TEST_HOST"),
+		AdminOrigin:                         os.Getenv("ADMIN_ORIGIN"),
+		PreviewDomain:                       os.Getenv("PREVIEW_DOMAIN"),
+		ChatwootBaseURL:                     os.Getenv("CHATWOOT_BASE_URL"),
+		ChatwootWebsiteToken:                os.Getenv("CHATWOOT_WEBSITE_TOKEN"),
+		ChatwootAPIToken:                    os.Getenv("CHATWOOT_API_TOKEN"),
+		ChatwootAccountID:                   int64(parseInt("CHATWOOT_ACCOUNT_ID", 0)),
+		ChatwootInboxID:                     int64(parseInt("CHATWOOT_INBOX_ID", 0)),
+		ChatwootTimeoutMS:                   parseInt("CHATWOOT_TIMEOUT_MS", 3000),
+		ChannelBridgeEnabled:                parseBool("CHANNEL_BRIDGE_ENABLED", false),
+		ChannelBridgeProvider:               optionalEnv("CHANNEL_BRIDGE_PROVIDER", "wecom"),
+		ChannelBridgeAllowUnprefixedReplies: parseBool("CHANNEL_BRIDGE_ALLOW_UNPREFIXED_REPLIES", false),
+		ChatwootWebhookSecret:               os.Getenv("CHATWOOT_WEBHOOK_SECRET"),
+		WeComBaseURL:                        optionalEnv("WECOM_BASE_URL", "https://qyapi.weixin.qq.com"),
+		WeComCorpID:                         os.Getenv("WECOM_CORP_ID"),
+		WeComCorpSecret:                     os.Getenv("WECOM_CORP_SECRET"),
+		WeComAgentID:                        parseInt64("WECOM_AGENT_ID", 0),
+		WeComCallbackToken:                  os.Getenv("WECOM_CALLBACK_TOKEN"),
+		WeComEncodingAESKey:                 os.Getenv("WECOM_ENCODING_AES_KEY"),
+		WeComReceiveID:                      os.Getenv("WECOM_RECEIVE_ID"),
+		WeComOperatorUserID:                 os.Getenv("WECOM_OPERATOR_USER_ID"),
 	}
 
 	// Validate storage driver
@@ -274,22 +319,61 @@ func Load() (*Config, error) {
 	if len(cfg.PaidAccessInternalSecret) < 32 {
 		errs = append(errs, "PAID_ACCESS_INTERNAL_SECRET must contain at least 32 characters")
 	}
+	if cfg.ChannelBridgeEnabled {
+		if cfg.ChannelBridgeProvider != "wecom" {
+			errs = append(errs, "CHANNEL_BRIDGE_PROVIDER must be 'wecom' while the production adapter is enabled")
+		}
+		if cfg.ChatwootBaseURL == "" {
+			errs = append(errs, "CHATWOOT_BASE_URL is required when CHANNEL_BRIDGE_ENABLED=true")
+		}
+		if cfg.ChatwootAPIToken == "" {
+			errs = append(errs, "CHATWOOT_API_TOKEN is required when CHANNEL_BRIDGE_ENABLED=true")
+		}
+		if cfg.ChatwootAccountID <= 0 {
+			errs = append(errs, "CHATWOOT_ACCOUNT_ID must be positive when CHANNEL_BRIDGE_ENABLED=true")
+		}
+		if cfg.ChatwootWebhookSecret == "" {
+			errs = append(errs, "CHATWOOT_WEBHOOK_SECRET is required when CHANNEL_BRIDGE_ENABLED=true")
+		}
+		if cfg.WeComCorpID == "" {
+			errs = append(errs, "WECOM_CORP_ID is required when CHANNEL_BRIDGE_ENABLED=true")
+		}
+		if cfg.WeComCorpSecret == "" {
+			errs = append(errs, "WECOM_CORP_SECRET is required when CHANNEL_BRIDGE_ENABLED=true")
+		}
+		if cfg.WeComAgentID <= 0 {
+			errs = append(errs, "WECOM_AGENT_ID must be positive when CHANNEL_BRIDGE_ENABLED=true")
+		}
+		if cfg.WeComCallbackToken == "" {
+			errs = append(errs, "WECOM_CALLBACK_TOKEN is required when CHANNEL_BRIDGE_ENABLED=true")
+		}
+		if cfg.WeComEncodingAESKey == "" {
+			errs = append(errs, "WECOM_ENCODING_AES_KEY is required when CHANNEL_BRIDGE_ENABLED=true")
+		}
+		if cfg.WeComOperatorUserID == "" {
+			errs = append(errs, "WECOM_OPERATOR_USER_ID is required when CHANNEL_BRIDGE_ENABLED=true")
+		}
+	}
 
-	// Parse admin password.
-	// Production requires ADMIN_PASSWORD_HASH; plaintext is retained only for local development.
+	// Parse admin password. Production has one credential source: a valid bcrypt
+	// hash. Keeping a plaintext value alongside it is configuration drift and is
+	// rejected even when the hash is present.
 	adminPasswordHash := os.Getenv("ADMIN_PASSWORD_HASH")
 	adminPassword := os.Getenv("ADMIN_PASSWORD")
-	switch {
-	case adminPasswordHash != "":
-		cfg.AdminPasswordHash = adminPasswordHash // production: pre-hashed
-	case adminPassword != "":
-		if os.Getenv("NODE_ENV") == "production" {
-			errs = append(errs, "ADMIN_PASSWORD_HASH is required in production; plaintext ADMIN_PASSWORD is not allowed")
+	production := os.Getenv("NODE_ENV") == "production"
+	if production && strings.TrimSpace(adminPassword) != "" {
+		errs = append(errs, "ADMIN_PASSWORD is forbidden in production; use ADMIN_PASSWORD_HASH only")
+	}
+	if adminPasswordHash != "" {
+		if err := validateAdminPasswordHash(adminPasswordHash); err != nil {
+			errs = append(errs, fmt.Sprintf("ADMIN_PASSWORD_HASH is invalid: %v", err))
 		} else {
-			cfg.AdminPasswordHash = adminPassword // development-only fallback
+			cfg.AdminPasswordHash = adminPasswordHash
 		}
-	default:
-		errs = append(errs, "ADMIN_PASSWORD_HASH (or development-only ADMIN_PASSWORD) is required")
+	} else if !production && adminPassword != "" {
+		cfg.AdminPasswordHash = adminPassword // development-only fallback
+	} else {
+		errs = append(errs, "ADMIN_PASSWORD_HASH is required in production (or use development-only ADMIN_PASSWORD)")
 	}
 
 	// Validate PublicSiteURL
@@ -304,6 +388,19 @@ func Load() (*Config, error) {
 	}
 
 	return cfg, nil
+}
+
+// validateAdminPasswordHash accepts only the bcrypt variants understood by
+// the HTTP verifier. Quoting, Compose escaping, and other prefixes must be
+// rejected at startup instead of turning into an authentication failure.
+func validateAdminPasswordHash(hash string) error {
+	if len(hash) != 60 || !(strings.HasPrefix(hash, "$2a$") || strings.HasPrefix(hash, "$2b$")) {
+		return errors.New("must be an unquoted $2a$ or $2b$ bcrypt hash")
+	}
+	if _, err := bcrypt.Cost([]byte(hash)); err != nil {
+		return errors.New("must be a valid bcrypt hash")
+	}
+	return nil
 }
 
 // Addr returns the listen address in "host:port" format.

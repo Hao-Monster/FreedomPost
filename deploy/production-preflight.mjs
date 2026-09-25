@@ -50,6 +50,73 @@ export function validateRuntimeEnvironment(environment = process.env) {
     add("PAID_ACCESS_INTERNAL_SECRET", "must be distinct from the benefit HMAC secret");
   }
 
+  const chatwootNames = [
+    "CHATWOOT_BASE_URL",
+    "CHATWOOT_WEBSITE_TOKEN",
+    // Legacy administrator API settings are accepted for existing .env files,
+    // but are not used by the WebWidget message client.
+    "CHATWOOT_API_TOKEN",
+    "CHATWOOT_ACCOUNT_ID",
+    "CHATWOOT_INBOX_ID",
+    "CHATWOOT_TIMEOUT_MS"
+  ];
+  const chatwootConfigured = chatwootNames
+    .filter((name) => name !== "CHATWOOT_TIMEOUT_MS")
+    .some((name) => value(name).trim() !== "");
+  if (chatwootConfigured) {
+    if (!validHttpsOrigin(value("CHATWOOT_BASE_URL"))) {
+      add("CHATWOOT_BASE_URL", "must be an HTTPS origin without a path or credentials");
+    }
+    const websiteToken = value("CHATWOOT_WEBSITE_TOKEN");
+    if (!/^[A-Za-z0-9_-]{10,256}$/.test(websiteToken)) {
+      add("CHATWOOT_WEBSITE_TOKEN", "must contain 10 to 256 URL-safe characters");
+    }
+    const adminToken = value("CHATWOOT_API_TOKEN");
+    if (adminToken && (adminToken.length > 4_096 || /[\r\n]/.test(adminToken))) {
+      add("CHATWOOT_API_TOKEN", "must be no longer than 4096 characters and contain no line breaks");
+    }
+    if (value("CHATWOOT_ACCOUNT_ID") || value("CHATWOOT_INBOX_ID")) {
+      validateInteger(environment, errors, "CHATWOOT_ACCOUNT_ID", 1, 2_147_483_647);
+      validateInteger(environment, errors, "CHATWOOT_INBOX_ID", 1, 2_147_483_647);
+    }
+    validateInteger(environment, errors, "CHATWOOT_TIMEOUT_MS", 100, 30_000);
+  }
+
+  const bridgeEnabled = value("CHANNEL_BRIDGE_ENABLED");
+  if (bridgeEnabled && !["true", "false"].includes(bridgeEnabled)) {
+    add("CHANNEL_BRIDGE_ENABLED", "must be true or false");
+  }
+  if (bridgeEnabled === "true") {
+    if (value("CHANNEL_BRIDGE_PROVIDER") !== "wecom") {
+      add("CHANNEL_BRIDGE_PROVIDER", "must be wecom when the channel bridge is enabled");
+    }
+    requireNames(environment, errors, [
+      "CHATWOOT_BASE_URL",
+      "CHATWOOT_API_TOKEN",
+      "CHATWOOT_ACCOUNT_ID",
+      "CHATWOOT_WEBHOOK_SECRET",
+      "WECOM_CORP_ID",
+      "WECOM_CORP_SECRET",
+      "WECOM_AGENT_ID",
+      "WECOM_CALLBACK_TOKEN",
+      "WECOM_ENCODING_AES_KEY",
+      "WECOM_OPERATOR_USER_ID"
+    ]);
+    if (!validHttpsOrigin(value("WECOM_BASE_URL"))) {
+      add("WECOM_BASE_URL", "must be an HTTPS origin without a path or credentials");
+    }
+    validateInteger(environment, errors, "WECOM_AGENT_ID", 1, 2_147_483_647);
+    if (!/^[A-Za-z0-9]{43}$/.test(value("WECOM_ENCODING_AES_KEY"))) {
+      add("WECOM_ENCODING_AES_KEY", "must contain exactly 43 base64 characters");
+    }
+    for (const name of ["CHATWOOT_WEBHOOK_SECRET", "WECOM_CORP_ID", "WECOM_CORP_SECRET", "WECOM_CALLBACK_TOKEN", "WECOM_OPERATOR_USER_ID"]) {
+      const secret = value(name);
+      if (secret.length > 4_096 || /[\r\n]/.test(secret)) {
+        add(name, "must be no longer than 4096 characters and contain no line breaks");
+      }
+    }
+  }
+
   const minimumLengths = {
     COOKIE_SECRET: 32,
     VISITOR_HASH_SALT: 32,
@@ -65,7 +132,12 @@ export function validateRuntimeEnvironment(environment = process.env) {
       add(name, `must contain ${minimumLengths[name]} to 4096 characters without line breaks`);
     }
   }
-  if (!/^\$2[aby]\$\d{2}\$[./A-Za-z0-9]{53}$/.test(value("ADMIN_PASSWORD_HASH"))) {
+  for (const name of ["ADMIN_PASSWORD", "HASH_PASSWORD"]) {
+    if (value(name).trim() !== "") {
+      add(name, "must be unset in production; use ADMIN_PASSWORD_HASH only");
+    }
+  }
+  if (!/^\$2[ab]\$\d{2}\$[./A-Za-z0-9]{53}$/.test(value("ADMIN_PASSWORD_HASH"))) {
     add("ADMIN_PASSWORD_HASH", "must be a valid bcrypt hash");
   }
 

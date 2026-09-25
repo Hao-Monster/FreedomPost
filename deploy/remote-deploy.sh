@@ -31,6 +31,15 @@ test "${ADMIN_DOMAIN:-}" = 'admin-freedompost.thinderbox.uk'
 test "${ADMIN_ORIGIN:-}" = 'https://admin-freedompost.thinderbox.uk'
 $SUDO openssl verify -CAfile deploy/trust/cloudflare-origin-ca-rsa.pem -verify_hostname "$ADMIN_DOMAIN" /etc/caddy/certs/admin-origin.crt
 $SUDO openssl x509 -in /etc/caddy/certs/admin-origin.crt -checkend 604800 -noout
+if [ -f .env ]; then
+  $SUDO chown "$(id -u):$(id -g)" .env
+  chmod 600 .env
+fi
+
+if [[ ! "${ADMIN_PASSWORD_HASH:-}" =~ ^\$2[ab]\$[0-9]{2}\$[./A-Za-z0-9]{53}$ ]]; then
+  echo 'ADMIN_PASSWORD_HASH must be an unquoted bcrypt $2a$/$2b$ hash' >&2
+  exit 1
+fi
 
 if [ ! -f .env ]; then
   {
@@ -48,6 +57,23 @@ if [ ! -f .env ]; then
     printf '%s\n' "TRUST_PROXY=true"
     printf 'REDIS_PASSWORD=%s\n' "$REDIS_PASSWORD"
     printf 'REDIS_URL=redis://:%s@redis:6379\n' "$REDIS_PASSWORD"
+    printf 'CHATWOOT_BASE_URL=%s\n' "$CHATWOOT_BASE_URL"
+    printf 'CHATWOOT_WEBSITE_TOKEN=%s\n' "$CHATWOOT_WEBSITE_TOKEN"
+    printf 'CHATWOOT_API_TOKEN=%s\n' "$CHATWOOT_API_TOKEN"
+    printf 'CHATWOOT_ACCOUNT_ID=%s\n' "$CHATWOOT_ACCOUNT_ID"
+    printf 'CHATWOOT_INBOX_ID=%s\n' "$CHATWOOT_INBOX_ID"
+    printf 'CHATWOOT_TIMEOUT_MS=%s\n' "$CHATWOOT_TIMEOUT_MS"
+    printf 'CHANNEL_BRIDGE_ENABLED=%s\n' "${CHANNEL_BRIDGE_ENABLED:-false}"
+    printf 'CHANNEL_BRIDGE_PROVIDER=%s\n' "${CHANNEL_BRIDGE_PROVIDER:-wecom}"
+    printf 'CHATWOOT_WEBHOOK_SECRET=%s\n' "${CHATWOOT_WEBHOOK_SECRET:-}"
+    printf 'WECOM_BASE_URL=%s\n' "${WECOM_BASE_URL:-https://qyapi.weixin.qq.com}"
+    printf 'WECOM_CORP_ID=%s\n' "${WECOM_CORP_ID:-}"
+    printf 'WECOM_CORP_SECRET=%s\n' "${WECOM_CORP_SECRET:-}"
+    printf 'WECOM_AGENT_ID=%s\n' "${WECOM_AGENT_ID:-}"
+    printf 'WECOM_CALLBACK_TOKEN=%s\n' "${WECOM_CALLBACK_TOKEN:-}"
+    printf 'WECOM_ENCODING_AES_KEY=%s\n' "${WECOM_ENCODING_AES_KEY:-}"
+    printf 'WECOM_RECEIVE_ID=%s\n' "${WECOM_RECEIVE_ID:-}"
+    printf 'WECOM_OPERATOR_USER_ID=%s\n' "${WECOM_OPERATOR_USER_ID:-}"
     printf '%s\n' "PAID_ARTICLES_ENABLED=true"
     printf '%s\n' "PAID_ACCESS_INTERNAL_URL=http://paid-access:8080"
     printf 'PAID_ACCESS_INTERNAL_SECRET=%s\n' "$PAID_ACCESS_INTERNAL_SECRET"
@@ -106,6 +132,13 @@ set_env() {
   rm -f "$env_tmp"
 }
 
+remove_env_key() {
+  key="$1"
+  env_tmp="$(mktemp)"
+  awk -v key="$key" 'index($0, key "=") != 1 { print }' .env > "$env_tmp"
+  mv "$env_tmp" .env
+}
+
 set_env_if_present() {
   key="$1"
   value="${2:-}"
@@ -124,12 +157,33 @@ set_env "COOKIE_SECURE" "true"
 set_env "TRUST_PROXY" "true"
 set_env_if_present "REDIS_PASSWORD" "$REDIS_PASSWORD"
 set_env "REDIS_URL" "redis://:${REDIS_PASSWORD}@redis:6379"
+set_env "CHATWOOT_BASE_URL" "$CHATWOOT_BASE_URL"
+set_env "CHATWOOT_WEBSITE_TOKEN" "$CHATWOOT_WEBSITE_TOKEN"
+set_env "CHATWOOT_API_TOKEN" "$CHATWOOT_API_TOKEN"
+set_env "CHATWOOT_ACCOUNT_ID" "$CHATWOOT_ACCOUNT_ID"
+set_env "CHATWOOT_INBOX_ID" "$CHATWOOT_INBOX_ID"
+set_env "CHATWOOT_TIMEOUT_MS" "$CHATWOOT_TIMEOUT_MS"
+set_env "CHANNEL_BRIDGE_ENABLED" "${CHANNEL_BRIDGE_ENABLED:-false}"
+set_env "CHANNEL_BRIDGE_PROVIDER" "${CHANNEL_BRIDGE_PROVIDER:-wecom}"
+set_env_if_present "CHATWOOT_WEBHOOK_SECRET" "${CHATWOOT_WEBHOOK_SECRET:-}"
+set_env "WECOM_BASE_URL" "${WECOM_BASE_URL:-https://qyapi.weixin.qq.com}"
+set_env_if_present "WECOM_CORP_ID" "${WECOM_CORP_ID:-}"
+set_env_if_present "WECOM_CORP_SECRET" "${WECOM_CORP_SECRET:-}"
+set_env_if_present "WECOM_AGENT_ID" "${WECOM_AGENT_ID:-}"
+set_env_if_present "WECOM_CALLBACK_TOKEN" "${WECOM_CALLBACK_TOKEN:-}"
+set_env_if_present "WECOM_ENCODING_AES_KEY" "${WECOM_ENCODING_AES_KEY:-}"
+set_env_if_present "WECOM_RECEIVE_ID" "${WECOM_RECEIVE_ID:-}"
+set_env_if_present "WECOM_OPERATOR_USER_ID" "${WECOM_OPERATOR_USER_ID:-}"
 set_env "PAID_ARTICLES_ENABLED" "true"
 set_env "PAID_ACCESS_INTERNAL_URL" "http://paid-access:8080"
 set_env "PAID_ACCESS_INTERNAL_SECRET" "$PAID_ACCESS_INTERNAL_SECRET"
 set_env "PAID_ACCESS_WECHAT_IMAGE_URL" "/images/contact-wechat.jpg"
 set_env "COOKIE_SECRET" "$COOKIE_SECRET"
 set_env "VISITOR_HASH_SALT" "$VISITOR_HASH_SALT"
+# Remove legacy plaintext credential aliases from existing servers. The
+# bcrypt hash above is the sole production source of truth.
+remove_env_key "ADMIN_PASSWORD"
+remove_env_key "HASH_PASSWORD"
 set_env "ADMIN_PASSWORD_HASH" "$ADMIN_PASSWORD_HASH"
 set_env "POSTGRES_PASSWORD" "$POSTGRES_PASSWORD"
 set_env "DATABASE_URL" "postgres://freedompost:$POSTGRES_PASSWORD@postgres:5432/freedompost"
@@ -149,6 +203,12 @@ set_env "BENEFIT_NETWORK_DAILY_LIMIT" "3"
 set_env "BENEFIT_CLAIM_MINUTE_LIMIT" "6"
 set_env "GO_API_WEIGHT" "${GO_API_WEIGHT:-0}"
 set_env "TS_API_WEIGHT" "${TS_API_WEIGHT:-100}"
+
+chmod 600 .env
+if grep -qE '^(ADMIN_PASSWORD|HASH_PASSWORD)=' .env; then
+  echo "legacy admin credential variables remain in .env" >&2
+  exit 1
+fi
 
 if [ "$STORAGE_DRIVER" = "oss" ]; then
   set_env "ALIYUN_OSS_REGION" "$ALIYUN_OSS_REGION"

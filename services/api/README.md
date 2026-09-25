@@ -62,6 +62,8 @@ services/api/
 │   ├── searchindex/            # 搜索索引内存缓存
 │   ├── paidaccess/             # HMAC 签名内部客户端
 │   ├── storage/                # 多存储适配器（local/OSS/R2）
+│   ├── wecom/                  # 企业微信 Agent API + 回调解密
+│   ├── channelbridge/          # Chatwoot↔企业微信文本桥接与去重
 │   └── httpapi/                # HTTP 路由 + 所有 handler
 ├── test/
 │   └── integration.mjs         # 集成测试脚本
@@ -79,13 +81,20 @@ Go API 读取与 TypeScript 版本**完全相同**的 `.env` 变量，额外新�
 
 | 变量 | 说明 | 默认值 |
 |------|------|--------|
-| `ADMIN_PASSWORD_HASH` | bcrypt hash（cost=12），生产必填 | 空（回退明文） |
+| `ADMIN_PASSWORD_HASH` | 未加引号的 `$2a$`/`$2b$` bcrypt hash，生产唯一凭据来源 | 空 |
+| `ADMIN_PASSWORD` | 仅供本地开发回退；生产环境禁止设置 | 空 |
 | `VIEW_BUFFER_FLUSH_INTERVAL` | 浏览量刷新间隔 | `30s` |
 | `GRAY_RELEASE_PERCENT` | 灰度比例 0-100（Caddy 读取） | `0` |
 | `R2_ACCOUNT_ID` | Cloudflare R2 账户 ID | — |
 | `R2_BUCKET` | R2 bucket 名称 | — |
 | `R2_ACCESS_KEY_ID` | R2 访问密钥 | — |
 | `R2_SECRET_ACCESS_KEY` | R2 Secret Key | — |
+| `CHANNEL_BRIDGE_ENABLED` | 企业微信/Chatwoot 桥接总开关，生产凭据齐全并完成验收后才设为 `true` | `false` |
+| `CHATWOOT_WEBHOOK_SECRET` | Chatwoot Webhook HMAC 密钥（仅桥接启用时必填） | — |
+| `WECOM_CORP_ID` / `WECOM_CORP_SECRET` | 企业微信企业凭据（仅桥接启用时必填） | — |
+| `WECOM_AGENT_ID` | 企业微信客服 Agent ID（仅桥接启用时必填） | — |
+| `WECOM_CALLBACK_TOKEN` / `WECOM_ENCODING_AES_KEY` | 企业微信回调验签密钥（仅桥接启用时必填） | — |
+| `WECOM_OPERATOR_USER_ID` | 接收网站访客消息的企业微信成员 ID（仅桥接启用时必填） | — |
 
 ### 生成 Admin 密码 Hash
 
@@ -93,6 +102,10 @@ Go API 读取与 TypeScript 版本**完全相同**的 `.env` 变量，额外新�
 ./bin/fp-api -hash-password "your-secure-password"
 # 输出：$2a$12$...  → 写入 ADMIN_PASSWORD_HASH=
 ```
+
+生产启动会拒绝 `ADMIN_PASSWORD`、`HASH_PASSWORD` 以及带引号或格式不受支持的
+`ADMIN_PASSWORD_HASH`。部署脚本会从现有服务器 `.env` 中清理这两个旧变量，保留
+`ADMIN_PASSWORD_HASH`，并在重建 API 容器前再次校验。
 
 ---
 
@@ -112,6 +125,8 @@ Go API 读取与 TypeScript 版本**完全相同**的 `.env` 变量，额外新�
 | `/api/affiliate/dashboard` | GET | 推广员看板 |
 | `/api/affiliate/catalog` | GET | 推广员商品目录（含佣金）|
 | `/api/orders` | POST | 创建推广订单 |
+| `/api/integrations/chatwoot/webhook` | POST | Chatwoot 桥接 Webhook（桥接启用时） |
+| `/api/integrations/wecom/callback` | GET/POST | 企业微信 Agent 回调（桥接启用时） |
 | `/api/admin/*` | * | 管理员 API（需 cookie 认证）|
 
 ---
