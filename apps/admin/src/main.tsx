@@ -402,15 +402,10 @@ export function App() {
       }
 
       const getMarkdown = () => {
-        if (!editorRef.current) return activePost.markdown;
-        const markdown = editorHtmlToMarkdown(editorRef.current);
-        // Formatting commands can update the contenteditable DOM without
-        // emitting an input event. Preserve visible headings in the payload.
-        const missingHeadings = [...editorRef.current.querySelectorAll<HTMLElement>("h1,h2,h3,h4,h5,h6")]
-          .map((heading) => ({ level: Number(heading.tagName.slice(1)), text: heading.textContent?.trim() ?? "" }))
-          .filter(({ text }) => text && !markdown.includes(text))
-          .map(({ level, text }) => `${"#".repeat(level)} ${text}`);
-        return missingHeadings.length ? `${markdown}\n\n${missingHeadings.join("\n\n")}` : markdown;
+        // Read the current DOM even when formatting emitted no input event.
+        // The serializer preserves headings; comparing raw text with Markdown
+        // would append duplicate headings when inline formatting splits text.
+        return editorRef.current ? editorHtmlToMarkdown(editorRef.current) : activePost.markdown;
       };
       const checkUnresolved = () => {
         const count = editorRef.current?.querySelectorAll('[data-fp-type="image-import-error"]').length ?? 0;

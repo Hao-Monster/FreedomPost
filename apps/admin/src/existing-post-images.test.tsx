@@ -26,12 +26,16 @@ it("opens and saves existing managed images even when image import is unavailabl
     expect(editor.querySelector('[data-fp-type="image-import-error"]')).toBeNull();
     expect(fetchMock.mock.calls.some(([url]) => url.endsWith("image-imports"))).toBe(false);
     editor.insertAdjacentHTML("afterbegin", "<p>安装的时候选English，之后就都是中文了</p>");
+    // Formatting can alter the DOM without dispatching an input event.
+    editor.insertAdjacentHTML("afterbegin", "<h2>安装<strong>指南</strong></h2>");
     await act(async () => { [...container.querySelectorAll("button")].find(b => b.textContent === "保存")!.click(); });
     const saved = fetchMock.mock.calls.find(([,init]) => init?.method === "PUT");
     expect(saved).toBeDefined();
     const body = JSON.parse(String(saved![1]!.body));
     expect(body.markdown).toContain("安装的时候选English，之后就都是中文了");
     expect(body.markdown).toContain(src);
+    expect(body.markdown).toContain("## 安装**指南**");
+    expect(body.markdown.match(/^## /gm)).toHaveLength(1);
     expect(container.textContent).toContain("保存成功");
   } finally {
     await act(async () => root.unmount());
