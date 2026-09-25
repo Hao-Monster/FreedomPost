@@ -20,3 +20,12 @@ test('campaign mutation is restricted to the production main environment', () =>
   assert.match(workflow, /if: github.ref == 'refs\/heads\/main'/);
   assert.match(workflow, /environment: production/);
 });
+
+test('origin acceptance verifies the actual admin hostname and trust chain', () => {
+  const remote = readFileSync(new URL('./remote-deploy.sh', import.meta.url), 'utf8');
+  assert.match(remote, /test "\$\{ADMIN_DOMAIN:-\}" = 'admin-freedompost.thinderbox.uk'/);
+  assert.match(remote, /openssl verify -CAfile .* -verify_hostname/);
+  assert.match(remote, /openssl x509 .* -checkend 604800/);
+  assert.match(remote, /curl --cacert deploy\/trust\/cloudflare-origin-ca-rsa.pem/);
+  assert.doesNotMatch(remote, /curl\s+-[a-zA-Z]*k/);
+});
