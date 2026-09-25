@@ -26,6 +26,12 @@ tar -xzf /tmp/freedompost-deploy.tar.gz -C "$DEPLOY_PATH"
 rm -f /tmp/freedompost-deploy.tar.gz
 cd "$DEPLOY_PATH"
 
+# This hostname is a production contract, independent of caller-supplied values.
+test "${ADMIN_DOMAIN:-}" = 'admin-freedompost.thinderbox.uk'
+test "${ADMIN_ORIGIN:-}" = 'https://admin-freedompost.thinderbox.uk'
+$SUDO openssl verify -CAfile deploy/trust/cloudflare-origin-ca-rsa.pem -verify_hostname "$ADMIN_DOMAIN" /etc/caddy/certs/admin-origin.crt
+$SUDO openssl x509 -in /etc/caddy/certs/admin-origin.crt -checkend 604800 -noout
+
 if [ ! -f .env ]; then
   {
     printf '%s\n' "NODE_ENV=production"
@@ -33,8 +39,8 @@ if [ ! -f .env ]; then
     printf '%s\n' "HOST=0.0.0.0"
     printf '%s\n' "LOG_LEVEL=info"
     printf 'PREVIEW_DOMAIN=%s\n' "$PREVIEW_DOMAIN"
-    printf 'ADMIN_DOMAIN=%s\n' "${ADMIN_DOMAIN:-admin.freedompost.thinderbox.uk}"
-    printf 'ADMIN_ORIGIN=%s\n' "${ADMIN_ORIGIN:-https://admin.freedompost.thinderbox.uk}"
+    printf 'ADMIN_DOMAIN=%s\n' "${ADMIN_DOMAIN:-admin-freedompost.thinderbox.uk}"
+    printf 'ADMIN_ORIGIN=%s\n' "${ADMIN_ORIGIN:-https://admin-freedompost.thinderbox.uk}"
     printf 'ORIGIN_TEST_HOST=%s\n' "$DEPLOY_HOST"
     printf 'PUBLIC_SITE_URL=https://%s\n' "$PREVIEW_DOMAIN"
     printf 'VITE_PUBLIC_SITE_URL=https://%s\n' "$PREVIEW_DOMAIN"
@@ -79,7 +85,8 @@ fi
 
 set_env() {
   key="$1"
-  value="$2"
+  # Compose interpolates dollar signs even in service env_file values.
+  value="${2//\$/\$\$}"
   env_tmp="$(mktemp)"
   awk -v key="$key" -v value="$value" '
     BEGIN { found = 0 }
@@ -108,8 +115,8 @@ set_env_if_present() {
 }
 
 set_env "PREVIEW_DOMAIN" "$PREVIEW_DOMAIN"
-set_env "ADMIN_DOMAIN" "${ADMIN_DOMAIN:-admin.freedompost.thinderbox.uk}"
-set_env "ADMIN_ORIGIN" "${ADMIN_ORIGIN:-https://admin.freedompost.thinderbox.uk}"
+set_env "ADMIN_DOMAIN" "${ADMIN_DOMAIN:-admin-freedompost.thinderbox.uk}"
+set_env "ADMIN_ORIGIN" "${ADMIN_ORIGIN:-https://admin-freedompost.thinderbox.uk}"
 set_env "ORIGIN_TEST_HOST" "$DEPLOY_HOST"
 set_env "PUBLIC_SITE_URL" "https://$PREVIEW_DOMAIN"
 set_env "VITE_PUBLIC_SITE_URL" "https://$PREVIEW_DOMAIN"
@@ -286,6 +293,9 @@ docker_cmd system df || true
 echo "=== Building pre-compiled lightweight containers ==="
 compose --env-file .env -f deploy/docker-compose.yml build paid-access nginx api-go
 
+# Validate certificate loading before replacing the running public gateway.
+compose --env-file .env -f deploy/docker-compose.yml run --rm --no-deps nginx caddy validate --config /etc/caddy/Caddyfile
+
 # Wait for PostgreSQL to finish initializing and recovery
 for attempt in $(seq 1 30); do
   if compose --env-file .env -f deploy/docker-compose.yml exec -T postgres pg_isready -U freedompost >/dev/null 2>&1; then
@@ -306,10 +316,11 @@ compose --env-file .env -f deploy/docker-compose.yml up -d --force-recreate --re
 echo "=== Verifying Go API deployment health gates ==="
 for attempt in $(seq 1 60); do
   if compose --env-file .env -f deploy/docker-compose.yml exec -T api-go /fp-api -health-check \
-    && curl -kfsS --max-time 10 --connect-timeout 5 --resolve "$PREVIEW_DOMAIN:443:127.0.0.1" "https://$PREVIEW_DOMAIN/health" >/dev/null \
-    && curl -kfsS --max-time 10 --connect-timeout 5 --resolve "$ADMIN_DOMAIN:443:127.0.0.1" "https://$ADMIN_DOMAIN/" >/dev/null \
-    && curl -ksS --max-time 10 --connect-timeout 5 --resolve "$ADMIN_DOMAIN:443:127.0.0.1" -o /dev/null -w '%{http_code}' "https://$ADMIN_DOMAIN/api/admin/session" | grep -q '^401$' \
-    && curl -kfsS --max-time 10 --connect-timeout 5 --resolve "$PREVIEW_DOMAIN:443:127.0.0.1" -D /tmp/benefit-health.headers "https://$PREVIEW_DOMAIN/api/benefits/webmaster" >/dev/null \
+    && curl -fsS --max-time 10 --connect-timeout 5 --resolve "$PREVIEW_DOMAIN:443:127.0.0.1" "https://$PREVIEW_DOMAIN/health" >/dev/null \
+    && curl --cacert deploy/trust/cloudflare-origin-ca-rsa.pem -fsS --max-time 10 --connect-timeout 5 --resolve "$ADMIN_DOMAIN:443:127.0.0.1" "https://$ADMIN_DOMAIN/" >/dev/null \
+    && curl --cacert deploy/trust/cloudflare-origin-ca-rsa.pem -sS --max-time 10 --connect-timeout 5 --resolve "$ADMIN_DOMAIN:443:127.0.0.1" -o /dev/null -w '%{http_code}' "https://$ADMIN_DOMAIN/api/admin/session" | grep -q '^401$' \
+    && curl -sS --max-time 10 --connect-timeout 5 --resolve "$PREVIEW_DOMAIN:443:127.0.0.1" -o /dev/null -w '%{http_code}' "https://$PREVIEW_DOMAIN/api/admin/session" | grep -q '^404$' \
+    && curl -fsS --max-time 10 --connect-timeout 5 --resolve "$PREVIEW_DOMAIN:443:127.0.0.1" -D /tmp/benefit-health.headers "https://$PREVIEW_DOMAIN/api/benefits/webmaster" >/dev/null \
     && grep -qi '^cache-control:.*no-store' /tmp/benefit-health.headers; then
     echo "=== Go API health check passed (attempt $attempt) ==="
     echo "=== Production Deployment 100% SUCCESS ==="
