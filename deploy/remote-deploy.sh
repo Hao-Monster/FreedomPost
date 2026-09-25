@@ -376,11 +376,11 @@ compose --env-file .env -f deploy/docker-compose.yml up -d --force-recreate --re
 echo "=== Verifying Go API deployment health gates ==="
 for attempt in $(seq 1 60); do
   if compose --env-file .env -f deploy/docker-compose.yml exec -T api-go /fp-api -health-check \
-    && curl -fsS --max-time 10 --connect-timeout 5 --resolve "$PREVIEW_DOMAIN:443:127.0.0.1" "https://$PREVIEW_DOMAIN/health" >/dev/null \
+    && curl --cacert deploy/trust/cloudflare-origin-ca-rsa.pem -fsS --max-time 10 --connect-timeout 5 --resolve "$PREVIEW_DOMAIN:443:127.0.0.1" "https://$PREVIEW_DOMAIN/health" >/dev/null \
     && curl --cacert deploy/trust/cloudflare-origin-ca-rsa.pem -fsS --max-time 10 --connect-timeout 5 --resolve "$ADMIN_DOMAIN:443:127.0.0.1" "https://$ADMIN_DOMAIN/" >/dev/null \
     && curl --cacert deploy/trust/cloudflare-origin-ca-rsa.pem -sS --max-time 10 --connect-timeout 5 --resolve "$ADMIN_DOMAIN:443:127.0.0.1" -o /dev/null -w '%{http_code}' "https://$ADMIN_DOMAIN/api/admin/session" | grep -q '^401$' \
-    && curl -sS --max-time 10 --connect-timeout 5 --resolve "$PREVIEW_DOMAIN:443:127.0.0.1" -o /dev/null -w '%{http_code}' "https://$PREVIEW_DOMAIN/api/admin/session" | grep -q '^404$' \
-    && curl -fsS --max-time 10 --connect-timeout 5 --resolve "$PREVIEW_DOMAIN:443:127.0.0.1" -D /tmp/benefit-health.headers "https://$PREVIEW_DOMAIN/api/benefits/webmaster" >/dev/null \
+    && curl --cacert deploy/trust/cloudflare-origin-ca-rsa.pem -sS --max-time 10 --connect-timeout 5 --resolve "$PREVIEW_DOMAIN:443:127.0.0.1" -o /dev/null -w '%{http_code}' "https://$PREVIEW_DOMAIN/api/admin/session" | grep -q '^404$' \
+    && curl --cacert deploy/trust/cloudflare-origin-ca-rsa.pem -fsS --max-time 10 --connect-timeout 5 --resolve "$PREVIEW_DOMAIN:443:127.0.0.1" -D /tmp/benefit-health.headers "https://$PREVIEW_DOMAIN/api/benefits/webmaster" >/dev/null \
     && grep -qi '^cache-control:.*no-store' /tmp/benefit-health.headers; then
     echo "=== Go API health check passed (attempt $attempt) ==="
     echo "=== Production Deployment 100% SUCCESS ==="
