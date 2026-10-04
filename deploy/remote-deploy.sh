@@ -7,6 +7,30 @@ else
   SUDO="sudo"
 fi
 
+[[ "${RELEASE_SHA:-}" =~ ^[0-9a-f]{40}$ ]]
+# Keep the running images tagged before the normal image-prune/build steps.
+# The snapshot contains credentials, stays on this host and is never uploaded.
+ROLLBACK_DIR="${DEPLOY_PATH}.rollback/$(date -u +%Y%m%dT%H%M%SZ)-${RELEASE_SHA:0:12}"
+if [ -f "$DEPLOY_PATH/.env" ]; then
+  (
+    umask 077
+    mkdir -p "$ROLLBACK_DIR"
+    $SUDO tar -czf "$ROLLBACK_DIR/config.tar.gz" -C "$DEPLOY_PATH" .env deploy
+    $SUDO chmod 600 "$ROLLBACK_DIR/config.tar.gz"
+    printf 'services:\n' > "$ROLLBACK_DIR/images.yml"
+    for service in nginx api-go paid-access; do
+      container=$($SUDO docker compose --env-file "$DEPLOY_PATH/.env" -f "$DEPLOY_PATH/deploy/docker-compose.yml" ps -aq "$service")
+      test -n "$container"
+      previous_image=$($SUDO docker inspect --format '{{.Image}}' "$container")
+      rollback_tag="freedompost-rollback-${service}:$(basename "$ROLLBACK_DIR")"
+      $SUDO docker tag "$previous_image" "$rollback_tag"
+      printf '  %s:\n    image: %s\n' "$service" "$rollback_tag" >> "$ROLLBACK_DIR/images.yml"
+    done
+    printf '%s\n' "$RELEASE_SHA" > "$ROLLBACK_DIR/replaced-by-sha"
+    echo "Rollback snapshot: $ROLLBACK_DIR"
+    )
+fi
+
 echo "=== Cleaning disk space ==="
 $SUDO journalctl --vacuum-size=50M >/dev/null 2>&1 || true
 if command -v apt-get >/dev/null 2>&1; then
@@ -383,6 +407,8 @@ for attempt in $(seq 1 60); do
     && curl --cacert deploy/trust/cloudflare-origin-ca-rsa.pem -fsS --max-time 10 --connect-timeout 5 --resolve "$PREVIEW_DOMAIN:443:127.0.0.1" -D /tmp/benefit-health.headers "https://$PREVIEW_DOMAIN/api/benefits/webmaster" >/dev/null \
     && grep -qi '^cache-control:.*no-store' /tmp/benefit-health.headers; then
     echo "=== Go API health check passed (attempt $attempt) ==="
+    printf '%s\n' "$RELEASE_SHA" > .release-sha
+    printf 'release_sha=%s\nrollback_dir=%s\ndeployed_at=%s\n' "$RELEASE_SHA" "$ROLLBACK_DIR" "$(date -u +%FT%TZ)" > .release-record
     echo "=== Production Deployment 100% SUCCESS ==="
     exit 0
   fi

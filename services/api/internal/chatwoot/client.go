@@ -35,7 +35,13 @@ func New(base, websiteToken string, timeout time.Duration) (*Client, error) {
 	if err := validateWebsiteToken(websiteToken); err != nil {
 		return nil, fmt.Errorf("invalid chatwoot website token: %w", err)
 	}
-	return &Client{base: u.String(), websiteToken: websiteToken, http: &http.Client{Timeout: timeout}}, nil
+	return &Client{base: u.String(), websiteToken: websiteToken, http: &http.Client{
+		Timeout: timeout,
+		CheckRedirect: func(*http.Request, []*http.Request) error {
+			// A redirect must not receive the visitor's signed conversation token.
+			return http.ErrUseLastResponse
+		},
+	}}, nil
 }
 
 // SendOrder posts an incoming message to the visitor's existing WebWidget
@@ -89,12 +95,31 @@ func (c *Client) SendOrder(ctx context.Context, conversationToken, content, refe
 
 	response, err := c.http.Do(request)
 	if err != nil {
-		return fmt.Errorf("send chatwoot message: %w", err)
+		// Transport errors may include the URL's website token or request headers.
+		return fmt.Errorf("send chatwoot message failed")
 	}
 	defer response.Body.Close()
-	_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 1<<20))
 	if response.StatusCode < 200 || response.StatusCode > 299 {
 		return fmt.Errorf("chatwoot status %d", response.StatusCode)
+	}
+	const maxResponseBytes = 1 << 20
+	responseBody, err := io.ReadAll(io.LimitReader(response.Body, maxResponseBytes+1))
+	if err != nil {
+		return fmt.Errorf("read chatwoot message response failed")
+	}
+	if len(responseBody) > maxResponseBytes {
+		return fmt.Errorf("chatwoot message response is too large")
+	}
+	// The WebWidget create response must identify the public incoming message
+	// that was saved; a successful proxy response alone does not prove delivery.
+	var created struct {
+		ID          int64  `json:"id"`
+		Content     string `json:"content"`
+		MessageType *int   `json:"message_type"`
+		Private     *bool  `json:"private"`
+	}
+	if err := json.Unmarshal(responseBody, &created); err != nil || created.ID <= 0 || created.Content != content || created.MessageType == nil || *created.MessageType != 0 || created.Private == nil || *created.Private {
+		return fmt.Errorf("invalid chatwoot message response")
 	}
 	return nil
 }
