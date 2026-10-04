@@ -3,8 +3,12 @@ package chatwoot
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -55,6 +59,9 @@ func TestSendOrderUsesWebWidgetMessageAPI(t *testing.T) {
 			t.Error("message_type must be assigned by the WebWidget API")
 		}
 		w.WriteHeader(http.StatusCreated)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"id": 123, "content": content, "message_type": 0, "private": false,
+		})
 	}))
 	defer server.Close()
 
@@ -62,8 +69,8 @@ func TestSendOrderUsesWebWidgetMessageAPI(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	client.http = server.Client()
-	if err := client.SendOrder(context.Background(), conversationToken, content, referer); err != nil {
+	client.http.Transport = server.Client().Transport
+	if err := client.SendOrder(context.Background(), conversationToken, "\n"+content+" \t", referer); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -78,11 +85,110 @@ func TestSendOrderReportsChatwootFailureWithoutResponseBody(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	client.http = server.Client()
+	client.http.Transport = server.Client().Transport
 	err = client.SendOrder(context.Background(), "signed-token", "order", "")
 	if err == nil || err.Error() != "chatwoot status 401" {
 		t.Fatalf("error = %v, want status-only error", err)
 	}
+}
+
+func TestSendOrderValidatesCreatedMessage(t *testing.T) {
+	const validResponse = `{"id":123,"content":"order","message_type":0,"private":false}`
+	for _, test := range []struct {
+		name   string
+		status int
+		body   string
+		want   string
+	}{
+		{"valid response", http.StatusOK, validResponse, ""},
+		{"HTML success", http.StatusOK, "<html>private diagnostic</html>", "invalid chatwoot message response"},
+		{"empty created", http.StatusCreated, "", "invalid chatwoot message response"},
+		{"no content", http.StatusNoContent, "", "invalid chatwoot message response"},
+		{"null response", http.StatusOK, "null", "invalid chatwoot message response"},
+		{"missing id", http.StatusOK, `{"content":"order","message_type":0,"private":false}`, "invalid chatwoot message response"},
+		{"zero id", http.StatusOK, strings.Replace(validResponse, "123", "0", 1), "invalid chatwoot message response"},
+		{"negative id", http.StatusOK, strings.Replace(validResponse, "123", "-1", 1), "invalid chatwoot message response"},
+		{"fractional id", http.StatusOK, strings.Replace(validResponse, "123", "1.5", 1), "invalid chatwoot message response"},
+		{"different content", http.StatusOK, strings.Replace(validResponse, "order", "another order", 1), "invalid chatwoot message response"},
+		{"missing message type", http.StatusOK, `{"id":123,"content":"order","private":false}`, "invalid chatwoot message response"},
+		{"null message type", http.StatusOK, strings.Replace(validResponse, `"message_type":0`, `"message_type":null`, 1), "invalid chatwoot message response"},
+		{"outgoing message", http.StatusOK, strings.Replace(validResponse, `"message_type":0`, `"message_type":1`, 1), "invalid chatwoot message response"},
+		{"private message", http.StatusOK, strings.Replace(validResponse, "false", "true", 1), "invalid chatwoot message response"},
+		{"missing privacy", http.StatusOK, `{"id":123,"content":"order","message_type":0}`, "invalid chatwoot message response"},
+		{"trailing JSON", http.StatusOK, validResponse + `{}`, "invalid chatwoot message response"},
+		{"oversized response", http.StatusOK, validResponse + strings.Repeat(" ", 1<<20), "chatwoot message response is too large"},
+		{"rejected response", http.StatusNotFound, `{"error":"private diagnostic website-token signed-token"}`, "chatwoot status 404"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(test.status)
+				_, _ = w.Write([]byte(test.body))
+			}))
+			defer server.Close()
+			client, err := New(server.URL, "website-token", time.Second)
+			if err != nil {
+				t.Fatal(err)
+			}
+			client.http.Transport = server.Client().Transport
+			err = client.SendOrder(context.Background(), "signed-token", "order", "")
+			if test.want == "" {
+				if err != nil {
+					t.Fatal(err)
+				}
+			} else if err == nil || err.Error() != test.want {
+				t.Fatalf("error = %v, want %q", err, test.want)
+			}
+		})
+	}
+}
+
+func TestSendOrderDoesNotFollowRedirects(t *testing.T) {
+	for _, status := range []int{http.StatusMovedPermanently, http.StatusFound, http.StatusSeeOther, http.StatusTemporaryRedirect, http.StatusPermanentRedirect} {
+		t.Run(fmt.Sprint(status), func(t *testing.T) {
+			var redirected atomic.Int32
+			server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == "/redirect-target" {
+					redirected.Add(1)
+					_, _ = w.Write([]byte(`{"id":123,"content":"order","message_type":0,"private":false}`))
+					return
+				}
+				http.Redirect(w, r, "/redirect-target", status)
+			}))
+			defer server.Close()
+			client, err := New(server.URL, "website-token", time.Second)
+			if err != nil {
+				t.Fatal(err)
+			}
+			client.http.Transport = server.Client().Transport
+			err = client.SendOrder(context.Background(), "signed-token", "order", "")
+			if err == nil || err.Error() != fmt.Sprintf("chatwoot status %d", status) {
+				t.Errorf("error = %v, want redirect status %d", err, status)
+			}
+			if got := redirected.Load(); got != 0 {
+				t.Errorf("redirect target received %d requests, want none", got)
+			}
+		})
+	}
+}
+
+func TestSendOrderRedactsTransportError(t *testing.T) {
+	client, err := New("https://support.example", "website-token", time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client.http.Transport = roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		return nil, errors.New("private diagnostic " + r.URL.String() + " " + r.Header.Get("X-Auth-Token"))
+	})
+	err = client.SendOrder(context.Background(), "signed-token", "order", "")
+	if err == nil || err.Error() != "send chatwoot message failed" {
+		t.Fatalf("error = %v, want redacted transport failure", err)
+	}
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) {
+	return f(r)
 }
 
 func TestNewRejectsIncompleteOrUnsafeConfiguration(t *testing.T) {
