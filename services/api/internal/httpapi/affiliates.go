@@ -242,6 +242,10 @@ func (s *Server) affiliateRecordClick(w http.ResponseWriter, r *http.Request) {
 // ─── Orders ───────────────────────────────────────────────────────────────────
 
 func (s *Server) createOrder(w http.ResponseWriter, r *http.Request) {
+	if _, present := r.Header["Idempotency-Key"]; present || r.Header.Get("X-Order-CSRF") != "" {
+		s.createOwnedOrder(w, r)
+		return
+	}
 	ip := s.remoteIP(r)
 	if ok, _ := s.limiter.Allow(r.Context(), "affiliate-order:"+security.HashText(ip), 20, time.Hour); !ok {
 		writeError(w, http.StatusTooManyRequests, "RATE_LIMITED", "下单次数过多，请稍后再试")

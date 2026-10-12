@@ -4,7 +4,7 @@
   var websiteToken = atob("V00zMlZvaEpBWWN5NjlSeDZxcjFQMkx0");
   window.chatwootSettings = { position: "right", type: "standard", launcherTitle: "", directConversation: true };
   var script = document.createElement("script");
-  script.src = baseUrl + "/packs/js/sdk.js?v=freedompost-direct-1";
+  script.src = baseUrl + "/packs/js/sdk.js?v=freedompost-order-handoff-2";
   script.async = true;
   script.onload = function () {
     window.chatwootSDK.run({ websiteToken: websiteToken, baseUrl: baseUrl });

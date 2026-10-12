@@ -8,6 +8,7 @@ export type ChatwootReadySubscription = (listener: ChatwootReadyListener) => () 
 export interface ChatwootReadyOptions {
   timeoutMs?: number;
   pollMs?: number;
+  signal?: AbortSignal;
 }
 
 /**
@@ -28,6 +29,10 @@ export function waitForChatwootReady<T extends ChatwootReadyWidget>(
   const pollMs = normalizeDelay(options.pollMs, 100);
 
   return new Promise<T>((resolve, reject) => {
+    if (options.signal?.aborted) {
+      reject(new Error("HANDOFF_CANCELLED"));
+      return;
+    }
     const initiallyLoaded = getWidget();
     if (initiallyLoaded?.hasLoaded === true) {
       resolve(initiallyLoaded);
@@ -43,6 +48,7 @@ export function waitForChatwootReady<T extends ChatwootReadyWidget>(
     const cleanup = () => {
       if (pollTimer !== undefined) clearTimeout(pollTimer);
       if (timeoutTimer !== undefined) clearTimeout(timeoutTimer);
+      options.signal?.removeEventListener("abort", onAbort);
       cleanupRequested = true;
       try {
         unsubscribe();
@@ -63,6 +69,13 @@ export function waitForChatwootReady<T extends ChatwootReadyWidget>(
       settled = true;
       cleanup();
       reject(new Error("chatwoot-not-ready"));
+    };
+
+    const onAbort = () => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      reject(new Error("HANDOFF_CANCELLED"));
     };
 
     const check = () => {
@@ -86,6 +99,7 @@ export function waitForChatwootReady<T extends ChatwootReadyWidget>(
     };
 
     timeoutTimer = setTimeout(fail, timeoutMs);
+    options.signal?.addEventListener("abort", onAbort, { once: true });
     try {
       const removeListener = subscribe(onReady);
       unsubscribe = removeListener;

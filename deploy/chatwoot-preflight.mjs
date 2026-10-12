@@ -55,13 +55,63 @@ export async function probeChatwootInbox(environment, request = fetch) {
   }
 }
 
+// A reachable legacy widget cannot safely accept automatic delivery retries.
+// This is a release-order gate; the API also verifies the authenticated live
+// receiver capability for every delivery, including its migrated storage.
+export async function probeChatwootHandoff(environment, request = fetch) {
+  const url = new URL("/freedompost-widget-release.json", environment.CHATWOOT_BASE_URL);
+  let response;
+  try {
+    response = await request(url, {
+      redirect: "manual", signal: AbortSignal.timeout(10000), headers: { accept: "application/json" }
+    });
+  } catch {
+    throw new Error("Chatwoot handoff probe failed (network or timeout)");
+  }
+  if (response.status !== 200) {
+    await response.body?.cancel().catch(() => {});
+    throw new Error(`Chatwoot handoff probe failed (HTTP ${response.status})`);
+  }
+  const reader = response.body?.getReader();
+  if (!reader) throw new Error("Chatwoot release does not support order handoff protocol 1");
+  const chunks = [];
+  let size = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      size += value.byteLength;
+      if (size > 16 * 1024) throw new Error("limit");
+      chunks.push(Buffer.from(value));
+    }
+  } catch {
+    throw new Error(size > 16 * 1024
+      ? "Chatwoot handoff probe exceeded response limit"
+      : "Chatwoot handoff probe response read failed");
+  } finally {
+    await reader.cancel().catch(() => {});
+  }
+  let metadata;
+  try {
+    metadata = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+  } catch {
+    throw new Error("Chatwoot release does not support order handoff protocol 1");
+  }
+  if (!metadata || Array.isArray(metadata) || metadata.supportHandoffProtocol !== 1
+      || metadata.upstreamVersion !== "4.17.1"
+      || typeof metadata.revision !== "string" || !/^[a-f0-9]{40}$/.test(metadata.revision)) {
+    throw new Error("Chatwoot release does not support order handoff protocol 1");
+  }
+}
+
 if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
   try {
     const source = readFileSync(process.argv[2] || "apps/public-reader/dist/chatwoot.js", "utf8");
     const errors = validateChatwootBinding(source, process.env);
     if (errors.length) throw new Error(errors.join("; "));
     await probeChatwootInbox(process.env);
-    console.log("OK Chatwoot public widget and order sender use the same reachable inbox");
+    await probeChatwootHandoff(process.env);
+    console.log("OK Chatwoot binding and order handoff protocol 1 release gate");
   } catch (error) {
     // File paths and probe diagnostics are local; no upstream response or token
     // is ever included in the error message.

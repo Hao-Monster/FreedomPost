@@ -47,7 +47,7 @@ type Server struct {
 	searchCache   *searchindex.Cache
 	paidAccess    *paidaccess.Client
 	benefit       *BenefitRuntime // nil = feature disabled
-	chatwoot      *chatwoot.Client
+	chatwoot      orderMessageClient
 	channelBridge *channelbridge.Service
 	logger        *slog.Logger
 	mux           *http.ServeMux
@@ -79,9 +79,11 @@ func New(
 		searchCache: searchCache,
 		paidAccess:  paidAccess,
 		benefit:     benefitRuntime,
-		chatwoot:    chatwootClient,
 		logger:      logger,
 		mux:         http.NewServeMux(),
+	}
+	if chatwootClient != nil {
+		s.chatwoot = chatwootClient
 	}
 	s.routes()
 	return s
@@ -133,6 +135,10 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /api/affiliate/clicks", s.affiliateRecordClick)
 	s.mux.HandleFunc("POST /api/affiliate/logout", s.affiliateLogout)
 	s.mux.HandleFunc("POST /api/orders", s.createOrder)
+	s.mux.HandleFunc("GET /api/orders/session", s.orderOwnerSession)
+	s.mux.HandleFunc("POST /api/orders/recover", s.recoverOwnedOrder)
+	s.mux.HandleFunc("GET /api/orders/{id}/support-delivery", s.getOrderSupportDelivery)
+	s.mux.HandleFunc("POST /api/orders/{id}/support-delivery", s.sendOrderSupportDelivery)
 
 	// ── Optional channel bridge callbacks ───────────────────────────────────
 	s.mux.HandleFunc("GET /api/integrations/wecom/callback", s.wecomCallback)

@@ -20,5 +20,7 @@ docs/*
 !docs/paid-article-access.md
 !docs/security-hardening-2026-08-26.md
 !docs/wechat-channel-integration.md
+!docs/order-support-handoff-v2.md
+!docs/order-support-handoff-test-report.md
 bin/
 services/*/bin/
