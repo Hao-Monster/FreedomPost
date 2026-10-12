@@ -16,6 +16,10 @@ describes source behavior, not proof that production has been upgraded.
 - A delivery is bound to a verified Chatwoot visitor through authenticated
   capability and persistent CAS. The receiver deduplicates the stable order UUID
   in PostgreSQL. Neither a browser flag nor a Redis lock substitutes for this.
+- Orders POST only to `/api/v1/widget/freedompost_handoff/messages`. A legacy
+  receiver cannot accept this dedicated route, so a rollback between capability
+  and delivery fails without creating an untracked ordinary message. Never
+  fall back to `/api/v1/widget/messages` for a v2 order.
 - A saved receipt is not yet a visible message. The SDK confirms the current
   identity/generation has read and rendered that exact message before the page
   displays success. Display recovery never resends a saved message.

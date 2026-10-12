@@ -47,7 +47,7 @@
 Chatwoot 4.17.1 固定上游 `b354a9550e1fb59fa537a9c384232cb076213e72` 增加：
 
 - 认证 `GET /api/v1/widget/freedompost_handoff`：协议 1、HMAC binding、接收端幂等 capability。
-- 原消息入口的可选 `message.freedompost_delivery_key`：不改变普通手工消息；追加可验证的 `freedompost_delivery` 回执。
+- 专用 `POST /api/v1/widget/freedompost_handoff/messages`：必须携带 `message.freedompost_delivery_key`，追加可验证的 `freedompost_delivery` 回执；普通手工消息保持原入口。即使能力检查后客服回滚为旧版，专用入口也只会拒绝，不得回退到会忽略去重字段的旧消息入口。
 - SDK `ensureConversation({timeoutMs,signal})` 与 `confirmMessage({messageId,generation,bindingId,conversationId?,timeoutMs,signal})`。postMessage 校验版本、requestId、origin、source 与 generation；旧 SDK 不允许退回盲发。
 
 ## 测试矩阵
@@ -69,7 +69,9 @@ Chatwoot 4.17.1 固定上游 `b354a9550e1fb59fa537a9c384232cb076213e72` 增加�
 
 ## 发布、迁移与回滚
 
-先发布兼容的 Chatwoot 协议、接收侧存储与 SDK，再发布网站及 `0014_order_support_handoff.sql`。两个仓库各自通过必要检查、独立审查、受保护 main 和显式完整 SHA 发布。开发分支不能直接部署。metadata 的 `supportHandoffProtocol:1` 只是必要条件，不替代实际认证路由和迁移检查。
+先发布兼容的 Chatwoot 协议、接收侧存储与 SDK，再发布网站及 `0014_order_support_handoff.sql`。遵循确认方案中的既有受控 main 流程：FreedomPost 通过受保护 main 发布；Chatwoot 遵循自身既有 reviewed PR、全部相关 CI、main 完整 SHA、手动 production 工作流与回滚点流程。开发分支不能直接部署。metadata 的 `supportHandoffProtocol:1` 只是必要条件，不替代实际认证路由和迁移检查。
+
+治理核对（2026-10-12）：网站 main 的平台保护已启用；私有 Chatwoot 仓库没有平台分支保护，其 GitHub 计划不支持该能力。原始已确认方案写的是“既有受控 main 完整 SHA 流程”，没有新增客服平台保护前置条件；先前把“两仓库受控”扩写为“两仓库受保护”属本文归纳错误，现予更正。没有修改仓库可见性、计费或访问权限，也不把人工审查等同于平台强制保护。
 
 网站新增 `affiliate_order_requests` 与 `affiliate_order_support_deliveries`；不重写既有订单/价格/付款状态。客服迁移只增加接收映射，不删除历史消息。上线前保存配置和旧镜像回滚点；回滚应用时保留新增表、原订单、交付状态和已保存消息，不通过删除幂等记录“重置”。
 

@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -78,7 +79,7 @@ func TestHandoffSendsStableKeyAndValidatesReceipt(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			s := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				if r.Method != http.MethodPost || r.URL.Path != "/api/v1/widget/messages" || r.Header.Get("X-Auth-Token") != "signed-widget-token" {
+				if r.Method != http.MethodPost || r.URL.Path != "/api/v1/widget/freedompost_handoff/messages" || r.Header.Get("X-Auth-Token") != "signed-widget-token" {
 					t.Errorf("wrong authenticated message request")
 				}
 				var input struct {
@@ -119,7 +120,7 @@ func TestHandoffSendsStableKeyAndValidatesReceipt(t *testing.T) {
 }
 
 func TestHandoffUnknownResponseAndStatusClassification(t *testing.T) {
-	for _, status := range []int{401, 409, 429, 500, 502} {
+	for _, status := range []int{401, 404, 405, 409, 429, 500, 502} {
 		t.Run(fmt.Sprint(status), func(t *testing.T) {
 			s := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				w.WriteHeader(status)
@@ -154,6 +155,69 @@ func TestHandoffUnknownResponseAndStatusClassification(t *testing.T) {
 	var failure *HandoffError
 	if !errors.As(err, &failure) || !failure.UnknownOutcome || !failure.Retryable {
 		t.Fatalf("lost response must not be treated as not sent: %v", err)
+	}
+}
+
+func TestHandoffDowngradeAfterCapabilityCannotWriteThroughLegacyRoute(t *testing.T) {
+	var upgraded atomic.Bool
+	var legacyWrites, durableWrites, dedicatedPosts atomic.Int32
+	s := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/widget/freedompost_handoff":
+			fmt.Fprintf(w, `{"version":1,"binding_id":%q,"idempotent_orders":true}`, handoffBinding)
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/widget/messages":
+			// A legacy receiver ignores the unknown delivery key and writes a
+			// normal message. The order sender must never reach this fallback.
+			legacyWrites.Add(1)
+			fmt.Fprint(w, `{"id":123,"content":"stored order","message_type":0,"private":false}`)
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/widget/freedompost_handoff/messages":
+			dedicatedPosts.Add(1)
+			if !upgraded.Load() {
+				http.NotFound(w, r)
+				return
+			}
+			var input struct {
+				Message struct {
+					Key string `json:"freedompost_delivery_key"`
+				} `json:"message"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&input); err != nil || input.Message.Key != handoffOrderID {
+				t.Error("recovery changed the original delivery key")
+				http.Error(w, "invalid test input", http.StatusUnprocessableEntity)
+				return
+			}
+			durableWrites.CompareAndSwap(0, 1)
+			fmt.Fprintf(w, `{"id":123,"content":"stored order","message_type":0,"private":false,"freedompost_delivery":{"version":1,"binding_id":%q,"conversation_id":37,"request_key":%q}}`, handoffBinding, handoffOrderID)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer s.Close()
+	c, err := New(s.URL, "website-token", time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.http.Transport = s.Client().Transport
+	if _, err := c.HandoffCapability(context.Background(), "signed-widget-token"); err != nil {
+		t.Fatal(err)
+	}
+	receipt, err := c.SendOrderHandoff(context.Background(), "signed-widget-token", handoffOrderID, handoffBinding, "stored order", "")
+	if legacyWrites.Load() != 0 {
+		t.Fatal("downgrade wrote an untracked order through the legacy message route")
+	}
+	var failure *HandoffError
+	if receipt != nil || !errors.As(err, &failure) || failure.Code != "SUPPORT_HTTP_404" || failure.UnknownOutcome || failure.Retryable || durableWrites.Load() != 0 {
+		t.Fatalf("legacy receiver must fail without a message or fallback: receipt=%v error=%v", receipt, err)
+	}
+	upgraded.Store(true)
+	for range 2 {
+		receipt, err = c.SendOrderHandoff(context.Background(), "signed-widget-token", handoffOrderID, handoffBinding, "stored order", "")
+		if err != nil || receipt.MessageID != 123 {
+			t.Fatalf("original order recovery failed: receipt=%v error=%v", receipt, err)
+		}
+	}
+	if legacyWrites.Load() != 0 || durableWrites.Load() != 1 || dedicatedPosts.Load() != 3 {
+		t.Fatalf("unsafe delivery routing: legacy=%d durable=%d dedicated=%d", legacyWrites.Load(), durableWrites.Load(), dedicatedPosts.Load())
 	}
 }
 

@@ -108,7 +108,7 @@ func TestOrderWritesRequireOriginAndCSRF(t *testing.T) {
 				r.AddCookie(cookie)
 				r.Header.Set("Origin", test.origin)
 				r.Header.Set("X-Order-CSRF", test.csrf)
-				r.Header.Set("Idempotency-Key", "fb1ca6a3-c77a-4e37-8f39-64c5d8c7c27b")
+				r.Header.Set("Idempotency-Key", "11111111-1111-4111-8111-111111111111")
 				w := httptest.NewRecorder()
 				s.Handler().ServeHTTP(w, r)
 				if w.Code != http.StatusForbidden || !strings.Contains(w.Body.String(), `"ORDER_CSRF_INVALID"`) {
@@ -123,7 +123,7 @@ func TestIdempotentOrderCannotCreateBeforeOwnerConfirmation(t *testing.T) {
 	repo := &handoffTestRepository{}
 	s := handoffTestServer(repo)
 	request := httptest.NewRequest(http.MethodPost, "https://shop.example/api/orders", strings.NewReader(`{"productSlug":"test","recommenderWechatId":"Tester123"}`))
-	request.Header.Set("Idempotency-Key", "fb1ca6a3-c77a-4e37-8f39-64c5d8c7c27b")
+	request.Header.Set("Idempotency-Key", "11111111-1111-4111-8111-111111111111")
 	request.Header.Set("Origin", "https://shop.example")
 	response := httptest.NewRecorder()
 	s.Handler().ServeHTTP(response, request)

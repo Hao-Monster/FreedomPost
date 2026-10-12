@@ -5,7 +5,7 @@ import { OrderHandoffController, orderHandoffStoragePrefix, type OrderHandoffRec
 import { mountOrderHandoffView, orderHandoffDescription } from "./order-handoff-view.js";
 
 const stored: OrderHandoffRecord = {
-  version: 1, requestKey: "95fc9bf1-b338-41c2-9a5e-f8ba8ad16c8c", input: { productSlug: "qa-product", recommenderWechatId: "QA_Ref" }, createdAt: 1, creationAttempted: true,
+  version: 1, requestKey: "11111111-1111-4111-8111-111111111111", input: { productSlug: "qa-product", recommenderWechatId: "QA_Ref" }, createdAt: 1, creationAttempted: true,
   order: { id: "qa-id", orderCode: "QA-001", productTitle: '<img src=x onerror="alert(1)">' },
   supportDelivery: { status: "sent", messageId: 42, conversationId: 7, bindingId: "qa-binding" }, phase: "action_required"
 };

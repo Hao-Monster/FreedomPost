@@ -4,8 +4,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { OrderHandoffController, orderHandoffStoragePrefix, type OrderHandoffInput, type OrderHandoffWidget, type SupportDelivery } from "./order-handoff.js";
 
 const input: OrderHandoffInput = { productSlug: "qa-digital-service", recommenderWechatId: "QA_Recommender" };
-const requestKey = "cc02977e-4c75-4b66-9f55-99c2693f1402";
-const secondKey = "cc02977e-4c75-4b66-9f55-99c2693f1403";
+// Deliberately synthetic valid UUIDs: request identifiers, not credentials.
+const requestKey = "11111111-1111-4111-8111-111111111111";
+const secondKey = "22222222-2222-4222-8222-222222222222";
 const order = { id: "qa-order-id", orderCode: "QA-ORDER-001", productTitle: "QA digital service" };
 const awaiting: SupportDelivery = { status: "awaiting_session" };
 const receipt: SupportDelivery = { status: "sent", messageId: 117, conversationId: 11, bindingId: "qa-binding" };

@@ -65,7 +65,9 @@ func (c *Client) SendOrderHandoff(ctx context.Context, token, orderID, bindingID
 	if err != nil {
 		return nil, err
 	}
-	response, err := c.handoffRequest(ctx, http.MethodPost, "/api/v1/widget/messages", token, body)
+	// A downgrade between capability and POST must fail closed. The legacy
+	// messages route ignores the delivery key and would create an untracked copy.
+	response, err := c.handoffRequest(ctx, http.MethodPost, "/api/v1/widget/freedompost_handoff/messages", token, body)
 	if err != nil {
 		return nil, err
 	}

@@ -23,6 +23,7 @@ import (
 type orderReceiverStub struct {
 	binding           string
 	capabilityError   error
+	sendError         error
 	loseFirstResponse bool
 	sendCalls         int
 	saved             map[string]*chatwoot.HandoffReceipt
@@ -40,6 +41,9 @@ func (c *orderReceiverStub) HandoffCapability(context.Context, string) (*chatwoo
 }
 func (c *orderReceiverStub) SendOrderHandoff(_ context.Context, token, key, binding, content, referer string) (*chatwoot.HandoffReceipt, error) {
 	c.sendCalls++
+	if c.sendError != nil {
+		return nil, c.sendError
+	}
 	if c.saved == nil {
 		c.saved = map[string]*chatwoot.HandoffReceipt{}
 		c.contents = map[string]string{}
@@ -255,6 +259,35 @@ func TestOrderHandoffHTTPBindingAndCapabilityFailClosed(t *testing.T) {
 	wrong = f.request(http.MethodPost, path, `{"expectedBindingId":"changed-visitor"}`, true)
 	if wrong.Code != http.StatusConflict || f.receiver.sendCalls != 1 {
 		t.Fatal("persistent binding silently rebound")
+	}
+}
+
+func TestOrderHandoffHTTPDowngradeKeepsOriginalOrderForRecovery(t *testing.T) {
+	f := newHandoffHTTPFixture(t)
+	h := f.create(t)
+	path := "/api/orders/" + h.Order.ID + "/support-delivery"
+	body := `{"expectedBindingId":"verified-current-visitor"}`
+	f.receiver.sendError = &chatwoot.HandoffError{Code: "SUPPORT_HTTP_404"}
+	failed := deliveryFromResponse(t, f.request(http.MethodPost, path, body, true))
+	if failed.Status != "action_required" || failed.ErrorCode != "SUPPORT_HTTP_404" || failed.MessageID != 0 || failed.Attempts != 1 || len(f.receiver.saved) != 0 {
+		t.Fatalf("downgrade falsely reported a delivery or retried blindly: %+v", failed)
+	}
+	persisted := deliveryFromResponse(t, f.request(http.MethodGet, path, "", false))
+	if persisted.Status != "action_required" || persisted.BindingID != "verified-current-visitor" || persisted.ErrorCode != failed.ErrorCode {
+		t.Fatalf("downgrade state and binding were not preserved: %+v", persisted)
+	}
+	recovered := f.request(http.MethodPost, "/api/orders/recover", fmt.Sprintf(`{"requestKey":%q}`, f.key), false)
+	if recovered.Code != http.StatusOK || !strings.Contains(recovered.Body.String(), h.Order.ID) {
+		t.Fatal("downgrade lost the original order")
+	}
+	f.receiver.sendError = nil
+	delivered := deliveryFromResponse(t, f.request(http.MethodPost, path, body, true))
+	if delivered.Status != "sent" || delivered.MessageID != 100 || delivered.Attempts != 2 || len(f.receiver.saved) != 1 || !strings.Contains(f.receiver.contents[h.Order.ID], h.Order.OrderCode) {
+		t.Fatalf("upgrade did not recover the original order exactly once: %+v", delivered)
+	}
+	replayed := deliveryFromResponse(t, f.request(http.MethodPost, path, body, true))
+	if replayed.MessageID != delivered.MessageID || f.receiver.sendCalls != 2 || len(f.receiver.saved) != 1 {
+		t.Fatal("known receipt was resent after recovery")
 	}
 }
 

@@ -20,6 +20,7 @@
 | 相同请求并发、订单响应丢失、未知订单 ID 恢复 | `repository/order_handoff_integration_test.go` | 真实 PG 唯一约束/事务 | PASS |
 | CAS 访客绑定、lease 过期、旧尝试不能覆盖新回执 | 同上 | 真实 PG 并发 | PASS |
 | 客服超时、错误回执、重定向和身份冲突 | `chatwoot/handoff_test.go` | 真实 TLS HTTP 边界替身 | PASS；不是 Rails 端到端 |
+| 能力检查后客服回滚，旧版不得误写普通消息 | 专用发送路由、Go downgrade 用例、独立旧版 Rails | TLS 契约 + 真实 PG/框架 | PASS；旧版专用 POST 两次 404 无写入，native 对照两次写入证明原风险 |
 | owner 丢失不重建、重试原单、sent 只读恢复 | `order-handoff.test.ts` | 状态机单元 | PASS |
 | 用户关闭期间取消 GET/POST/退避，迟到响应不重开 | `order-handoff.test.ts`、`order-handoff-portal.test.ts` | 事件/模板/状态机 | PASS，独立复跑 28/28 |
 | SDK 来源、请求 ID、generation 与绑定校验 | 固定上游 SDK/App 测试 | iframe/SDK DOM 与 store | PASS，最终 185/185 |
@@ -39,6 +40,8 @@
 5. 主动关闭客服：新增测试修复前 24 PASS / 4 FAIL（2.68 s）；修复后 28/28 PASS（2.17 s）。独立审查再次执行 28/28 PASS（1.98 s）。
 6. 历史订单回执：原只查询 latest conversation 的实现 24 PASS / 1 FAIL；认证读取原映射回执后 25/25 PASS。
 7. 独立审查另发现旧回执注入主 store 会污染历史分页游标：跨会话和同会话尚未加载的较旧消息均受影响。Red 为 25 PASS / 2 FAIL；修复采用独立只读回执展示，不改变主时间线游标，Green 27/27。独立复跑 27/27 PASS（12.75 s），验证旧回执 73 展示后仍从 `before=181` 实际加载 170；不跳过未加载历史。
+8. 独立发布审查发现能力 GET 与消息 POST 之间回滚的竞态：旧版原生消息接口忽略 delivery key，可能保存没有映射的消息。Go 目标用例修复前因实际调用旧入口 FAIL（exit 1，0.741 s）；改用旧版不存在的专用 POST 后 PASS。404/405 明确失败，不回退原生入口；真实 PG 用例证明原订单、绑定和恢复键保留。新版真实 Rails 在旧补丁上首个专用路由用例因 RoutingError FAIL；最终补丁 20/20、144 断言 PASS。
+9. 真实 Git 历史扫描曾发现 5 个固定测试 UUID 的误报。当前 fixture 改为明显的合成 UUID，只对旧提交的 5 个精确 fingerprint 添加例外；不做路径/规则级豁免、不改历史、不弱化断言。官方 8.24.3 与 8.30.1 范围扫描均恢复 PASS，8.24.3 全部可达历史 153 个提交也为 0 检测项；合成高熵正控仍被检出。
 
 ## 已执行的命令与结果
 
@@ -50,8 +53,8 @@
 | public-reader 全部 `vitest run src` | PASS | 0 | 97 / 0 / 0，20 文件 | 关闭问题修复后 3.99 s |
 | public-reader `astro check` | PASS | 0 | 67 文件，0 error/warning/hint | 关闭问题修复后 |
 | public-reader `astro build` | PASS | 0 | 14 页面 | 2.70 s |
-| 根目录 `npm run check` 最终全量 | PASS | 0 | 203 JS 业务测试 + 31 发布测试，0 FAIL/SKIP | 所有 workspace 类型检查、公开站 14 页、admin 构建通过；公开站最终测试 4.56 s、构建 2.28 s |
-| API `go test -race -coverprofile=C:/Temp/fp-order-api-coverage.out -covermode=atomic -json ./...` | PASS | 0 | 73 顶层 / 191 含子例，0 FAIL/SKIP | 155.59 s；真实 PG |
+| 根目录 `npm run check` 最终全量 | PASS | 0 | 203 JS 业务测试 + 31 发布测试，0 FAIL/SKIP | fixture 修正后重新执行；所有 workspace 类型检查、67 文件 Astro 检查、公开站 14 页、admin 构建通过；公开站测试 3.78 s、构建 1.47 s |
+| API `go test -count=1 -race -coverprofile=C:/Temp/fp-order-api-coverage-dedicated-route.out -covermode=atomic -json ./...` | PASS | 0 | 75 顶层 / 195 含子例，0 FAIL/SKIP | 36.0 s；真实 PG，非缓存，含回滚后原单恢复 |
 | API `go vet ./...`、`go build ./...` | PASS | 0 | 不适用 | Go 1.26.9 |
 | API `govulncheck` v1.7.0 | PASS | 0 | 0 可达、0 已导入包漏洞 | 未调用模块仍提示 `GO-2026-5932`，不能称所有依赖无漏洞 |
 | paid-access 升级前真实数据库测试 | PASS | 0 | 23 / 0 / 0 | 23.26 s |
@@ -61,7 +64,7 @@
 | paid-access 升级后 `govulncheck` | PASS | 0 | 0 可达、0 已导入包漏洞 | 仍有 21 个未调用模块提示 |
 | 真实 PG 网站迁移及再次执行迁移 | PASS | 0 | 0014 应用、14 个 already-applied | 不删除旧订单或旧数据 |
 | `node --test deploy/chatwoot-handoff-preflight.test.mjs` | PASS | 0 | 11 / 0 / 0 | 355 ms |
-| Chatwoot 发布模拟（WSL Debian） | PASS | 0 | 41 / 0 / 0 | 35.01 s；新增发布门禁后 |
+| Chatwoot 发布模拟（WSL Debian） | PASS | 0 | 42 / 0 / 0 | 14.680 s；包含专用 POST action 门禁 |
 | Chatwoot backend patch/allowlist 测试 | PASS | 0 | 9 / 0 / 0 | 固定上游哈希与严格文件列表 |
 | 原 direct-conversation patch 测试 | PASS | 0 | 5 / 0 / 0 | 保留直接会话行为 |
 | Chatwoot SDK/widget/store 最终回归 | PASS | 0 | 185 / 0 / 0，18 文件 | 20.23 s；Node 24、pnpm 10.2.0、TZ=UTC |
@@ -69,10 +72,15 @@
 | Chatwoot 修改的 11 个 JS/Vue 文件 ESLint | PASS | 0 | 0 error/warning | `--max-warnings 0` |
 | Chatwoot Vite、SDK 生产资产构建 | PASS | 0 | 5,075 modules；231 Vite entries、SDK plain/gzip/Brotli 核验 | 1m32s / 6.16s；本地资产，不是 Docker release build |
 | 原始 archive 两阶段 patch check/apply + 哈希复算 | PASS | 0 | 21 + 23 源文件；9 runtime 文件；0 mismatch | 独立提取树与实际受测源码一致 |
-| 真实固定 Rails/PG 订单集成 | PASS | 0 | 16 场景、99 断言、0 FAIL/SKIP | 2.57 s；包含二维码与历史授权 |
+| 真实固定 Rails/PG 订单集成 | PASS | 0 | 20 场景、144 断言、0 FAIL/SKIP | 3.5 s；独立新库，包含专用 POST、无效输入无副作用、二维码与历史授权 |
+| 原始 b354a 完整应用隔离 Rails/PG 对照 | PASS | 0 | 3 场景、20 断言、0 FAIL/SKIP | 专用 POST 两次 404 且消息/会话/附件/jobs 不变；native 同 key 两次 200 产生 2 incoming / 1 会话 / 0 映射；显式消费真实创建事件产生唯一 QR |
 | `node --test deploy/qr-welcome/ssh-fingerprint.test.mjs` | PASS | 0 | 5 / 0 / 0 | 独立复跑 477 ms |
-| 本轮网站暂存 diff 的 Gitleaks stdin | REVIEWED | 1 | 5 个检测项，0 真实凭据 | 独立复核全部为测试固定 UUID requestKey / Idempotency-Key；保留原扫描，不改规则 |
+| 网站原始历史 Gitleaks 范围扫描（8.24.3 / 8.30.1） | FAIL → PASS | 1 → 0 | 5 个合成 UUID 误报 → 0 检测项 | 已独立复核并采用精确历史 fingerprint；保留原始红报 |
+| 网站 Gitleaks 8.24.3 全部可达历史 | PASS | 0 | 153 个提交，0 检测项 | 2.54 s；当前 main 净差异另扫也为 0，合成高熵正控检出 1 项 |
+| 最后修正提交的原始 staged diff 作为 stdin | REVIEWED | 1 | 5 项，均为被删除的旧合成 UUID 行 | stdin 把删除行也当普通文本；逐条核对与已审查历史 5 项一致，没有新增检测项。采用原生 Git 扫描和相对 main 的最终净差异作为最终机器门禁，不对 stdin 新增宽泛豁免 |
 | 本轮客服暂存 diff 的 Gitleaks stdin | PASS | 0 | 0 检测项 | 脱敏输出，773 ms |
+| 客服 Gitleaks 8.24.3 完整可达历史 | FAIL → PASS | 1 → 0 | 57 个提交，8 项 → 0 检测项 | 两个历史提交中的 4 个公开 widget 标识/摘要字段；独立核对公开 loader 与 SHA256 后仅精确忽略 8 fingerprint，882 ms |
+| 客服 `node --test deploy/qr-welcome/config.test.mjs` | PASS | 0 | 10 / 0 / 0 | 历史扫描修正后执行，2.86 s；公开绑定与旧 seed 拒绝未变化 |
 | 网站 `git diff --cached --check` | PASS | 0 | 0 whitespace 问题 | 仅任务文件暂存 |
 | 客服暂存 whitespace 检查 | REVIEWED | 2 | 16 个格式提示 | 全部为 unified diff 必需的单空格上下文；除此补丁文件外检查 exit 0，精确 applier 及源码哈希另行通过 |
 
@@ -93,7 +101,7 @@
 - 单元/HTTP mock 只覆盖外部边界；事务、约束、路由、消息持久化与附件均另有真实数据库/框架证据。
 - 独立审查未发现剩余 Critical/High 阻断项。已显示的跨历史会话回执不保证实时接收删除事件；刷新或再次认证读取会拒绝已删除/私有消息，不能宣传为跨历史会话实时撤回保证。
 
-最终本地客服资产 SHA256：SDK `4caef9736aaeafd868693b9b05de626c77c24f42f67c916f0f0ce33f988c248`；Vite manifest `48a051a4b80b0c782bb3ffad1ce9b5deaec21c4346a8a61100bb5a9344831ab3`；handoff patch `c0145e007e826f0ac1e429a61bcadbe8da702f0a45be8d3f0c2cc64d5ffa18cb`。
+最终本地客服资产 SHA256：SDK `4caef9736aaeafd868693b9b05de626c77c24f42f67c916f0f0ce33f988c248`；Vite manifest `48a051a4b80b0c782bb3ffad1ce9b5deaec21c4346a8a61100bb5a9344831ab3`；handoff patch `56ba4e75de28ea274be1d139898c38593bc9b5bc23bc5da58a30900e39089f73`；runtime manifest `06a209aa0e6218d6aed847981eaa61c26248eb41186394334572b3c42d3f91d9`。专用路由修复只改变 3 个后端 postimage，14 个前端文件哈希未变。最终浏览器 API 二进制 SHA256：`92254d171eaa7dae4e79d746b66b6824e9ce049642852882553bb57c8c27e863`。
 
 ## 真实本地浏览器记录
 
@@ -113,24 +121,29 @@
 | 最终数据对账 | 6 次明确购买动作 → 6 张订单、6 条交付映射、6 条 incoming 订单消息、1 条二维码附件；均在会话 1 | PASS |
 | 原定价、推荐与付款状态 | 6 单均 1234 分、同 QA 推荐人；均 pending / 未完成；商品 stock 1000、sold_count 0 | PASS，仅本次未付款路径 |
 | 最终控制台 | QA 静态资源修正及刷新后，记录范围内无新的 warn/error；注入故障在代理侧有真实状态记录 | PASS，不隐藏初始环境错误 |
+| 专用 POST 最终版本追加一单 | `FPD852A4DE` → message 8 / conversation 1 / attempts 1；点击生成后自动展开，iframe 原文可见，网站显示确认成功；真实代理记录专用 POST 上游 200，没有 native POST | PASS，最终 Go 二进制 + 最终 9 个 Rails 文件 |
+| 最终版本总量对账 | 累计 7 次明确购买 → 7 pending 订单、7 映射、7 incoming、1 会话、1 QR 附件（原 message 2）；新单 1234 分，控制台 warn/error 列表为空 | PASS |
 
 本地运行器曾对 SDK、音频与机器人头像返回静态 404；QA 代理现只针对固定目录/精确请求路径返回真实 runtime 文件，并核对哈希。此兼容处理不修改生产源码，不将 HTML 错误页冒充资源。浏览器 iframe 内按钮定位曾遇工具焦点/坐标错误，改用父页面真实客服开关完成关闭；不据此声称 iframe 内键盘完整验收。
 
-截图：`C:/Temp/fp-order-browser-first-order.jpg`（原订单与真实二维码同屏，刷新重开后）；`C:/Temp/fp-order-browser-390px.jpg`（390px 实际消息与输入框）。这些是本地 QA，不是生产截图。
+截图：`C:/Temp/fp-order-browser-first-order.jpg`（原订单与真实二维码同屏，刷新重开后）；`C:/Temp/fp-order-browser-390px.jpg`（390px 实际消息与输入框）；`C:/Temp/fp-order-browser-final-dedicated-route.jpg`（最终专用 POST 版本的原订单和客服原文）。这些是本地 QA，不是生产截图。最后一轮未改视口，完成后 QA tab 6 已关闭，用户生产标签页未操作。
 
-## 验收后清理
+## 第一轮验收后清理
 
 - 本地 QA 标签页已关闭，视口已恢复，用户原有生产标签页未操作。
 - 代理、Go API、Rails、Redis 与 PostgreSQL 均经 PID、命令和目录核验后精确停止；Windows/WSL 两侧确认本任务的 7 个端口均不再监听，没有停止整个 WSL 或无关服务。
 - 未删除测试记录、源码、附件或 runtime。PostgreSQL 数据目录保留；Redis 以 `SHUTDOWN SAVE` 保存，快照校验通过，仅含 QA DB14/15 共 22 个 key。
 - 保留位置及停止证据记录在本机 `C:/Temp/fp-order-qa-stack.md`；任务证书私钥和 QA 配置不进入提交或发布产物。
 
+上述为第一轮 6 单验收的清理记录。专用 POST 回归另行恢复了同一隔离 PG/Redis、启动最终 API，并用新库验证旧版和新版 Rails。最后一轮第 7 单验收后再次核对身份并停止 Proxy 2110、Rails 2100、Go 1293、Redis 228、PostgreSQL 210；独立只读复验 exit 0，五个 PID 和七个 QA 监听端口均已退出，未停止整个 WSL 或无关服务。Redis `SHUTDOWN SAVE` 保存 DB10/11/14/15 共 31 个 key，RDB checksum OK；PG 完成关闭 checkpoint。所有测试数据、源码、附件、脚本与证书保留，没有删除。证据追加到 `C:/Temp/fp-order-qa-dedicated-route-evidence.md` 和 stack 记录。
+
 ## 发布状态和未验证边界
 
-- 未推送、未创建本轮 PR、未合并、未部署。生产发布和生产真实订单/消息验收需另有明确授权。
+- 用户已明确授权“部署和发布”。客服候选 `0d19d9a8f24c4e3dcd8555768cf96f468fbdf551` 已推送并创建 PR #16，远端 CI 开始执行；此发布前快照尚未合并或部署。将按既有审查、CI、main 完整 SHA 流程依次发布客服和网站。生产浏览器下单/发消息仍遵守行动时的确认要求。
+- 发布治理经原始确认方案和独立审查复核：网站 main 受平台保护；客服私有仓库遵循自身既有 reviewed PR、全部相关 CI、main 完整 SHA 手工发布流程，没有平台保护。原始方案的“受控”曾被后续实现文档误写成两仓库均“受保护”，已更正；没有放宽用户确认要求或改变 GitHub 权限/可见性。
 - 本地已实际验证订单原文在 widget 可见，没有把 API 201、消息回执、构建或单元测试直接称为用户可见成功。
 - 浏览器中 SDK 延迟超过 5 秒、完全断网、owner Cookie 手动清除、跨会话实时删除、完整键盘/iframe 内关闭按钮及人工消息发送：NOT RUN。相关身份、延迟、取消、历史权限、分页和普通消息兼容另有目标单元/框架集成证据；浏览器工具的 iframe 控件定位限制不能假称通过。
 - 生产真实 worker/重启、生产数据库迁移和回滚执行：NOT RUN。发布流程必须先客服、后网站；回滚保留幂等映射与历史数据。
 - 真人微信设备扫码、所有设备/浏览器、长时间负载、页面关闭后的后台交付：NOT RUN／不在本次已确认范围。
 
-发布仍需远端 CI 完整容器构建、受保护 main 的完整 SHA、迁移前核验及生产受控 QA；本地通过不跳过这些门禁。目标在生产发布授权与验收完成前保持未完成状态。
+发布仍需远端 CI 完整容器构建、各仓库适用的 main 发布治理、完整 SHA、迁移前核验及生产受控 QA；本地通过不跳过这些门禁。目标在生产发布与验收完成前保持未完成状态。
