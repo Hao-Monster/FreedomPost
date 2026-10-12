@@ -1085,15 +1085,26 @@ func (p *Postgres) RecordAffiliateClick(ctx context.Context, wechatID, visitorKe
 // ─── Orders ───────────────────────────────────────────────────────────────────
 
 func (p *Postgres) CreateAffiliateOrder(ctx context.Context, input domain.CreateOrderInput) (*domain.AffiliateOrder, error) {
-	orderCode, err := p.uniqueOrderCode(ctx)
-	if err != nil {
-		return nil, err
-	}
 	tx, err := p.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
 	if err != nil {
 		return nil, err
 	}
 	defer tx.Rollback(ctx)
+	order, err := p.createAffiliateOrderTx(ctx, tx, input)
+	if err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, err
+	}
+	return order, nil
+}
+
+func (p *Postgres) createAffiliateOrderTx(ctx context.Context, tx pgx.Tx, input domain.CreateOrderInput) (*domain.AffiliateOrder, error) {
+	orderCode, err := p.uniqueOrderCode(ctx, tx)
+	if err != nil {
+		return nil, err
+	}
 	var affiliateID string
 	if err := tx.QueryRow(ctx, `SELECT id FROM affiliates WHERE wechat_id = $1 AND status = 'active'`, input.AffiliateWechatID).Scan(&affiliateID); errors.Is(err, pgx.ErrNoRows) {
 		return nil, domain.ErrInvalidRecommender
@@ -1161,9 +1172,6 @@ func (p *Postgres) CreateAffiliateOrder(ctx context.Context, input domain.Create
 	}
 	order.CustomerPriceCents = order.PriceCents
 	order.Status = order.OrderStatus
-	if err := tx.Commit(ctx); err != nil {
-		return nil, err
-	}
 	return &order, nil
 }
 
@@ -1489,11 +1497,11 @@ func (p *Postgres) uniqueToolSlug(ctx context.Context, title string) (string, er
 	return base + "-" + uuid.NewString()[:8], nil
 }
 
-func (p *Postgres) uniqueOrderCode(ctx context.Context) (string, error) {
+func (p *Postgres) uniqueOrderCode(ctx context.Context, q handoffQuerier) (string, error) {
 	for range 8 {
 		code := "FP" + strings.ToUpper(strings.ReplaceAll(uuid.NewString(), "-", "")[:8])
 		var id string
-		err := p.pool.QueryRow(ctx, `SELECT id FROM affiliate_orders WHERE order_code = $1`, code).Scan(&id)
+		err := q.QueryRow(ctx, `SELECT id FROM affiliate_orders WHERE order_code = $1`, code).Scan(&id)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return code, nil
 		}

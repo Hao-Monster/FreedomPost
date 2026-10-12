@@ -5,6 +5,8 @@ interface Window {
     hasLoaded: boolean;
     toggle: (state?: "open" | "close") => void;
     setUser?: (identifier: string, attributes?: Record<string, string>) => void;
+    ensureConversation?: (options?: { timeoutMs?: number; signal?: AbortSignal }) => Promise<{ generation: string; bindingId: string }>;
+    confirmMessage?: (options: { messageId: number; generation: string; bindingId: string; conversationId?: number; timeoutMs?: number; signal?: AbortSignal }) => Promise<void>;
   };
   chatwootSDK?: {
     run: (options: { websiteToken: string; baseUrl: string }) => void;

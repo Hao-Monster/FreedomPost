@@ -12,6 +12,8 @@ import { createPortalPageLifecycle, eventPathIncludes } from "../lib/portal-page
 import { formatCommissionEarnings } from "../lib/market-commission.js";
 import { renderOrderReferralField } from "../lib/market-order.js";
 import { waitForChatwootReady } from "../lib/chatwoot-ready.js";
+import { OrderHandoffController, type OrderHandoffWidget } from "../lib/order-handoff.js";
+import { mountOrderHandoffView, orderHandoffDescription, orderHandoffErrorMessage } from "../lib/order-handoff-view.js";
 
 type PostListItem = {
   slug: string;
@@ -102,7 +104,33 @@ let searchMeta = document.querySelector<HTMLElement>("#articleSearchMeta");
 let emptyState = document.querySelector<HTMLElement>("#emptyArticles");
 let routeLoading = false;
 let portalToastTimer = 0;
+let orderHandoffController: OrderHandoffController | undefined;
 const portalPageLifecycle = createPortalPageLifecycle([
+  (page) => {
+    const panel = page.querySelector<HTMLElement>("#marketOrderHandoffs");
+    if (!panel) return;
+    const controller = getOrderHandoffController();
+    const cleanupView = mountOrderHandoffView(panel, controller, (record) => {
+      const dialog = document.querySelector<HTMLDialogElement>("#orderDialog");
+      if (dialog?.open && dialog.dataset.handoffRequest === record.requestKey) {
+        dialog.close();
+        panel.scrollIntoView({ block: "nearest", behavior: "smooth" });
+      }
+    });
+    const pause = () => controller.pause();
+    // A close can arrive between SDK calls while a delivery HTTP request is in flight.
+    // Cancel the whole run so its retry loop cannot reopen a deliberately closed widget.
+    const closeHandoff = () => controller.pause("HANDOFF_CLOSED");
+    window.addEventListener("pagehide", pause);
+    window.addEventListener("chatwoot:closed", closeHandoff);
+    void controller.resumePending();
+    return () => {
+      controller.pause();
+      cleanupView();
+      window.removeEventListener("pagehide", pause);
+      window.removeEventListener("chatwoot:closed", closeHandoff);
+    };
+  },
   async (root) => {
     const benefitRoot = root.querySelector<HTMLElement>("[data-benefit-root]");
     if (!benefitRoot) return;
@@ -650,13 +678,25 @@ function bindProductDialogActions(product: StoreProduct, productDialog: HTMLDial
   });
 }
 
-function openProductOrder(product: StoreProduct, orderDialog: HTMLDialogElement, content: HTMLElement, productDialog?: HTMLDialogElement) {
+function openProductOrder(product: StoreProduct, orderDialog: HTMLDialogElement, content: HTMLElement, productDialog?: HTMLDialogElement, newOrder = false) {
+  const controller = getOrderHandoffController();
+  const pending = controller.list().find((record) => record.input.productSlug === product.slug && record.phase !== "delivered");
+  delete orderDialog.dataset.handoffRequest;
+  if (productDialog?.open) productDialog.close();
+  if (!orderDialog.open) orderDialog.showModal();
+  if (pending && !newOrder) {
+    content.innerHTML = `<p class="section-kicker">Order recovery</p><h2>该商品已有下单请求</h2><p class="product-dialog-summary">${escapeHtml(pending.order ? `订单号：${pending.order.orderCode}` : product.title)}</p><div class="order-support-panel"><p>${escapeHtml(orderHandoffDescription(pending))}</p><button class="button primary" type="button" data-resume-order>继续处理原订单</button><button class="button secondary" type="button" data-new-order>另外创建一笔订单</button><small>只有确实需要另一笔订单时，才选择另外创建。</small></div>`;
+    content.querySelector<HTMLButtonElement>("[data-resume-order]")?.addEventListener("click", () => {
+      orderDialog.dataset.handoffRequest = pending.requestKey;
+      void controller.run(pending.requestKey);
+    });
+    content.querySelector<HTMLButtonElement>("[data-new-order]")?.addEventListener("click", () => openProductOrder(product, orderDialog, content, undefined, true));
+    return;
+  }
   const ref = lockedReferral();
   const displayPrice = product.customerPriceCents ?? product.priceCents;
   const referralField = renderOrderReferralField(ref);
-  content.innerHTML = `<p class="section-kicker">Order</p><h2>提交下单信息</h2><p class="product-dialog-summary">${escapeHtml(product.title)} · ${formatCurrency(displayPrice, product.currency)}</p><form id="affiliateOrderForm" class="order-form">${referralField}<p>提交后会生成订单号，请添加客服微信或 QQ 完成人工交易。</p><button class="button primary" type="submit">生成订单号</button><p class="form-error" role="alert" hidden></p></form>`;
-  if (productDialog?.open) productDialog.close();
-  if (!orderDialog.open) orderDialog.showModal();
+  content.innerHTML = `<p class="section-kicker">Order</p><h2>提交下单信息</h2><p class="product-dialog-summary">${escapeHtml(product.title)} · ${formatCurrency(displayPrice, product.currency)}</p><form id="affiliateOrderForm" class="order-form">${referralField}<p>生成订单号后将自动打开客服并发送订单信息，无需复制或粘贴。请等待客服确认后完成人工交易。</p><button class="button primary" type="submit">生成订单号</button><p class="form-error" role="alert" hidden></p></form>`;
   content.querySelector<HTMLFormElement>("#affiliateOrderForm")?.addEventListener("submit", (event) => void submitAffiliateOrder(event, product, content));
 }
 
@@ -701,114 +741,74 @@ async function submitAffiliateOrder(event: SubmitEvent, product: StoreProduct, c
   const button = form.querySelector<HTMLButtonElement>("button[type=submit]");
   const error = form.querySelector<HTMLElement>(".form-error");
   const recommenderWechatId = String(new FormData(form).get("recommenderWechatId") ?? "").trim();
+  if (button?.disabled) return;
   if (button) button.disabled = true;
+  if (error) error.hidden = true;
   try {
-    // Chatwoot creates the signed conversation cookie asynchronously while its
-    // widget iframe loads. Wait briefly so the API can post into this exact
-    // visitor conversation instead of falling back to a copy-only flow.
-    await waitForChatwootConversation(5000);
-    const response = await fetch("/api/orders", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ productSlug: product.slug, recommenderWechatId, visitorId: getChatwootVisitorId() })
-    });
-    const result = await response.json() as { order?: AffiliateOrder; supportMessageStatus?: string; error?: { message?: string } };
-    if (!response.ok || !result.order) throw new Error(result.error?.message || "下单失败");
-    content.innerHTML = renderContactPanel(result.order, result.supportMessageStatus ?? "unavailable");
-    createPortalIcons();
-    bindOrderSupportAction(content, result.order, result.supportMessageStatus ?? "unavailable");
-  } catch (reason) {
-    if (error) {
-      error.textContent = reason instanceof Error ? reason.message : "下单失败，请稍后再试";
+    const controller = getOrderHandoffController();
+    let requestKey = form.dataset.orderRequest;
+    if (requestKey) {
+      const saved = controller.get(requestKey);
+      if (!saved || saved.input.productSlug !== product.slug || saved.input.recommenderWechatId !== recommenderWechatId) {
+        if (error) {
+          error.textContent = "原下单请求已保留，不能用重试修改商品或推荐人。请关闭弹窗并选择另外创建一笔订单。";
+          error.hidden = false;
+        }
+        return;
+      }
+    } else {
+      requestKey = controller.createRequest({ productSlug: product.slug, recommenderWechatId });
+      form.dataset.orderRequest = requestKey;
+    }
+    const dialog = content.closest("dialog");
+    if (dialog) dialog.dataset.handoffRequest = requestKey;
+    const result = await controller.run(requestKey);
+    if (!result.order && error) {
+      error.textContent = orderHandoffDescription(result);
       error.hidden = false;
     }
+  } catch (reason) {
+    if (error) {
+      error.textContent = orderHandoffErrorMessage(reason);
+      error.hidden = false;
+    }
+  } finally {
     if (button) button.disabled = false;
   }
 }
 
-function renderContactPanel(order: AffiliateOrder, status = "unavailable") {
-  const sent = status === "sent";
-  const pending = status === "pending";
-  const description = sent
-    ? "订单信息已发送到当前客服会话，点击按钮打开客服窗口查看。"
-    : pending
-      ? "客服会话正在加载，点击按钮打开客服并发送已复制的订单信息。"
-      : "客服会话暂时不可用，点击按钮打开客服并发送已复制的订单信息。";
-  return `<p class="section-kicker">Order created</p><h2>订单已登记</h2><div class="order-code"><span>订单号</span><strong>${escapeHtml(order.orderCode)}</strong><small>客服会根据订单号处理</small></div><div class="order-support-panel"><p>${description}</p><button class="button primary" type="button" data-order-support>打开客服并复制订单信息</button><small>如果客服回复不及时，请拨打微信电话联系。</small><span class="form-error" data-order-support-feedback hidden></span></div><p class="settlement-note">请先等待客服确认订单，再按照客服回复完成后续操作。</p>`;
-}
-
-function orderSupportMessage(order: AffiliateOrder) {
-  return `你好，我刚刚创建了订单。\n订单号：${order.orderCode}\n商品：${order.productTitle}\n请协助处理，谢谢。`;
-}
-
-function getChatwootVisitorId(): string {
-  const key = "fp_chatwoot_visitor_id";
-  let id = localStorage.getItem(key);
-  if (!id) { id = crypto.randomUUID(); localStorage.setItem(key, id); }
-  return id;
-}
-
-function bindOrderSupportAction(content: HTMLElement, order: AffiliateOrder, status: string) {
-  const button = content.querySelector<HTMLButtonElement>("[data-order-support]");
-  const feedback = content.querySelector<HTMLElement>("[data-order-support-feedback]");
-  if (!button) return;
-  const openSupport = async () => {
-    button.disabled = true;
-    let copied = false;
-    try {
-      await copyTextToClipboard(orderSupportMessage(order));
-      copied = true;
-    } catch {
-      // Clipboard permissions must not prevent opening the support window.
-    }
-    try {
-      const dialog = content.closest("dialog");
-      if (dialog?.open) {
-        dialog.close();
-        await new Promise<void>((resolve) => window.requestAnimationFrame(() => resolve()));
-      }
-      await openChatwootWidget();
-      if (feedback) {
-        feedback.textContent = status === "sent"
-          ? "订单信息已自动发送，客服窗口已打开。"
-          : copied
-            ? "订单信息已复制，请在客服窗口粘贴发送。"
-            : "客服窗口已打开，请手动输入订单号发送。";
-        feedback.hidden = false;
-      }
-    } catch {
-      if (feedback) {
-        feedback.textContent = "客服组件还未加载，请稍后点击按钮重试。";
-        feedback.hidden = false;
-      }
-    } finally {
-      button.disabled = false;
-    }
-  };
-  button.addEventListener("click", () => void openSupport());
-  void openSupport();
-}
-
-async function waitForChatwootConversation(timeoutMs: number): Promise<boolean> {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    if (document.cookie.split(";").some((item) => item.trim().startsWith("cw_conversation="))) return true;
-    await new Promise((resolve) => window.setTimeout(resolve, 100));
-  }
-  return false;
-}
-
-async function openChatwootWidget(): Promise<void> {
+async function readyOrderHandoffWidget(options: { timeoutMs: number; signal: AbortSignal }): Promise<OrderHandoffWidget> {
   const widget = await waitForChatwootReady(
     () => window.$chatwoot,
     (listener) => {
       const handler = () => listener();
       window.addEventListener("chatwoot:ready", handler);
       return () => window.removeEventListener("chatwoot:ready", handler);
-    }
+    },
+    options
   );
-  widget.setUser?.(getChatwootVisitorId(), { name: "FreedomPost访客" });
-  widget.toggle("open");
+  const ensureConversation = widget.ensureConversation;
+  const confirmMessage = widget.confirmMessage;
+  if (!ensureConversation || !confirmMessage) throw new Error("SDK_UPGRADE_REQUIRED");
+  return {
+    ensureConversation: (request) => ensureConversation.call(widget, request),
+    confirmMessage: (request) => confirmMessage.call(widget, request)
+  };
+}
+
+function getOrderHandoffController(): OrderHandoffController {
+  orderHandoffController ??= new OrderHandoffController({
+    storage: {
+      get length() { return localStorage.length; },
+      getItem: (key) => localStorage.getItem(key),
+      setItem: (key, value) => localStorage.setItem(key, value),
+      removeItem: (key) => localStorage.removeItem(key),
+      key: (index) => localStorage.key(index)
+    },
+    fetch: (...args) => fetch(...args),
+    waitForWidget: readyOrderHandoffWidget
+  });
+  return orderHandoffController;
 }
 
 async function hydrateAffiliateDashboard() {

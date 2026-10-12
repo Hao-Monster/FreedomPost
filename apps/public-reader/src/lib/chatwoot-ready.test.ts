@@ -104,4 +104,20 @@ describe("waitForChatwootReady", () => {
       vi.useRealTimers();
     }
   });
+
+  it("cancels the readiness listener and timers when the page leaves", async () => {
+    vi.useFakeTimers();
+    try {
+      const abort = new AbortController();
+      const unsubscribe = vi.fn();
+      const promise = waitForChatwootReady(() => ({ hasLoaded: false }), () => unsubscribe, { signal: abort.signal });
+      const rejection = expect(promise).rejects.toThrow("HANDOFF_CANCELLED");
+      abort.abort();
+      await rejection;
+      expect(unsubscribe).toHaveBeenCalledOnce();
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });

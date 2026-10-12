@@ -1860,6 +1860,18 @@ svg {
 .order-support-panel p, .order-support-panel small { margin: 0; }
 .order-support-panel small { color: var(--portal-muted); }
 
+.market-order-handoffs { display: grid; gap: 12px; margin: 0 0 24px; }
+.market-order-handoffs[hidden] { display: none; }
+.market-order-handoffs > h2 { margin: 0; font-size: 18px; }
+.market-order-handoff { display: grid; gap: 10px; padding: 18px; border: 1px solid var(--portal-line); border-radius: 12px; background: color-mix(in srgb, var(--portal-accent) 6%, transparent); overflow-wrap: anywhere; }
+.market-order-handoff h3, .market-order-handoff p { margin: 0; }
+.market-order-handoff h3 { font-size: 16px; }
+.market-order-code { font-weight: 700; }
+.market-order-status { color: var(--portal-muted); line-height: 1.6; }
+.market-order-handoff .button { justify-self: start; max-width: 100%; white-space: normal; }
+.market-order-handoff[data-phase="action_required"] { border-color: #b58142; }
+.market-order-handoff[data-phase="delivered"] { border-color: color-mix(in srgb, var(--portal-accent) 55%, var(--portal-line)); }
+
 .contact-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));

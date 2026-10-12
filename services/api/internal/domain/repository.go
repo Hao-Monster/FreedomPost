@@ -16,6 +16,7 @@ var (
 // (PostgreSQL) implementations must satisfy this interface.
 // The interface is designed to be testable with in-memory implementations.
 type Repository interface {
+	OrderHandoffRepository
 	// ─── Posts ──────────────────────────────────────────────────────────────
 	ListPosts(ctx context.Context) ([]Post, error)
 	ListPostSummaries(ctx context.Context) ([]PostSummary, error)
