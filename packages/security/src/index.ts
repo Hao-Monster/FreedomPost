@@ -96,7 +96,10 @@ const articleAllowedClasses = [
   "fp-size-xl",
   "line-no",
   "task-list-item",
-  "task-list-item-checkbox"
+  "task-list-item-checkbox",
+  "youtube-embed",
+  "youtube-player",
+  "youtube-watch-link"
 ];
 
 const articleAllowedClassPatterns = [/^language-[a-z0-9_-]+$/i];

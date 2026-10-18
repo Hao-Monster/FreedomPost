@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/fenghaoyun-monster/freedompost/services/api/internal/channelbridge"
+	"github.com/fenghaoyun-monster/freedompost/services/api/internal/domain"
 	"github.com/fenghaoyun-monster/freedompost/services/api/internal/wecom"
 )
 
@@ -212,3 +213,49 @@ func encryptHTTPBridgePayload(t *testing.T, keyText string, message []byte, rece
 	cipher.NewCBCEncrypter(block, key[:aes.BlockSize]).CryptBlocks(ciphertext, padded)
 	return base64.StdEncoding.EncodeToString(ciphertext)
 }
+
+func TestToolInputUnmarshalAndNormalize(t *testing.T) {
+	rawDraft := `{"title":"未命名工具","summary":"","description":"","category":"other","url":"","coverUrl":null,"status":"draft","sortOrder":0}`
+	req := httptest.NewRequest(http.MethodPost, "/api/admin/tools", strings.NewReader(rawDraft))
+	rec := httptest.NewRecorder()
+
+	var toolIn domain.ToolInput
+	if !decodeJSON(rec, req, &toolIn) {
+		t.Fatalf("expected admin draft tool payload to decode cleanly, got status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	norm, errMsg := normalizeToolInput(toolIn)
+	if errMsg != "" {
+		t.Fatalf("unexpected validation error for draft tool: %s", errMsg)
+	}
+	if norm.URL != "" || norm.LinkURL != "" || norm.CoverURL != "" || norm.IconURL != "" {
+		t.Fatalf("unexpected normalized URLs for empty draft: %+v", norm)
+	}
+
+	rawPub := `{"title":"AI 助手","summary":"写作大纲工具","description":"详细说明","category":"ai","url":"https://example.com/tool","coverUrl":"/api/uploads/logo.png","status":"published","sortOrder":5}`
+	reqPub := httptest.NewRequest(http.MethodPut, "/api/admin/tools/1", strings.NewReader(rawPub))
+	recPub := httptest.NewRecorder()
+	var pubIn domain.ToolInput
+	if !decodeJSON(recPub, reqPub, &pubIn) {
+		t.Fatalf("expected published tool payload to decode cleanly, got status=%d body=%s", recPub.Code, recPub.Body.String())
+	}
+	normPub, errMsg := normalizeToolInput(pubIn)
+	if errMsg != "" {
+		t.Fatalf("unexpected validation error for published tool: %s", errMsg)
+	}
+	if normPub.LinkURL != "https://example.com/tool" || normPub.IconURL != "/api/uploads/logo.png" {
+		t.Fatalf("expected url/coverUrl to map to LinkURL/IconURL, got %+v", normPub)
+	}
+}
+
+func TestRealIPUsesRightmostTrustedXForwardedFor(t *testing.T) {
+	req := httptest.NewRequest(http.MethodPost, "/api/admin/login", nil)
+	req.RemoteAddr = "10.0.0.2:12345"
+	req.Header.Set("X-Forwarded-For", "1.2.3.4, 198.51.100.77")
+	if got := realIP(req, true); got != "198.51.100.77" {
+		t.Fatalf("realIP(trustProxy=true) = %q, want rightmost 198.51.100.77", got)
+	}
+	if got := realIP(req, false); got != "10.0.0.2" {
+		t.Fatalf("realIP(trustProxy=false) = %q, want 10.0.0.2", got)
+	}
+}
+

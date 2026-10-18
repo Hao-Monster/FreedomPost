@@ -878,10 +878,12 @@ function hasDraggedFiles(data: DataTransfer | null): boolean {
 
 async function submitComment(event: SubmitEvent) {
   event.preventDefault();
+  const targetSlug = activeSlug;
+  const targetReplyParentId = replyParentId;
   const content = commentText.value.trim();
   const files = [...pendingCommentFiles];
 
-  if (!content && files.length === 0) {
+  if (!targetSlug || (!content && files.length === 0)) {
     updateCommentSubmitState();
     return;
   }
@@ -892,21 +894,24 @@ async function submitComment(event: SubmitEvent) {
     return;
   }
 
-  if (!checkCommentRate(activeSlug)) return;
+  if (!canSubmitComment(targetSlug)) return;
 
   commentSubmitting = true;
   updateCommentSubmitState();
 
   try {
-    const attachments = await Promise.all(files.map(uploadCommentAttachment));
-    const comment = await createRemoteComment(content, attachments);
-    commentCache.set(activeSlug, [...getComments(activeSlug), comment]);
+    const attachments = await Promise.all(files.map((file) => uploadCommentAttachment(file, targetSlug)));
+    const comment = await createRemoteComment(content, attachments, targetSlug, targetReplyParentId);
+    recordCommentSubmission(targetSlug);
+    commentCache.set(targetSlug, [...getComments(targetSlug), comment]);
 
-    replyParentId = null;
-    commentText.value = "";
-    commentText.placeholder = commentDefaultPlaceholder;
-    clearPendingCommentFiles();
-    renderComments();
+    if (activeSlug === targetSlug) {
+      replyParentId = null;
+      commentText.value = "";
+      commentText.placeholder = commentDefaultPlaceholder;
+      clearPendingCommentFiles();
+      renderComments();
+    }
     renderList();
     updateCommentCounts();
     showToast("评论已发布");
@@ -918,11 +923,11 @@ async function submitComment(event: SubmitEvent) {
   }
 }
 
-async function uploadCommentAttachment(file: File): Promise<StoredCommentAttachment> {
+async function uploadCommentAttachment(file: File, slug = activeSlug): Promise<StoredCommentAttachment> {
   const formData = new FormData();
   formData.set("file", file);
 
-  const response = await fetch(`/api/posts/${encodeURIComponent(activeSlug)}/comment-attachments`, {
+  const response = await fetch(`/api/posts/${encodeURIComponent(slug)}/comment-attachments`, {
     method: "POST",
     body: formData
   });
@@ -937,15 +942,17 @@ async function uploadCommentAttachment(file: File): Promise<StoredCommentAttachm
 
 async function createRemoteComment(
   content: string,
-  attachments: StoredCommentAttachment[]
+  attachments: StoredCommentAttachment[],
+  slug = activeSlug,
+  parentId = replyParentId
 ): Promise<StoredComment> {
-  const response = await fetch(`/api/posts/${encodeURIComponent(activeSlug)}/comments`, {
+  const response = await fetch(`/api/posts/${encodeURIComponent(slug)}/comments`, {
     method: "POST",
     headers: {
       "Content-Type": "application/json"
     },
     body: JSON.stringify({
-      parentId: replyParentId,
+      parentId,
       content,
       attachments,
       localId: getDeviceId()
@@ -1063,16 +1070,30 @@ function attachmentSizeBytes(file: StoredCommentAttachment): number {
   return file.sizeBytes ?? file.size ?? 0;
 }
 
-function checkCommentRate(slug: string): boolean {
+function readCommentRateStore(): Record<string, number[]> {
+  const raw = localStorage.getItem(storageKeys.rate);
+  if (!raw) return {};
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed)
+      ? (parsed as Record<string, number[]>)
+      : {};
+  } catch {
+    return {};
+  }
+}
+
+function canSubmitComment(slug: string): boolean {
   const user = getDeviceId();
   const now = Date.now();
   const today = new Date().toISOString().slice(0, 10);
-  const raw = localStorage.getItem(storageKeys.rate);
-  const rate = raw ? (JSON.parse(raw) as Record<string, number[]>) : {};
+  const rate = readCommentRateStore();
   const dayKey = `${slug}:${user}:${today}`;
   const fiveMinKey = `${user}:5min`;
-  const dayEntries = rate[dayKey] ?? [];
-  const fiveMinEntries = (rate[fiveMinKey] ?? []).filter((time) => now - time < 5 * 60 * 1000);
+  const dayEntries = Array.isArray(rate[dayKey]) ? rate[dayKey] : [];
+  const fiveMinEntries = (Array.isArray(rate[fiveMinKey]) ? rate[fiveMinKey] : []).filter(
+    (time) => now - time < 5 * 60 * 1000
+  );
 
   if (dayEntries.length >= 5) {
     showToast("该文章今日评论次数已达上限");
@@ -1083,10 +1104,23 @@ function checkCommentRate(slug: string): boolean {
     return false;
   }
 
+  return true;
+}
+
+function recordCommentSubmission(slug: string): void {
+  const user = getDeviceId();
+  const now = Date.now();
+  const today = new Date().toISOString().slice(0, 10);
+  const rate = readCommentRateStore();
+  const dayKey = `${slug}:${user}:${today}`;
+  const fiveMinKey = `${user}:5min`;
+  const dayEntries = Array.isArray(rate[dayKey]) ? rate[dayKey] : [];
+  const fiveMinEntries = (Array.isArray(rate[fiveMinKey]) ? rate[fiveMinKey] : []).filter(
+    (time) => now - time < 5 * 60 * 1000
+  );
   rate[dayKey] = [...dayEntries, now];
   rate[fiveMinKey] = [...fiveMinEntries, now];
   localStorage.setItem(storageKeys.rate, JSON.stringify(rate));
-  return true;
 }
 
 function updateCommentCounts() {
@@ -1128,7 +1162,14 @@ function countViewOnce(slug: string) {
 function getRandomUsername(): string {
   const saved = localStorage.getItem(storageKeys.user);
   if (saved) {
-    return (JSON.parse(saved) as { name: string }).name;
+    try {
+      const parsed = JSON.parse(saved) as { name?: unknown };
+      if (typeof parsed?.name === "string" && parsed.name.trim()) {
+        return parsed.name;
+      }
+    } catch {
+      // Fall through and regenerate if corrupted.
+    }
   }
 
   const adjectives = ["安静的", "自由的", "清醒的", "温和的", "明亮的", "专注的", "透明的", "从容的"];

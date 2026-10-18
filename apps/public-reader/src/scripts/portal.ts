@@ -102,7 +102,7 @@ let postGrid = document.querySelector<HTMLElement>("#portalPostGrid");
 let searchInput = document.querySelector<HTMLInputElement>("#portalSearchInput");
 let searchMeta = document.querySelector<HTMLElement>("#articleSearchMeta");
 let emptyState = document.querySelector<HTMLElement>("#emptyArticles");
-let routeLoading = false;
+let activeRouteSeq = 0;
 let portalToastTimer = 0;
 let orderHandoffController: OrderHandoffController | undefined;
 const portalPageLifecycle = createPortalPageLifecycle([
@@ -289,17 +289,19 @@ function bindRouteNavigation() {
 }
 
 async function loadRoute(destination: URL, push: boolean) {
-  if (routeLoading || (push && destination.pathname === location.pathname && destination.search === location.search)) return;
+  if (push && destination.pathname === location.pathname && destination.search === location.search) return;
   const content = document.querySelector<HTMLElement>("#portalContent");
   if (!content) return;
 
-  routeLoading = true;
+  const seq = ++activeRouteSeq;
   document.body.classList.add("route-loading");
   content.setAttribute("aria-busy", "true");
   try {
     const response = await fetch(destination.href, { headers: { "X-FreedomPost-Route": "1" } });
+    if (seq !== activeRouteSeq) return;
     if (!response.ok) throw new Error(`Route request failed: ${response.status}`);
     const documentText = await response.text();
+    if (seq !== activeRouteSeq) return;
     const nextDocument = new DOMParser().parseFromString(documentText, "text/html");
     const nextContent = nextDocument.querySelector<HTMLElement>("#portalContent");
     const footer = document.querySelector<HTMLElement>("#portalFooter");
@@ -322,11 +324,14 @@ async function loadRoute(destination: URL, push: boolean) {
     createPortalIcons();
     focusRouteContent(content, resolvedDestination.hash);
   } catch {
-    location.assign(destination.href);
+    if (seq === activeRouteSeq) {
+      location.assign(destination.href);
+    }
   } finally {
-    routeLoading = false;
-    document.body.classList.remove("route-loading");
-    content.removeAttribute("aria-busy");
+    if (seq === activeRouteSeq) {
+      document.body.classList.remove("route-loading");
+      content.removeAttribute("aria-busy");
+    }
   }
 }
 
@@ -844,6 +849,10 @@ async function hydrateAffiliateDashboard() {
     const ids = [...(list?.querySelectorAll<HTMLInputElement>("[data-pricing-product]:checked") ?? [])]
       .map((input) => input.dataset.pricingProduct)
       .filter((id): id is string => Boolean(id));
+    if (ids.length === 0) {
+      showPortalToast("请先勾选要应用加价的商品");
+      return;
+    }
     void applyAffiliateMarkup(ids);
   });
   document.querySelector<HTMLButtonElement>("#affiliateLogout")?.addEventListener("click", async () => {
@@ -974,12 +983,16 @@ async function copyAffiliateShareLink() {
 }
 
 function productShareUrl(shareUrl: string) {
-  const url = new URL(shareUrl, location.origin);
-  const product = new URLSearchParams(location.search).get("product");
-  if (product) {
-    url.searchParams.set("product", product);
+  try {
+    const url = new URL(shareUrl, location.origin);
+    const product = new URLSearchParams(location.search).get("product");
+    if (product) {
+      url.searchParams.set("product", product);
+    }
+    return url.toString();
+  } catch {
+    return shareUrl;
   }
-  return url.toString();
 }
 
 function renderPosts(rawQuery: string) {

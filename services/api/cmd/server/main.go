@@ -374,13 +374,14 @@ func run(logger *slog.Logger) error {
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer shutdownCancel()
 
-	// Flush view buffer before closing
-	viewBuf.Flush(shutdownCtx)
-
 	if err := httpSrv.Shutdown(shutdownCtx); err != nil {
 		logger.Error("graceful shutdown failed", "error", err)
+		viewBuf.Flush(shutdownCtx)
 		return err
 	}
+
+	// Flush view buffer after in-flight requests have finished draining
+	viewBuf.Flush(shutdownCtx)
 	logger.Info("server stopped cleanly")
 	return nil
 }

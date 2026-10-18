@@ -201,4 +201,10 @@ describe("BUG-P12: italic regex corrupts already-converted <a> href containing *
     const md = editorHtmlToMarkdown(editor);
     expect(md).toBe("**加粗![图](https://cdn.example.com/a.png)文字**");
   });
+
+  it("editorHtmlToMarkdown preserves paragraph inline formatting alongside inline img and relative src", () => {
+    const editor = makeEditor('<p>前半句 <strong>加粗</strong> <img src="/api/uploads/photo.png" alt="内联图"> 后半句</p>');
+    const md = editorHtmlToMarkdown(editor);
+    expect(md).toBe("前半句 **加粗** ![内联图](/api/uploads/photo.png) 后半句");
+  });
 });

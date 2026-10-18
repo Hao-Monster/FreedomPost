@@ -19,7 +19,7 @@ if [ -f "$DEPLOY_PATH/.env" ]; then
     $SUDO chmod 600 "$ROLLBACK_DIR/config.tar.gz"
     printf 'services:\n' > "$ROLLBACK_DIR/images.yml"
     for service in nginx api-go paid-access; do
-      container=$($SUDO docker compose --env-file "$DEPLOY_PATH/.env" -f "$DEPLOY_PATH/deploy/docker-compose.yml" ps -aq "$service" || true)
+      container=$($SUDO docker compose --env-file "$DEPLOY_PATH/.env" -f "$DEPLOY_PATH/deploy/docker-compose.yml" ps -aq "$service" | head -n 1 || true)
       if [ -n "$container" ]; then
         previous_image=$($SUDO docker inspect --format '{{.Image}}' "$container")
         rollback_tag="freedompost-rollback-${service}:$(basename "$ROLLBACK_DIR")"
@@ -186,8 +186,10 @@ set_env "PUBLIC_SITE_URL" "https://$PREVIEW_DOMAIN"
 set_env "VITE_PUBLIC_SITE_URL" "https://$PREVIEW_DOMAIN"
 set_env "COOKIE_SECURE" "true"
 set_env "TRUST_PROXY" "true"
-set_env_if_present "REDIS_PASSWORD" "$REDIS_PASSWORD"
-set_env "REDIS_URL" "redis://:${REDIS_PASSWORD}@redis:6379"
+if [ -n "${REDIS_PASSWORD:-}" ]; then
+  set_env "REDIS_PASSWORD" "$REDIS_PASSWORD"
+  set_env "REDIS_URL" "redis://:${REDIS_PASSWORD}@redis:6379"
+fi
 set_env "CHATWOOT_BASE_URL" "$CHATWOOT_BASE_URL"
 set_env "CHATWOOT_WEBSITE_TOKEN" "$CHATWOOT_WEBSITE_TOKEN"
 set_env "CHATWOOT_API_TOKEN" "$CHATWOOT_API_TOKEN"
@@ -314,7 +316,8 @@ elif command -v service >/dev/null 2>&1; then
 fi
 
 $SUDO mkdir -p /etc/docker
-cat <<'JSON' | $SUDO tee /etc/docker/daemon.json >/dev/null
+DAEMON_JSON_TMP="$(mktemp)"
+cat <<'JSON' > "$DAEMON_JSON_TMP"
 {
   "registry-mirrors": [
     "https://docker.m.daocloud.io",
@@ -323,12 +326,15 @@ cat <<'JSON' | $SUDO tee /etc/docker/daemon.json >/dev/null
   ]
 }
 JSON
-
-if command -v systemctl >/dev/null 2>&1; then
-  $SUDO systemctl restart docker
-elif command -v service >/dev/null 2>&1; then
-  $SUDO service docker restart
+if ! $SUDO cmp -s "$DAEMON_JSON_TMP" /etc/docker/daemon.json 2>/dev/null; then
+  $SUDO cp "$DAEMON_JSON_TMP" /etc/docker/daemon.json
+  if command -v systemctl >/dev/null 2>&1; then
+    $SUDO systemctl restart docker
+  elif command -v service >/dev/null 2>&1; then
+    $SUDO service docker restart
+  fi
 fi
+rm -f "$DAEMON_JSON_TMP"
 
 docker_cmd() {
   if [ -n "$SUDO" ]; then
@@ -393,6 +399,10 @@ for attempt in $(seq 1 30); do
   if compose --env-file .env -f deploy/docker-compose.yml exec -T postgres pg_isready -U freedompost >/dev/null 2>&1; then
     echo "=== PostgreSQL is ready ==="
     break
+  fi
+  if [ "$attempt" -eq 30 ]; then
+    echo "=== ERROR: PostgreSQL failed to become ready within 30s ===" >&2
+    exit 1
   fi
   echo "Waiting for PostgreSQL ($attempt/30)..."
   sleep 1

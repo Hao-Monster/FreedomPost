@@ -163,5 +163,6 @@ func isIgnoredWeComMessageError(err error) bool {
 	message := err.Error()
 	return strings.Contains(message, "sender is not the configured operator") ||
 		strings.Contains(message, "must include FP-CW:") ||
-		strings.Contains(message, "conversation reference is invalid")
+		strings.Contains(message, "conversation reference is invalid") ||
+		strings.Contains(message, "has no active conversation")
 }

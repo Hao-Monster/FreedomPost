@@ -1,5 +1,3 @@
-BEGIN;
-
 CREATE TABLE IF NOT EXISTS post_slug_aliases (
   slug VARCHAR(32) PRIMARY KEY,
   post_id UUID NOT NULL REFERENCES posts(id) ON DELETE CASCADE,
@@ -20,7 +18,7 @@ SET slug = 'tmp-' || substring(replace(id::text, '-', '') FROM 1 FOR 28);
 CREATE TEMP TABLE migration_0008_post_slugs (
   id UUID PRIMARY KEY,
   slug VARCHAR(10) NOT NULL UNIQUE
-) ON COMMIT DROP;
+);
 
 INSERT INTO migration_0008_post_slugs (id, slug)
 SELECT
@@ -65,4 +63,4 @@ BEGIN
 END
 $$;
 
-COMMIT;
+DROP TABLE migration_0008_post_slugs;

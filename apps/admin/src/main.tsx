@@ -228,6 +228,8 @@ export function App() {
   const pendingMediaRef = useRef(new PendingTaskBarrier());
   const importedImageClaimsRef = useRef(new Map<string, ImportedImageClaim>());
   const failedImageImportsRef = useRef(new Map<string, PendingImageImport>());
+  const postsRef = useRef<AdminPost[]>(posts);
+  postsRef.current = posts;
   const activePostIdRef = useRef<string | null>(null);
   const activePost = useMemo(() => posts.find((post) => post.id === activeId) ?? posts[0], [posts, activeId]);
   activePostIdRef.current = activePost?.id ?? null;
@@ -439,6 +441,7 @@ export function App() {
         return false;
       };
       const doSave = (markdown: string) => {
+        const currentPost = postsRef.current.find((post) => post.id === targetPost.id) ?? targetPost;
         const importedImages = [...importedImageClaimsRef.current.values()]
           .filter((claim) => markdown.includes(claim.url))
           .map(({ id, claimToken }) => ({ id, claimToken }));
@@ -446,7 +449,7 @@ export function App() {
           method: "PUT",
           headers: { "content-type": "application/json" },
           credentials: "include",
-          body: JSON.stringify({ title: targetPost.title, markdown, visibility: targetPost.visibility, priceCents: targetPost.priceCents, currency: targetPost.currency, importedImages })
+          body: JSON.stringify({ title: currentPost.title, markdown, visibility: currentPost.visibility, priceCents: currentPost.priceCents, currency: currentPost.currency, importedImages })
         });
       };
 
@@ -493,9 +496,10 @@ export function App() {
 
   async function deletePost() {
     if (!activePost) return;
+    const targetPostId = activePost.id;
     if (!confirm(`确认删除《${activePost.title}》？关联评论会一起删除。`)) return;
 
-    const response = await fetch(`/api/admin/posts/${activePost.id}`, {
+    const response = await fetch(`/api/admin/posts/${targetPostId}`, {
       method: "DELETE",
       credentials: "include"
     });
@@ -505,14 +509,14 @@ export function App() {
       return;
     }
 
-    setPosts((items) => items.filter((item) => item.id !== activePost.id));
-    setActiveId(null);
+    setPosts((items) => items.filter((item) => item.id !== targetPostId));
+    setActiveId((current) => (current === targetPostId ? null : current));
     showToast("文章已删除");
   }
 
-  function patchActivePost(patch: Partial<AdminPost>) {
-    if (!activePost) return;
-    setPosts((items) => items.map((item) => (item.id === activePost.id ? { ...item, ...patch } : item)));
+  function patchActivePost(patch: Partial<AdminPost>, targetPostId = activePostIdRef.current) {
+    if (!targetPostId || activePostIdRef.current !== targetPostId) return;
+    setPosts((items) => items.map((item) => (item.id === targetPostId ? { ...item, ...patch } : item)));
   }
 
   async function handleAttachmentFiles(files: FileList | null) {
@@ -630,11 +634,21 @@ export function App() {
   }
 
   function insertPendingMediaAtCaret(createHtml: () => Promise<string>): Promise<void> {
-    return startPendingMediaInsertion(createHtml, {
-      insertPlaceholder: insertMediaPlaceholderAtCaret,
-      replacePlaceholder: replaceMediaPlaceholder,
-      removePlaceholder: (placeholder) => placeholder.remove()
-    });
+    const targetPostId = activePostIdRef.current;
+    return startPendingMediaInsertion(
+      async () => {
+        const html = await createHtml();
+        if (!targetPostId || activePostIdRef.current !== targetPostId) {
+          throw new Error("ARTICLE_SWITCHED");
+        }
+        return html;
+      },
+      {
+        insertPlaceholder: insertMediaPlaceholderAtCaret,
+        replacePlaceholder: (placeholder, html) => replaceMediaPlaceholder(placeholder, html, targetPostId),
+        removePlaceholder: (placeholder) => placeholder.remove()
+      }
+    );
   }
 
   function insertMediaPlaceholderAtCaret(): HTMLDivElement {
@@ -660,16 +674,17 @@ export function App() {
     return placeholder;
   }
 
-  function replaceMediaPlaceholder(placeholder: HTMLDivElement, html: string) {
+  function replaceMediaPlaceholder(placeholder: HTMLDivElement, html: string, targetPostId = activePostIdRef.current) {
     const editor = editorRef.current;
-    if (!editor || !editor.contains(placeholder)) {
+    if (!editor || !editor.contains(placeholder) || !targetPostId || activePostIdRef.current !== targetPostId) {
+      placeholder.remove();
       throw new Error("Media insertion point is no longer available");
     }
 
     const template = document.createElement("template");
     template.innerHTML = html;
     placeholder.replaceWith(template.content);
-    syncEditorMarkdown();
+    syncEditorMarkdown(targetPostId);
   }
 
   function insertHtmlAtCaret(html: string) {
@@ -820,17 +835,26 @@ export function App() {
     if (!(callout instanceof HTMLElement) || !content) return;
 
     let selectedNodes: ChildNode[] = [];
+    let collapsedInsertBefore: ChildNode | null = null;
     if (selection?.rangeCount && editor.contains(selection.anchorNode)) {
       const range = selection.getRangeAt(0);
-      const startAnchor = range.startContainer === editor ? (editor.childNodes[range.startOffset] ?? range.startContainer) : range.startContainer;
-      const endAnchor = range.endContainer === editor ? (editor.childNodes[Math.max(0, range.endOffset - 1)] ?? startAnchor) : range.endContainer;
-      const startNode = closestEditorChild(startAnchor, editor);
-      const endNode = closestEditorChild(endAnchor, editor) ?? startNode;
-      const children = [...editor.childNodes];
-      const startIndex = startNode ? children.indexOf(startNode) : -1;
-      const endIndex = endNode ? children.indexOf(endNode) : startIndex;
-      if (startIndex >= 0 && endIndex >= startIndex) {
-        selectedNodes = children.slice(startIndex, endIndex + 1);
+      if (range.collapsed && range.startContainer === editor) {
+        collapsedInsertBefore = editor.childNodes[range.startOffset] ?? null;
+      } else {
+        const startAnchor = range.startContainer === editor ? (editor.childNodes[range.startOffset] ?? range.startContainer) : range.startContainer;
+        const endAnchor = range.collapsed
+          ? startAnchor
+          : range.endContainer === editor
+            ? (editor.childNodes[Math.max(0, range.endOffset - 1)] ?? startAnchor)
+            : range.endContainer;
+        const startNode = closestEditorChild(startAnchor, editor);
+        const endNode = closestEditorChild(endAnchor, editor) ?? startNode;
+        const children = [...editor.childNodes];
+        const startIndex = startNode ? children.indexOf(startNode) : -1;
+        const endIndex = endNode ? children.indexOf(endNode) : startIndex;
+        if (startIndex >= 0 && endIndex >= startIndex) {
+          selectedNodes = children.slice(startIndex, endIndex + 1);
+        }
       }
     }
 
@@ -842,6 +866,8 @@ export function App() {
     if (selectedNodes.length) {
       selectedNodes[0]?.before(callout);
       content.replaceChildren(...selectedNodes);
+    } else if (collapsedInsertBefore) {
+      collapsedInsertBefore.before(callout);
     } else {
       editor.append(callout);
     }
@@ -987,9 +1013,10 @@ export function App() {
     return content && editor.contains(content) ? content : null;
   }
 
-  function syncEditorMarkdown() {
-    if (!activePost || !editorRef.current) return;
-    patchActivePost({ markdown: editorHtmlToMarkdown(editorRef.current) });
+  function syncEditorMarkdown(targetPostId?: string | null | unknown) {
+    const resolvedPostId = typeof targetPostId === "string" ? targetPostId : activePostIdRef.current;
+    if (!resolvedPostId || activePostIdRef.current !== resolvedPostId || !editorRef.current) return;
+    patchActivePost({ markdown: editorHtmlToMarkdown(editorRef.current) }, resolvedPostId);
   }
 
   async function retryFailedImageImport(card: HTMLElement, pending: PendingImageImport) {
@@ -1041,6 +1068,7 @@ export function App() {
         postID,
         toImport.map((item) => ({ clientId: item.clientId, url: item.src, name: item.alt }))
       );
+      if (activePostIdRef.current !== postID) return 0;
       for (const item of toImport) {
         const result = results.get(item.clientId);
         if (result && "url" in result) {
@@ -1060,6 +1088,7 @@ export function App() {
         }
       }
     } catch {
+      if (activePostIdRef.current !== postID) return 0;
       // If the API call itself fails, mark every figure as an error card
       for (const item of toImport) {
         const failure: ImageImportFailure = { code: "IMPORT_UNAVAILABLE", message: "图片转存服务暂时不可用", resolution: "请稍后重试，或上传本地图片" };
@@ -1070,7 +1099,7 @@ export function App() {
       }
     }
 
-    syncEditorMarkdown();
+    syncEditorMarkdown(postID);
     return toImport.length;
   }
 
@@ -1732,10 +1761,11 @@ export function ProductWorkspace({
 
   async function deleteProduct() {
     if (!activeProduct || !confirm(`确认删除商品《${activeProduct.title}》？`)) return;
-    const response = await fetch(`/api/admin/products/${activeProduct.id}`, { method: "DELETE", credentials: "include" });
+    const targetProductId = activeProduct.id;
+    const response = await fetch(`/api/admin/products/${targetProductId}`, { method: "DELETE", credentials: "include" });
     if (!response.ok) return showToast("删除失败");
-    setProducts((items) => items.filter((item) => item.id !== activeProduct.id));
-    setActiveId(null);
+    setProducts((items) => items.filter((item) => item.id !== targetProductId));
+    setActiveId((current) => (current === targetProductId ? null : current));
     showToast("商品已删除");
   }
 
@@ -1891,10 +1921,11 @@ function ToolWorkspace({
 
   async function deleteTool() {
     if (!activeTool || !confirm(`确认删除工具《${activeTool.title}》？`)) return;
-    const response = await fetch(`/api/admin/tools/${activeTool.id}`, { method: "DELETE", credentials: "include" });
+    const targetToolId = activeTool.id;
+    const response = await fetch(`/api/admin/tools/${targetToolId}`, { method: "DELETE", credentials: "include" });
     if (!response.ok) return showToast("删除失败");
-    setTools((items) => items.filter((item) => item.id !== activeTool.id));
-    setActiveId(null);
+    setTools((items) => items.filter((item) => item.id !== targetToolId));
+    setActiveId((current) => (current === targetToolId ? null : current));
     showToast("工具已删除");
   }
 
@@ -1954,8 +1985,16 @@ function defaultToolPayload(): Omit<AdminTool, "id" | "slug" | "createdAt" | "up
 }
 
 function toolPayload(tool: AdminTool) {
-  const { id: _id, slug: _slug, createdAt: _createdAt, updatedAt: _updatedAt, ...payload } = tool;
-  return payload;
+  return {
+    title: tool.title,
+    summary: tool.summary,
+    description: tool.description,
+    category: tool.category,
+    url: tool.url,
+    coverUrl: tool.coverUrl,
+    status: tool.status,
+    sortOrder: tool.sortOrder
+  };
 }
 
 function isHttpUrl(value: string): boolean {
@@ -2494,13 +2533,14 @@ function nodeToMarkdown(node: Node): string {
     return parts.join("\n\n");
   }
 
-  if (node.querySelector("figure.editor-image,figure.editor-youtube,img,.editor-attachment")) {
-    if (
-      !node.querySelector("figure.editor-image,figure.editor-youtube,.editor-attachment") &&
-      /^(STRONG|B|EM|I|DEL|S|STRIKE|U|CODE|SPAN|A)$/.test(node.tagName)
-    ) {
-      return inlineNodeToMarkdown(node).trim();
-    }
+  if (
+    !node.querySelector("figure.editor-image,figure.editor-youtube,.editor-attachment") &&
+    /^(STRONG|B|EM|I|DEL|S|STRIKE|U|CODE|SPAN|A)$/.test(node.tagName)
+  ) {
+    return inlineNodeToMarkdown(node).trim();
+  }
+
+  if (node.querySelector("figure.editor-image,figure.editor-youtube,.editor-attachment")) {
     const childMarkdown = [...node.childNodes].map(nodeToMarkdown).filter((value) => value.trim());
     if (childMarkdown.length) {
       return childMarkdown.join("\n\n");
@@ -2543,7 +2583,7 @@ function inlineNodeToMarkdown(node: Node): string {
 
   if (node.tagName === "IMG") {
     const img = node as HTMLImageElement;
-    return `![${escapeMarkdown(img.alt || "图片")}](${img.src})`;
+    return `![${escapeMarkdown(img.alt || "图片")}](${(img.getAttribute("src") ?? "").trim()})`;
   }
 
   if (node.matches("figure.editor-image,figure.editor-youtube,.editor-attachment,[data-fp-type=\"image-import-error\"]")) {
@@ -2619,6 +2659,10 @@ function formatInlineMarkdown(value: string): string {
     // BUG-FM01: include mailto: and tel: so links inserted via the link tool
     // are rendered as <a> when the article is reloaded. Extract links into
     // tokens so *, **, or ~~ inside hrefs do not corrupt the URL.
+    .replace(
+      /!\[([^\]]*)]\((https?:\/\/[^)\s]+|\/[^)\s]+)\)/g,
+      (_match, alt: string, src: string) => storeToken(`<img src="${src}" alt="${alt || "图片"}" />`)
+    )
     .replace(
       /\[([^\]]+)]\((https?:\/\/[^)\s]+|\/[^)\s]+|mailto:[^\s)]+|tel:[^\s)]+)\)/g,
       (_match, label: string, href: string) => storeToken(`<a href="${href}">${applyInlineEmphasis(label)}</a>`)

@@ -6,9 +6,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
-	"net"
 	"net/http"
-	"strings"
 
 	"github.com/fenghaoyun-monster/freedompost/services/api/internal/benefit"
 	"github.com/fenghaoyun-monster/freedompost/services/api/internal/channelbridge"
@@ -226,25 +224,9 @@ func (s *Server) internalError(w http.ResponseWriter, r *http.Request, err error
 	writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", "服务暂时不可用")
 }
 
-// remoteIP extracts the client IP, respecting X-Forwarded-For when TrustProxy is set.
+// remoteIP extracts the client IP, respecting trusted proxy headers when TrustProxy is set.
 func (s *Server) remoteIP(r *http.Request) string {
-	if s.cfg != nil && s.cfg.TrustProxy {
-		if forwarded := strings.TrimSpace(strings.Split(r.Header.Get("X-Forwarded-For"), ",")[0]); forwarded != "" {
-			if parsed := net.ParseIP(forwarded); parsed != nil {
-				return parsed.String()
-			}
-		}
-	}
-	if host, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
-		if parsed := net.ParseIP(host); parsed != nil {
-			return parsed.String()
-		}
-		return host
-	}
-	if parsed := net.ParseIP(strings.Trim(r.RemoteAddr, "[]")); parsed != nil {
-		return parsed.String()
-	}
-	return r.RemoteAddr
+	return realIP(r, s.cfg != nil && s.cfg.TrustProxy)
 }
 
 // renderMarkdown renders markdown using the renderer package.

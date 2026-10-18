@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"strings"
 	"time"
 )
 
@@ -386,12 +387,68 @@ type ToolInput struct {
 	Summary     string   `json:"summary"`
 	Description string   `json:"description"`
 	Category    string   `json:"category"`
-	IconURL     string   `json:"iconUrl"`
+	URL         string   `json:"url"`
 	LinkURL     string   `json:"linkUrl"`
+	CoverURL    string   `json:"coverUrl"`
+	IconURL     string   `json:"iconUrl"`
 	Tags        []string `json:"tags"`
 	Status      string   `json:"status"`
 	SortOrder   int      `json:"sortOrder"`
 }
+
+func (t *ToolInput) UnmarshalJSON(data []byte) error {
+	type wireToolInput struct {
+		Title       string   `json:"title"`
+		Summary     string   `json:"summary"`
+		Description string   `json:"description"`
+		Category    string   `json:"category"`
+		URL         *string  `json:"url"`
+		LinkURL     *string  `json:"linkUrl"`
+		CoverURL    *string  `json:"coverUrl"`
+		IconURL     *string  `json:"iconUrl"`
+		Tags        []string `json:"tags"`
+		Status      string   `json:"status"`
+		SortOrder   int      `json:"sortOrder"`
+	}
+	dec := json.NewDecoder(bytes.NewReader(data))
+	dec.DisallowUnknownFields()
+	var wire wireToolInput
+	if err := dec.Decode(&wire); err != nil {
+		return err
+	}
+	if err := dec.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		return errors.New("unexpected trailing JSON input")
+	}
+	linkURL := ""
+	if wire.LinkURL != nil {
+		linkURL = strings.TrimSpace(*wire.LinkURL)
+	}
+	if wire.URL != nil && (strings.TrimSpace(*wire.URL) != "" || linkURL == "") {
+		linkURL = strings.TrimSpace(*wire.URL)
+	}
+	iconURL := ""
+	if wire.IconURL != nil {
+		iconURL = strings.TrimSpace(*wire.IconURL)
+	}
+	if wire.CoverURL != nil && (strings.TrimSpace(*wire.CoverURL) != "" || iconURL == "") {
+		iconURL = strings.TrimSpace(*wire.CoverURL)
+	}
+	*t = ToolInput{
+		Title:       wire.Title,
+		Summary:     wire.Summary,
+		Description: wire.Description,
+		Category:    wire.Category,
+		URL:         linkURL,
+		LinkURL:     linkURL,
+		CoverURL:    iconURL,
+		IconURL:     iconURL,
+		Tags:        wire.Tags,
+		Status:      wire.Status,
+		SortOrder:   wire.SortOrder,
+	}
+	return nil
+}
+
 
 // ─── Affiliate ───────────────────────────────────────────────────────────────
 
