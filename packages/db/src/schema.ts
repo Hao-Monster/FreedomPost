@@ -181,6 +181,7 @@ export const affiliateOrders = pgTable(
     currency: varchar("currency", { length: 8 }).notNull().default("CNY"),
     orderStatus: varchar("order_status", { length: 16 }).notNull().default("pending"),
     commissionStatus: varchar("commission_status", { length: 16 }).notNull().default("not_due"),
+    stockReserved: boolean("stock_reserved").notNull().default(false),
     notes: text("notes").notNull().default(""),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),

@@ -250,11 +250,20 @@ func TestToolInputUnmarshalAndNormalize(t *testing.T) {
 func TestRealIPUsesRightmostTrustedXForwardedFor(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/api/admin/login", nil)
 	req.RemoteAddr = "10.0.0.2:12345"
+	req.Header.Set("CF-Connecting-IP", "203.0.113.9")
+	req.Header.Set("X-Real-IP", "203.0.113.10")
 	req.Header.Set("X-Forwarded-For", "1.2.3.4, 198.51.100.77")
 	if got := realIP(req, true); got != "198.51.100.77" {
 		t.Fatalf("realIP(trustProxy=true) = %q, want rightmost 198.51.100.77", got)
 	}
 	if got := realIP(req, false); got != "10.0.0.2" {
 		t.Fatalf("realIP(trustProxy=false) = %q, want 10.0.0.2", got)
+	}
+
+	reqMalformedTail := httptest.NewRequest(http.MethodPost, "/api/admin/login", nil)
+	reqMalformedTail.RemoteAddr = "10.0.0.2:12345"
+	reqMalformedTail.Header.Set("X-Forwarded-For", "1.2.3.4, not-an-ip")
+	if got := realIP(reqMalformedTail, true); got != "10.0.0.2" {
+		t.Fatalf("realIP with malformed rightmost XFF hop = %q, want fallback 10.0.0.2", got)
 	}
 }

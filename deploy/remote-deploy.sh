@@ -19,13 +19,13 @@ if [ -f "$DEPLOY_PATH/.env" ]; then
     $SUDO chmod 600 "$ROLLBACK_DIR/config.tar.gz"
     printf 'services:\n' > "$ROLLBACK_DIR/images.yml"
     for service in nginx api-go paid-access; do
-      container=$($SUDO docker compose --env-file "$DEPLOY_PATH/.env" -f "$DEPLOY_PATH/deploy/docker-compose.yml" ps -aq "$service" | head -n 1 || true)
-      if [ -n "$container" ]; then
-        previous_image=$($SUDO docker inspect --format '{{.Image}}' "$container")
-        rollback_tag="freedompost-rollback-${service}:$(basename "$ROLLBACK_DIR")"
-        $SUDO docker tag "$previous_image" "$rollback_tag"
-        printf '  %s:\n    image: %s\n' "$service" "$rollback_tag" >> "$ROLLBACK_DIR/images.yml"
-      fi
+      containers=$($SUDO docker compose --env-file "$DEPLOY_PATH/.env" -f "$DEPLOY_PATH/deploy/docker-compose.yml" ps -aq "$service")
+      container="${containers%%$'\n'*}"
+      test -n "$container"
+      previous_image=$($SUDO docker inspect --format '{{.Image}}' "$container")
+      rollback_tag="freedompost-rollback-${service}:$(basename "$ROLLBACK_DIR")"
+      $SUDO docker tag "$previous_image" "$rollback_tag"
+      printf '  %s:\n    image: %s\n' "$service" "$rollback_tag" >> "$ROLLBACK_DIR/images.yml"
     done
     printf '%s\n' "$RELEASE_SHA" > "$ROLLBACK_DIR/replaced-by-sha"
     echo "Rollback snapshot: $ROLLBACK_DIR"

@@ -372,3 +372,22 @@ func testSignature(secret, timestamp, nonce, method, path, actor string, body []
 	_, _ = mac.Write([]byte(timestamp + "\n" + nonce + "\n" + method + "\n" + path + "\n" + actor + "\n" + hex.EncodeToString(bodyHash[:])))
 	return hex.EncodeToString(mac.Sum(nil))
 }
+
+func TestRemoteIPIgnoresPassthroughHeadersAndUsesRightmostXFF(t *testing.T) {
+	api := &API{config: Config{TrustProxy: true}}
+	req := httptest.NewRequest(http.MethodPost, "/api/reader/login", nil)
+	req.RemoteAddr = "10.0.0.9:54321"
+	req.Header.Set("CF-Connecting-IP", "203.0.113.1")
+	req.Header.Set("X-Real-IP", "203.0.113.2")
+	req.Header.Set("X-Forwarded-For", "1.2.3.4, 198.51.100.88")
+	if got := api.remoteIP(req); got != "198.51.100.88" {
+		t.Fatalf("remoteIP(TrustProxy=true) = %q, want 198.51.100.88", got)
+	}
+
+	reqBadTail := httptest.NewRequest(http.MethodPost, "/api/reader/login", nil)
+	reqBadTail.RemoteAddr = "10.0.0.9:54321"
+	reqBadTail.Header.Set("X-Forwarded-For", "1.2.3.4, invalid")
+	if got := api.remoteIP(reqBadTail); got != "10.0.0.9" {
+		t.Fatalf("remoteIP with malformed rightmost XFF hop = %q, want 10.0.0.9", got)
+	}
+}

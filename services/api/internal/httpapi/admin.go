@@ -804,6 +804,10 @@ func (s *Server) adminUpdateAffiliateOrder(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	order, err := s.repo.UpdateAffiliateOrderStatus(r.Context(), r.PathValue("id"), input.OrderStatus, input.CommissionStatus, input.Notes)
+	if errors.Is(err, domain.ErrInvalidState) {
+		writeError(w, http.StatusConflict, "PRODUCT_OUT_OF_STOCK", "商品库存不足，无法恢复已取消的订单")
+		return
+	}
 	if err != nil {
 		s.internalError(w, r, err)
 		return

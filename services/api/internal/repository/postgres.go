@@ -1178,7 +1178,8 @@ func (p *Postgres) createAffiliateOrderTx(ctx context.Context, tx pgx.Tx, input 
 	if !domain.ValidAffiliateMarkupPercent(markupPercent) {
 		return nil, domain.ErrInvalidState
 	}
-	if product.Stock > 0 {
+	stockReserved := product.Stock > 0
+	if stockReserved {
 		if _, err := tx.Exec(ctx, `UPDATE products SET stock = stock - 1, updated_at = NOW() WHERE id = $1 AND stock > 0`, product.ID); err != nil {
 			return nil, fmt.Errorf("decrement product stock: %w", err)
 		}
@@ -1190,15 +1191,15 @@ func (p *Postgres) createAffiliateOrderTx(ctx context.Context, tx pgx.Tx, input 
 		`INSERT INTO affiliate_orders (order_code, affiliate_id, product_id, product_title,
 		                               price_cents, commission_cents,
 		                               base_commission_cents, markup_commission_cents,
-		                               currency, created_at, updated_at)
-		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+		                               currency, stock_reserved, created_at, updated_at)
+		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
 		 RETURNING id, order_code, affiliate_id, product_id, product_title,
 		           price_cents, commission_cents, base_commission_cents, markup_commission_cents,
 		           COALESCE(currency, 'CNY'), COALESCE(order_status, 'pending'),
 		           COALESCE(commission_status, 'pending'), created_at, updated_at`,
 		orderCode, affiliateID, product.ID, product.Title,
 		view.CustomerPriceCents, view.CommissionCents, view.BaseCommissionCents,
-		view.MarkupCommissionCents, product.Currency, now, now,
+		view.MarkupCommissionCents, product.Currency, stockReserved, now, now,
 	).Scan(
 		&order.ID, &order.OrderCode, &order.AffiliateID, &order.ProductID, &order.ProductTitle,
 		&order.PriceCents, &order.CommissionCents,
@@ -1220,23 +1221,53 @@ func (p *Postgres) ListAffiliateOrders(ctx context.Context) ([]domain.AffiliateO
 func (p *Postgres) UpdateAffiliateOrderStatus(ctx context.Context, id, orderStatus, commissionStatus, notes string) (*domain.AffiliateOrder, error) {
 	var order domain.AffiliateOrder
 	err := p.pool.QueryRow(ctx, `
-		WITH prior AS (
-			SELECT id, product_id, COALESCE(order_status, 'pending') AS prev_status
+		WITH order_lock AS (
+			SELECT id,
+			       product_id,
+			       COALESCE(order_status, 'pending') AS prev_status,
+			       COALESCE(stock_reserved, FALSE) AS prev_reserved
 			FROM affiliate_orders
 			WHERE id = $1
 			FOR UPDATE
+		),
+		product_lock AS (
+			SELECT p.id, p.stock
+			FROM products p
+			JOIN order_lock ol ON ol.product_id = p.id
+			FOR UPDATE OF p
+		),
+		prior AS (
+			SELECT ol.id,
+			       ol.product_id,
+			       ol.prev_status,
+			       ol.prev_reserved,
+			       pl.stock AS current_stock
+			FROM order_lock ol
+			LEFT JOIN product_lock pl ON pl.id = ol.product_id
 		),
 		updated AS (
 			UPDATE affiliate_orders ao SET
 				order_status = $2,
 				commission_status = $3,
 				notes = $4,
+				stock_reserved = CASE
+					WHEN prior.prev_status <> 'canceled' AND $2 = 'canceled' THEN FALSE
+					WHEN prior.prev_status = 'canceled' AND $2 <> 'canceled' THEN COALESCE(prior.current_stock > 0, FALSE)
+					ELSE prior.prev_reserved
+				END,
 				updated_at = NOW(),
 				completed_at = CASE WHEN $2 = 'completed' THEN COALESCE(ao.completed_at, NOW()) ELSE NULL END,
 				commission_paid_at = CASE WHEN $3 = 'paid' THEN COALESCE(ao.commission_paid_at, NOW()) ELSE NULL END
 			FROM prior
 			WHERE ao.id = prior.id
-			RETURNING ao.*, prior.prev_status
+			  AND (
+			    prior.prev_status <> 'canceled'
+			    OR $2 = 'canceled'
+			    OR prior.current_stock IS NULL
+			    OR prior.current_stock < 0
+			    OR prior.current_stock > 0
+			  )
+			RETURNING ao.*, prior.prev_status, prior.prev_reserved
 		),
 		sold_sync AS (
 			UPDATE products p SET
@@ -1247,8 +1278,8 @@ func (p *Postgres) UpdateAffiliateOrderStatus(ctx context.Context, id, orderStat
 				END),
 				stock = CASE
 					WHEN p.stock < 0 THEN p.stock
-					WHEN u.prev_status <> 'canceled' AND u.order_status = 'canceled' THEN p.stock + 1
-					WHEN u.prev_status = 'canceled' AND u.order_status <> 'canceled' THEN GREATEST(0, p.stock - 1)
+					WHEN u.prev_status <> 'canceled' AND u.order_status = 'canceled' AND u.prev_reserved THEN p.stock + 1
+					WHEN u.prev_status = 'canceled' AND u.order_status <> 'canceled' AND u.stock_reserved THEN p.stock - 1
 					ELSE p.stock
 				END,
 				updated_at = NOW()
@@ -1256,8 +1287,8 @@ func (p *Postgres) UpdateAffiliateOrderStatus(ctx context.Context, id, orderStat
 			WHERE p.id = u.product_id
 			  AND ((u.prev_status <> 'completed' AND u.order_status = 'completed')
 			    OR (u.prev_status = 'completed' AND u.order_status <> 'completed')
-			    OR (u.prev_status <> 'canceled' AND u.order_status = 'canceled')
-			    OR (u.prev_status = 'canceled' AND u.order_status <> 'canceled'))
+			    OR (u.prev_status <> 'canceled' AND u.order_status = 'canceled' AND u.prev_reserved)
+			    OR (u.prev_status = 'canceled' AND u.order_status <> 'canceled' AND u.stock_reserved))
 		)
 		SELECT u.id, u.order_code, u.affiliate_id, COALESCE(a.wechat_id, ''),
 		       COALESCE(u.product_id::text, ''), u.product_title,
@@ -1275,6 +1306,10 @@ func (p *Postgres) UpdateAffiliateOrderStatus(ctx context.Context, id, orderStat
 		&order.CreatedAt, &order.UpdatedAt, &order.CompletedAt, &order.CommissionPaidAt,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
+		var exists bool
+		if existsErr := p.pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM affiliate_orders WHERE id = $1)`, id).Scan(&exists); existsErr == nil && exists {
+			return nil, domain.ErrInvalidState
+		}
 		return nil, nil
 	}
 	if err != nil {
