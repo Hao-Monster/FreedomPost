@@ -102,6 +102,21 @@ func TestRenderBasicMarkdown(t *testing.T) {
 			input:  `[click](javascript:alert(1))`,
 			absent: []string{"javascript:"},
 		},
+		{
+			name:   "XSS: arbitrary iframe stripped",
+			input:  `<iframe src="https://evil.example/embed"></iframe>`,
+			absent: []string{"<iframe", "evil.example"},
+		},
+		{
+			name:     "YouTube directive rendered safely",
+			input:    "::youtube[dQw4w9WgXcQ?start=62]",
+			contains: []string{`class="youtube-embed"`, `src="https://www.youtube-nocookie.com/embed/dQw4w9WgXcQ?start=62"`},
+		},
+		{
+			name:     "underline and heading inline text preserved",
+			input:    "# **重要**标题\n\n<u>下划线内容</u>",
+			contains: []string{`id="重要标题"`, "<u>下划线内容</u>"},
+		},
 	}
 
 	for _, tc := range cases {

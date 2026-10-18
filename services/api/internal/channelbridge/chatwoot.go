@@ -194,7 +194,7 @@ func VerifyWebhookSignature(rawBody, timestamp, signature, secret string, now ti
 		return false
 	}
 	seconds, err := strconv.ParseInt(timestamp, 10, 64)
-	if err != nil || tolerance < 0 {
+	if err != nil || seconds <= 0 || tolerance < 0 {
 		return false
 	}
 	if tolerance == 0 {

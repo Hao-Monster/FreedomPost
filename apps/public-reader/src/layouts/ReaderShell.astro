@@ -38,7 +38,10 @@ const initialPayload = JSON.stringify({
     excerpt: article.excerpt
   },
   toc: article.toc
-});
+})
+  .replace(/</g, "\\u003c")
+  .replace(/>/g, "\\u003e")
+  .replace(/&/g, "\\u0026");
 const canonicalUrl = new URL(`/p/${encodeURIComponent(article.slug)}`, Astro.site ?? "https://example.com").toString();
 ---
 

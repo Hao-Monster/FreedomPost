@@ -69,8 +69,9 @@ func (r *Redis) Close() error                   { return r.client.Close() }
 // ─── Memory limiter ───────────────────────────────────────────────────────────
 
 type memBucket struct {
-	started time.Time
-	count   int
+	started   time.Time
+	expiresAt time.Time
+	count     int
 }
 
 // Memory is a simple in-process fixed-window rate limiter.
@@ -110,15 +111,15 @@ func (m *Memory) Allow(_ context.Context, key string, limit int, window time.Dur
 	defer m.mu.Unlock()
 	now := m.now()
 	b := m.buckets[key]
-	if b.started.IsZero() || now.Sub(b.started) >= window {
-		b = memBucket{started: now}
+	if b.expiresAt.IsZero() || !now.Before(b.expiresAt) {
+		b = memBucket{started: now, expiresAt: now.Add(window)}
 	}
 	b.count++
 	m.buckets[key] = b
-	// Evict stale entries to prevent unbounded growth (matches paid-access)
+	// Evict stale entries using each bucket's own expiration timestamp
 	if len(m.buckets) > 10_000 {
 		for k, v := range m.buckets {
-			if now.Sub(v.started) >= window {
+			if !now.Before(v.expiresAt) {
 				delete(m.buckets, k)
 			}
 		}

@@ -1,11 +1,11 @@
-﻿// @vitest-environment happy-dom
+// @vitest-environment happy-dom
 /**
  * editor-third-round-bugs.test.ts
  * Third-round deep code-analysis bug discovery tests.
  */
 import { describe, expect, it } from "vitest";
 import { editorHtmlToMarkdown } from "./main";
-import { normalizeEditorImageAlt } from "./editor-media";
+import { editorImageHtml, normalizeEditorImageAlt, sanitizeEditorMediaUrl } from "./editor-media";
 
 function makeEditor(html: string): HTMLElement {
   const div = document.createElement("div");
@@ -185,5 +185,20 @@ describe("BUG-P12: italic regex corrupts already-converted <a> href containing *
                         italicConverted.includes('href="https://example.com/path/');
     console.log("BUG-P12 is corrupted:", isCorrupted);
     expect(isCorrupted).toBe(false);
+  });
+
+  it("sanitizeEditorMediaUrl rejects javascript: and data:text/html while allowing https and /api/uploads", () => {
+    expect(sanitizeEditorMediaUrl("javascript:alert(1)")).toBe("#");
+    expect(sanitizeEditorMediaUrl("data:text/html;base64,PHNjcmlwdD5hbGVydCgxKTwvc2NyaXB0Pg==")).toBe("#");
+    expect(sanitizeEditorMediaUrl("//evil.example.com/x.png")).toBe("#");
+    expect(sanitizeEditorMediaUrl("/api/uploads/2026/04/photo.png")).toBe("/api/uploads/2026/04/photo.png");
+    expect(sanitizeEditorMediaUrl("https://cdn.example.com/photo.png")).toBe("https://cdn.example.com/photo.png");
+    expect(editorImageHtml("javascript:alert(1)", "bad")).not.toContain("javascript:");
+  });
+
+  it("editorHtmlToMarkdown preserves inline formatting wrapping an img node", () => {
+    const editor = makeEditor('<strong>加粗<img src="https://cdn.example.com/a.png" alt="图">文字</strong>');
+    const md = editorHtmlToMarkdown(editor);
+    expect(md).toBe("**加粗![图](https://cdn.example.com/a.png)文字**");
   });
 });

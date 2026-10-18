@@ -20,7 +20,7 @@ import (
 )
 
 const (
-	postViewIncrement = 5 // match TS POST_VIEW_INCREMENT
+	postViewIncrement = 100 // match migration 0011_post_view_count_step.sql and TS POST_VIEW_INCREMENT
 	maxConns          = 20
 )
 
@@ -152,7 +152,10 @@ func (p *Postgres) GetPostBySlug(ctx context.Context, slug string) (*domain.Post
 		        content_markdown, content_html, search_text, excerpt,
 		        view_count, comment_count, attachment_count, created_at, updated_at
 		 FROM posts
-		 WHERE slug = $1`,
+		 WHERE slug = $1
+		    OR id = (SELECT post_id FROM post_slug_aliases WHERE slug = $1)
+		 ORDER BY (slug = $1) DESC
+		 LIMIT 1`,
 		slug,
 	)
 	return scanPost(row)
@@ -180,7 +183,7 @@ func (p *Postgres) CreatePost(ctx context.Context, input domain.CreatePostInput)
 		`INSERT INTO posts (id, slug, title, visibility, price_cents, currency,
 		                    content_json, content_markdown, content_html, search_text, excerpt,
 		                    view_count, comment_count, attachment_count, created_at, updated_at)
-		 VALUES ($1,$2,$3,$4,$5,$6,'{}', $7,$8,$9,$10, 0, 0, 0, $11,$12)
+		 VALUES ($1,$2,$3,$4,$5,$6,'{}', $7,$8,$9,$10, 100, 0, 0, $11,$12)
 		 RETURNING id, slug, title, visibility, price_cents, currency,
 		           content_markdown, content_html, search_text, excerpt,
 		           view_count, comment_count, attachment_count, created_at, updated_at`,
@@ -206,7 +209,6 @@ func (p *Postgres) UpdatePost(ctx context.Context, input domain.UpdatePostInput)
 		return nil, fmt.Errorf("lock post: %w", err)
 	}
 
-	// Slug changes: no alias table in schema, just update directly.
 	newSlug := input.Slug
 	if newSlug == "" {
 		newSlug = existingSlug
@@ -263,6 +265,17 @@ func (p *Postgres) UpdatePost(ctx context.Context, input domain.UpdatePostInput)
 	if err != nil {
 		return nil, err
 	}
+	if newSlug != existingSlug && len(existingSlug) <= 32 {
+		if _, err := tx.Exec(ctx, `
+			INSERT INTO post_slug_aliases (slug, post_id)
+			VALUES ($1, $2)
+			ON CONFLICT (slug) DO UPDATE SET post_id = EXCLUDED.post_id`,
+			existingSlug, input.ID,
+		); err != nil {
+			return nil, fmt.Errorf("record post slug alias: %w", err)
+		}
+		_, _ = tx.Exec(ctx, `DELETE FROM post_slug_aliases WHERE slug = $1 AND post_id = $2`, newSlug, input.ID)
+	}
 	for _, attachmentID := range claimedIDs {
 		result, err := tx.Exec(ctx, `
 			UPDATE attachments
@@ -292,8 +305,14 @@ func (p *Postgres) RecordView(ctx context.Context, input domain.RecordViewInput)
 		return nil, err
 	}
 
+	tx, err := p.pool.Begin(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("begin record view tx: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
 	// Try to insert a view record (UNIQUE on post_id+view_date+visitor_key)
-	ct, err := p.pool.Exec(ctx,
+	ct, err := tx.Exec(ctx,
 		`INSERT INTO post_views (post_id, view_date, visitor_key, ip_hash, fingerprint_hash, local_id_hash)
 		 VALUES ($1, $2, $3, $4, $5, $6)
 		 ON CONFLICT DO NOTHING`,
@@ -306,12 +325,15 @@ func (p *Postgres) RecordView(ctx context.Context, input domain.RecordViewInput)
 
 	if ct.RowsAffected() > 0 {
 		var viewCount int
-		err = p.pool.QueryRow(ctx,
+		err = tx.QueryRow(ctx,
 			`UPDATE posts SET view_count = view_count + $1 WHERE id = $2 RETURNING view_count`,
 			postViewIncrement, post.ID,
 		).Scan(&viewCount)
 		if err != nil {
 			return nil, fmt.Errorf("update view count: %w", err)
+		}
+		if err := tx.Commit(ctx); err != nil {
+			return nil, fmt.Errorf("commit record view: %w", err)
 		}
 		return &domain.RecordViewResult{Counted: true, ViewCount: viewCount}, nil
 	}
@@ -397,8 +419,22 @@ func (p *Postgres) CreateComment(ctx context.Context, input domain.CreateComment
 		return nil, err
 	}
 
-	// Load existing comments to compute path
-	rows, err := p.pool.Query(ctx,
+	tx, err := p.pool.Begin(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("begin tx: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	var lockedPostID string
+	if err := tx.QueryRow(ctx, `SELECT id FROM posts WHERE id = $1 FOR UPDATE`, post.ID).Scan(&lockedPostID); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("lock post for comment: %w", err)
+	}
+
+	// Load existing comments inside transaction to compute path atomically
+	rows, err := tx.Query(ctx,
 		`SELECT id, parent_id, root_id, depth, path FROM comments WHERE post_id = $1`,
 		post.ID,
 	)
@@ -417,6 +453,7 @@ func (p *Postgres) CreateComment(ctx context.Context, input domain.CreateComment
 		var m minimal
 		var parentID, rootID *string
 		if err := rows.Scan(&m.id, &parentID, &rootID, &m.depth, &m.path); err != nil {
+			rows.Close()
 			return nil, err
 		}
 		if parentID != nil {
@@ -427,6 +464,7 @@ func (p *Postgres) CreateComment(ctx context.Context, input domain.CreateComment
 		}
 		existing = append(existing, m)
 	}
+	rows.Close()
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
@@ -475,11 +513,6 @@ func (p *Postgres) CreateComment(ctx context.Context, input domain.CreateComment
 	}
 
 	commentID := uuid.NewString()
-	tx, err := p.pool.Begin(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("begin tx: %w", err)
-	}
-	defer tx.Rollback(ctx)
 
 	claimedAttachments := make([]domain.CommentAttachment, 0, len(input.Attachments))
 	for _, claim := range input.Attachments {
@@ -1129,7 +1162,7 @@ func (p *Postgres) createAffiliateOrderTx(ctx context.Context, tx pgx.Tx, input 
 		  ON apm.affiliate_id = a.id AND apm.product_id = p.id
 		WHERE a.id = $1 AND a.status = 'active'
 		  AND p.slug = $2 AND p.status = 'published' AND p.stock <> 0
-		FOR SHARE OF a, p`, affiliateID, input.ProductSlug).Scan(
+		FOR SHARE OF a FOR UPDATE OF p`, affiliateID, input.ProductSlug).Scan(
 		&product.ID, &product.Slug, &product.Title, &product.Summary,
 		&product.Description, &product.Category, &product.CoverURL, &product.LinkURL,
 		&product.PriceCents, &product.CompareAtCents, &product.Currency,
@@ -1144,6 +1177,11 @@ func (p *Postgres) createAffiliateOrderTx(ctx context.Context, tx pgx.Tx, input 
 	}
 	if !domain.ValidAffiliateMarkupPercent(markupPercent) {
 		return nil, domain.ErrInvalidState
+	}
+	if product.Stock > 0 {
+		if _, err := tx.Exec(ctx, `UPDATE products SET stock = stock - 1, updated_at = NOW() WHERE id = $1 AND stock > 0`, product.ID); err != nil {
+			return nil, fmt.Errorf("decrement product stock: %w", err)
+		}
 	}
 	view := domain.BuildAffiliateProductView(product, markupPercent)
 	now := time.Now()
@@ -1182,16 +1220,36 @@ func (p *Postgres) ListAffiliateOrders(ctx context.Context) ([]domain.AffiliateO
 func (p *Postgres) UpdateAffiliateOrderStatus(ctx context.Context, id, orderStatus, commissionStatus, notes string) (*domain.AffiliateOrder, error) {
 	var order domain.AffiliateOrder
 	err := p.pool.QueryRow(ctx, `
-		WITH updated AS (
-			UPDATE affiliate_orders SET
+		WITH prior AS (
+			SELECT id, product_id, COALESCE(order_status, 'pending') AS prev_status
+			FROM affiliate_orders
+			WHERE id = $1
+			FOR UPDATE
+		),
+		updated AS (
+			UPDATE affiliate_orders ao SET
 				order_status = $2,
 				commission_status = $3,
 				notes = $4,
 				updated_at = NOW(),
-				completed_at = CASE WHEN $2 = 'completed' THEN COALESCE(completed_at, NOW()) ELSE NULL END,
-				commission_paid_at = CASE WHEN $3 = 'paid' THEN COALESCE(commission_paid_at, NOW()) ELSE NULL END
-			WHERE id = $1
-			RETURNING *
+				completed_at = CASE WHEN $2 = 'completed' THEN COALESCE(ao.completed_at, NOW()) ELSE NULL END,
+				commission_paid_at = CASE WHEN $3 = 'paid' THEN COALESCE(ao.commission_paid_at, NOW()) ELSE NULL END
+			FROM prior
+			WHERE ao.id = prior.id
+			RETURNING ao.*, prior.prev_status
+		),
+		sold_sync AS (
+			UPDATE products p SET
+				sold_count = GREATEST(0, p.sold_count + CASE
+					WHEN u.prev_status <> 'completed' AND u.order_status = 'completed' THEN 1
+					WHEN u.prev_status = 'completed' AND u.order_status <> 'completed' THEN -1
+					ELSE 0
+				END),
+				updated_at = NOW()
+			FROM updated u
+			WHERE p.id = u.product_id
+			  AND ((u.prev_status <> 'completed' AND u.order_status = 'completed')
+			    OR (u.prev_status = 'completed' AND u.order_status <> 'completed'))
 		)
 		SELECT u.id, u.order_code, u.affiliate_id, COALESCE(a.wechat_id, ''),
 		       COALESCE(u.product_id::text, ''), u.product_title,
@@ -1419,7 +1477,7 @@ func (p *Postgres) FailBenefitClaim(ctx context.Context, claimID, errorCode stri
 	_, err := p.pool.Exec(ctx,
 		`UPDATE benefit_claims
 		 SET status = 'failed', last_error_code = $2, updated_at = $3
-		 WHERE id = $1`,
+		 WHERE id = $1 AND status = 'provisioning'`,
 		claimID, errorCode, time.Now(),
 	)
 	return err

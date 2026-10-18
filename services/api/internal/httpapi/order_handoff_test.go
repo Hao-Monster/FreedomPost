@@ -130,4 +130,12 @@ func TestIdempotentOrderCannotCreateBeforeOwnerConfirmation(t *testing.T) {
 	if response.Code != http.StatusUnauthorized || !strings.Contains(response.Body.String(), `"code":"ORDER_OWNER_REQUIRED"`) || repo.created != 0 {
 		t.Fatalf("unconfirmed owner created order: status=%d created=%d body=%s", response.Code, repo.created, response.Body.String())
 	}
+
+	crossOriginLegacy := httptest.NewRequest(http.MethodPost, "https://shop.example/api/orders", strings.NewReader(`{"productSlug":"test","recommenderWechatId":"Tester123"}`))
+	crossOriginLegacy.Header.Set("Origin", "https://evil.example")
+	legacyResp := httptest.NewRecorder()
+	s.Handler().ServeHTTP(legacyResp, crossOriginLegacy)
+	if legacyResp.Code != http.StatusForbidden || repo.created != 0 {
+		t.Fatalf("cross-origin legacy order should be rejected: status=%d created=%d body=%s", legacyResp.Code, repo.created, legacyResp.Body.String())
+	}
 }

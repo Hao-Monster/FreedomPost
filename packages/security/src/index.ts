@@ -10,7 +10,6 @@ export const allowedUploadExtensions = new Set([
   "png",
   "gif",
   "webp",
-  "svg",
   "pdf",
   "doc",
   "docx",
@@ -29,14 +28,11 @@ export const allowedUploadExtensions = new Set([
   "wav",
   "mp4",
   "mov",
-  "js",
-  "ts",
   "py",
   "java",
   "go",
   "rs",
   "cpp",
-  "html",
   "css"
 ]);
 
@@ -198,7 +194,7 @@ export function sanitizeArticleHtml(html: string): string {
       "ul"
     ],
     allowedAttributes: {
-      a: ["href", "name", "target", "rel", "class"],
+      a: ["href", "name", "target", "rel", "class", "download"],
       "*": ["id", "class", "data-lang", "aria-hidden", "role"],
       img: ["src", "alt", "title", "width", "height", "loading"],
       input: ["type", "checked", "disabled"],
@@ -210,7 +206,7 @@ export function sanitizeArticleHtml(html: string): string {
     allowedClasses: {
       "*": [...articleAllowedClasses, ...articleAllowedClassPatterns]
     },
-    allowedSchemes: ["http", "https", "mailto", "tel", "data"],
+    allowedSchemes: ["http", "https", "mailto", "tel"],
     transformTags: {
       a: (tagName, attribs) => {
         const href = attribs.href ?? "";
@@ -245,6 +241,9 @@ export function fileExtension(filename: string): string {
 export function isAllowedUpload(filename: string, mimeType: string): boolean {
   const extension = fileExtension(filename);
   const normalizedMime = mimeType.toLowerCase().split(";")[0]?.trim() || "application/octet-stream";
+  if (normalizedMime === "text/html" || normalizedMime === "image/svg+xml" || normalizedMime.includes("javascript")) {
+    return false;
+  }
   const knownMime = allowedUploadMimePrefixes.some((prefix) => normalizedMime.startsWith(prefix));
 
   if (allowedUploadExtensions.has(extension)) {

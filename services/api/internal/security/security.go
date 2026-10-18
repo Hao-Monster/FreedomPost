@@ -94,7 +94,7 @@ func SignRequest(secret, method, path, actor string, body []byte) (string, strin
 // and within the acceptable timestamp window (±5 minutes).
 func ValidateSignedRequest(secret, method, path, actor, timestamp, nonce, signature string, body []byte) bool {
 	ts, err := strconv.ParseInt(timestamp, 10, 64)
-	if err != nil {
+	if err != nil || ts <= 0 {
 		return false
 	}
 	age := time.Now().Unix() - ts
@@ -106,15 +106,14 @@ func ValidateSignedRequest(secret, method, path, actor, timestamp, nonce, signat
 	return HMACEqual(expected, signature)
 }
 
-// GenerateSlug creates a random 8-character lowercase alphanumeric slug
-// suitable for post/product slugs.
+// GenerateSlug creates a random canonical post slug ("p_" + 8 lowercase alphanumeric chars).
 func GenerateSlug() (string, error) {
 	b := make([]byte, 6)
 	if _, err := rand.Read(b); err != nil {
 		return "", fmt.Errorf("generate slug: %w", err)
 	}
-	// base32 of 6 bytes = 10 chars; take first 8 and lowercase
-	return strings.ToLower(base32Encoding.EncodeToString(b))[:8], nil
+	// base32 of 6 bytes = 10 chars; take first 8 and lowercase with canonical p_ prefix
+	return "p_" + strings.ToLower(base32Encoding.EncodeToString(b))[:8], nil
 }
 
 // RandomUsername generates a deterministic display name from a seed,

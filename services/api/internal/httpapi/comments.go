@@ -93,9 +93,18 @@ func (s *Server) createComment(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "INVALID_COMMENT", "评论标识格式不正确")
 		return
 	}
+	networkKey := security.HashText(r.PathValue("slug") + ":" + ip)
 	subjectKey := security.HashText(strings.Join([]string{r.PathValue("slug"), ip, input.Fingerprint, input.LocalID}, ":"))
+	if ok, _ := s.limiter.Allow(r.Context(), "comment-day-net:"+networkKey, 5, 24*time.Hour); !ok {
+		writeError(w, http.StatusTooManyRequests, "RATE_LIMITED", "今天的评论次数已达上限，请明天再试")
+		return
+	}
 	if ok, _ := s.limiter.Allow(r.Context(), "comment-day:"+subjectKey, 5, 24*time.Hour); !ok {
 		writeError(w, http.StatusTooManyRequests, "RATE_LIMITED", "今天的评论次数已达上限，请明天再试")
+		return
+	}
+	if ok, _ := s.limiter.Allow(r.Context(), "comment-burst-net:"+networkKey, 3, 5*time.Minute); !ok {
+		writeError(w, http.StatusTooManyRequests, "RATE_LIMITED", "发送评论太频繁，请稍后再试")
 		return
 	}
 	if ok, _ := s.limiter.Allow(r.Context(), "comment-burst:"+subjectKey, 3, 5*time.Minute); !ok {

@@ -50,7 +50,7 @@ import {
   type ImportedImageFile,
   type PendingImageImport
 } from "./editor-image-import.js";
-import { editorImageHtml, editorImagesMarkdown, editorYouTubeHtml } from "./editor-media.js";
+import { editorImageHtml, editorImagesMarkdown, editorYouTubeHtml, sanitizeEditorMediaUrl } from "./editor-media.js";
 import { sanitizePastedEditorHtml } from "./editor-paste.js";
 import { focusEditorStart, insertBlockPlaceholderAtSelection } from "./editor-selection.js";
 import { createNewPostPayload } from "./new-post.js";
@@ -228,7 +228,9 @@ export function App() {
   const pendingMediaRef = useRef(new PendingTaskBarrier());
   const importedImageClaimsRef = useRef(new Map<string, ImportedImageClaim>());
   const failedImageImportsRef = useRef(new Map<string, PendingImageImport>());
+  const activePostIdRef = useRef<string | null>(null);
   const activePost = useMemo(() => posts.find((post) => post.id === activeId) ?? posts[0], [posts, activeId]);
+  activePostIdRef.current = activePost?.id ?? null;
 
   useEffect(() => {
     void fetchSession();
@@ -265,7 +267,7 @@ export function App() {
       const body = await response.json().catch(() => null) as { session?: { username?: string } } | null;
       if (body?.session?.username) setUsername(body.session.username);
       setAuthed(true);
-      await Promise.all([loadPosts(), loadProducts(), loadTools(), loadDistribution()]);
+      await Promise.all([loadPosts(), loadProducts(), loadTools(), loadDistribution(), loadPaidAccess()]);
     }
   }
 
@@ -285,7 +287,7 @@ export function App() {
 
     setAuthed(true);
     setPassword("");
-    await Promise.all([loadPosts(), loadProducts(), loadTools(), loadDistribution()]);
+    await Promise.all([loadPosts(), loadProducts(), loadTools(), loadDistribution(), loadPaidAccess()]);
     showToast("已登录");
   }
 
@@ -297,6 +299,12 @@ export function App() {
     setTools([]);
     setAffiliates([]);
     setAffiliateOrders([]);
+    setArticleOrders([]);
+    setReaderAccounts([]);
+    setActiveId(null);
+    setWorkspace("posts");
+    importedImageClaimsRef.current.clear();
+    failedImageImportsRef.current.clear();
   }
 
   async function loadPosts() {
@@ -352,6 +360,16 @@ export function App() {
     void loadTools();
   }
 
+  function openDistributionWorkspace() {
+    setWorkspace("distribution");
+    void loadDistribution();
+  }
+
+  function openPaidWorkspace() {
+    setWorkspace("paid");
+    void loadPaidAccess();
+  }
+
   async function createPost() {
     const response = await fetch("/api/admin/posts", {
       method: "POST",
@@ -374,15 +392,16 @@ export function App() {
 
   async function savePost() {
     if (!activePost || isSavingPost) return;
+    const targetPost = activePost;
 
     // BUG-01: Validate title before saving
-    if (!activePost.title.trim()) {
+    if (!targetPost.title.trim()) {
       showToast("请填写文章标题后再保存");
       return;
     }
 
     // BUG-02: Validate paid article price
-    if (activePost.visibility === "paid" && activePost.priceCents <= 0) {
+    if (targetPost.visibility === "paid" && targetPost.priceCents <= 0) {
       showToast("付费文章价格必须大于 0");
       return;
     }
@@ -396,6 +415,10 @@ export function App() {
 
       const { failureCount } = await pendingMediaRef.current.waitForIdle();
       setPendingMediaCount(0);
+      if (activePostIdRef.current !== targetPost.id) {
+        showToast("已切换文章，保存已取消");
+        return;
+      }
       if (failureCount > 0) {
         showToast("有图片上传失败，文章尚未保存，请重试");
         return;
@@ -405,7 +428,7 @@ export function App() {
         // Read the current DOM even when formatting emitted no input event.
         // The serializer preserves headings; comparing raw text with Markdown
         // would append duplicate headings when inline formatting splits text.
-        return editorRef.current ? editorHtmlToMarkdown(editorRef.current) : activePost.markdown;
+        return editorRef.current ? editorHtmlToMarkdown(editorRef.current) : targetPost.markdown;
       };
       const checkUnresolved = () => {
         const count = editorRef.current?.querySelectorAll('[data-fp-type="image-import-error"]').length ?? 0;
@@ -419,11 +442,11 @@ export function App() {
         const importedImages = [...importedImageClaimsRef.current.values()]
           .filter((claim) => markdown.includes(claim.url))
           .map(({ id, claimToken }) => ({ id, claimToken }));
-        return fetch(`/api/admin/posts/${activePost.id}`, {
+        return fetch(`/api/admin/posts/${targetPost.id}`, {
           method: "PUT",
           headers: { "content-type": "application/json" },
           credentials: "include",
-          body: JSON.stringify({ title: activePost.title, markdown, visibility: activePost.visibility, priceCents: activePost.priceCents, currency: activePost.currency, importedImages })
+          body: JSON.stringify({ title: targetPost.title, markdown, visibility: targetPost.visibility, priceCents: targetPost.priceCents, currency: targetPost.currency, importedImages })
         });
       };
 
@@ -438,7 +461,11 @@ export function App() {
         const errorBody = await response.json().catch(() => null) as { error?: { code?: string; message?: string; resolution?: string } } | null;
         if (errorBody?.error?.code === "EXTERNAL_IMAGE_NOT_IMPORTED") {
           showToast("检测到外链图片，正在自动转存…");
-          await autoImportEditorImages(activePost.id, editorRef.current);
+          await autoImportEditorImages(targetPost.id, editorRef.current);
+          if (activePostIdRef.current !== targetPost.id) {
+            showToast("已切换文章，保存已取消");
+            return;
+          }
           if (checkUnresolved()) return;
           markdown = getMarkdown();
           response = await doSave(markdown);
@@ -507,7 +534,7 @@ export function App() {
   async function pasteHtmlWithImages(html: string) {
     // BUG-L17: snapshot the target article ID at the start of the upload so we
     // can detect if the user switches articles while the upload is in progress.
-    const targetPostId = activePost?.id;
+    const targetPostId = activePostIdRef.current;
     try {
       let pastedResult: Awaited<ReturnType<typeof localizePastedImages>> = null;
       let pastedFailureCount = 0;
@@ -516,13 +543,13 @@ export function App() {
         insertPendingMediaAtCaret(async () => {
           pastedResult = await localizePastedImages(html, location.href, {
             uploadEmbeddedImage,
-            importRemoteImages: (items) => importRemoteImages(activePost?.id ?? "", items)
+            importRemoteImages: (items) => importRemoteImages(targetPostId ?? "", items)
           });
           if (!pastedResult) throw new Error("No images in pasted HTML");
           // BUG-L17: abort if the user switched to a different article while
           // the upload was running – inserting into the wrong article would
           // corrupt the media-claim mapping used when saving.
-          if (activePost?.id !== targetPostId) {
+          if (activePostIdRef.current !== targetPostId) {
             throw new Error("ARTICLE_SWITCHED");
           }
           for (const image of pastedResult.importedImages) {
@@ -795,8 +822,10 @@ export function App() {
     let selectedNodes: ChildNode[] = [];
     if (selection?.rangeCount && editor.contains(selection.anchorNode)) {
       const range = selection.getRangeAt(0);
-      const startNode = closestEditorChild(range.startContainer, editor);
-      const endNode = closestEditorChild(range.endContainer, editor) ?? startNode;
+      const startAnchor = range.startContainer === editor ? (editor.childNodes[range.startOffset] ?? range.startContainer) : range.startContainer;
+      const endAnchor = range.endContainer === editor ? (editor.childNodes[Math.max(0, range.endOffset - 1)] ?? startAnchor) : range.endContainer;
+      const startNode = closestEditorChild(startAnchor, editor);
+      const endNode = closestEditorChild(endAnchor, editor) ?? startNode;
       const children = [...editor.childNodes];
       const startIndex = startNode ? children.indexOf(startNode) : -1;
       const endIndex = endNode ? children.indexOf(endNode) : startIndex;
@@ -964,9 +993,11 @@ export function App() {
   }
 
   async function retryFailedImageImport(card: HTMLElement, pending: PendingImageImport) {
+    const targetPostId = activePostIdRef.current ?? "";
     card.classList.add("is-retrying");
     try {
-      const results = await importRemoteImages(activePost?.id ?? "", [{ clientId: pending.id, url: pending.source, name: pending.name }]);
+      const results = await importRemoteImages(targetPostId, [{ clientId: pending.id, url: pending.source, name: pending.name }]);
+      if (activePostIdRef.current !== targetPostId) return;
       const result = results.get(pending.id);
       if (result && "url" in result) {
         replaceFailedImageCard(card, result, pending.id);
@@ -1123,7 +1154,8 @@ export function App() {
         setProducts={setProducts}
         onOpenPosts={() => setWorkspace("posts")}
         onOpenTools={openToolsWorkspace}
-        onOpenDistribution={() => { setWorkspace("distribution"); void loadDistribution(); }}
+        onOpenDistribution={openDistributionWorkspace}
+        onOpenPaid={openPaidWorkspace}
         onRefresh={loadProducts}
         onLogout={logout}
         adminUsername={username}
@@ -1134,15 +1166,15 @@ export function App() {
   }
 
   if (workspace === "tools") {
-    return <ToolWorkspace tools={tools} setTools={setTools} onOpenPosts={() => setWorkspace("posts")} onOpenProducts={openProductWorkspace} onOpenDistribution={() => { setWorkspace("distribution"); void loadDistribution(); }} onRefresh={loadTools} onLogout={logout} showToast={showToast} toast={toast} />;
+    return <ToolWorkspace tools={tools} setTools={setTools} onOpenPosts={() => setWorkspace("posts")} onOpenProducts={openProductWorkspace} onOpenDistribution={openDistributionWorkspace} onOpenPaid={openPaidWorkspace} onRefresh={loadTools} onLogout={logout} showToast={showToast} toast={toast} />;
   }
 
   if (workspace === "distribution") {
-    return <DistributionWorkspace affiliates={affiliates} orders={affiliateOrders} setAffiliates={setAffiliates} setOrders={setAffiliateOrders} onOpenPosts={() => setWorkspace("posts")} onOpenProducts={openProductWorkspace} onOpenTools={openToolsWorkspace} onRefresh={loadDistribution} onLogout={logout} showToast={showToast} toast={toast} />;
+    return <DistributionWorkspace affiliates={affiliates} orders={affiliateOrders} setAffiliates={setAffiliates} setOrders={setAffiliateOrders} onOpenPosts={() => setWorkspace("posts")} onOpenProducts={openProductWorkspace} onOpenTools={openToolsWorkspace} onOpenPaid={openPaidWorkspace} onRefresh={loadDistribution} onLogout={logout} showToast={showToast} toast={toast} />;
   }
 
   if (workspace === "paid") {
-    return <PaidAccessWorkspace orders={articleOrders} accounts={readerAccounts} setOrders={setArticleOrders} onOpenPosts={() => setWorkspace("posts")} onRefresh={loadPaidAccess} onLogout={logout} showToast={showToast} toast={toast} />;
+    return <PaidAccessWorkspace orders={articleOrders} accounts={readerAccounts} setOrders={setArticleOrders} onOpenPosts={() => setWorkspace("posts")} onOpenProducts={openProductWorkspace} onOpenTools={openToolsWorkspace} onOpenDistribution={openDistributionWorkspace} onRefresh={loadPaidAccess} onLogout={logout} showToast={showToast} toast={toast} />;
   }
 
   return (
@@ -1152,8 +1184,8 @@ export function App() {
           <button className="active" type="button" role="tab" aria-selected="true">文章</button>
           <button type="button" role="tab" aria-selected="false" onClick={openProductWorkspace}>商品</button>
           <button type="button" role="tab" aria-selected="false" onClick={openToolsWorkspace}>工具</button>
-          <button type="button" role="tab" aria-selected="false" onClick={() => { setWorkspace("distribution"); void loadDistribution(); }}>分销</button>
-          <button type="button" role="tab" aria-selected="false" onClick={() => { setWorkspace("paid"); void loadPaidAccess(); }}>付费</button>
+          <button type="button" role="tab" aria-selected="false" onClick={openDistributionWorkspace}>分销</button>
+          <button type="button" role="tab" aria-selected="false" onClick={openPaidWorkspace}>付费</button>
         </div>
         <div className="rail-head">
           <strong>文章管理</strong>
@@ -1413,6 +1445,7 @@ export function ProductWorkspace({
   onOpenPosts,
   onOpenDistribution,
   onOpenTools,
+  onOpenPaid,
   onRefresh,
   onLogout,
   adminUsername,
@@ -1424,6 +1457,7 @@ export function ProductWorkspace({
   onOpenPosts: () => void;
   onOpenDistribution: () => void;
   onOpenTools: () => void;
+  onOpenPaid?: () => void;
   onRefresh: () => Promise<void>;
   onLogout: () => Promise<void>;
   adminUsername: string;
@@ -1707,11 +1741,12 @@ export function ProductWorkspace({
 
   async function uploadCover(files: FileList | null) {
     const file = files?.[0];
-    if (!file) return;
+    const targetProductId = activeProduct?.id;
+    if (!file || !targetProductId) return;
     if (!file.type.startsWith("image/")) return showToast("封面只能使用图片文件");
     try {
       const uploaded = await uploadFile(file);
-      patchProduct({ coverUrl: uploaded.url });
+      setProducts((items) => items.map((item) => (item.id === targetProductId ? { ...item, coverUrl: uploaded.url } : item)));
       showToast("封面已上传，保存商品后生效");
     } catch {
       showToast("封面上传失败");
@@ -1726,6 +1761,7 @@ export function ProductWorkspace({
           <button className="active" type="button" role="tab" aria-selected="true">商品</button>
           <button type="button" role="tab" aria-selected="false" onClick={onOpenTools}>工具</button>
           <button type="button" role="tab" aria-selected="false" onClick={onOpenDistribution}>分销</button>
+          {onOpenPaid && <button type="button" role="tab" aria-selected="false" onClick={onOpenPaid}>付费</button>}
         </div>
         <div className="rail-head">
           <strong>商品管理</strong>
@@ -1802,6 +1838,7 @@ function ToolWorkspace({
   onOpenPosts,
   onOpenProducts,
   onOpenDistribution,
+  onOpenPaid,
   onRefresh,
   onLogout,
   showToast,
@@ -1812,6 +1849,7 @@ function ToolWorkspace({
   onOpenPosts: () => void;
   onOpenProducts: () => void;
   onOpenDistribution: () => void;
+  onOpenPaid?: () => void;
   onRefresh: () => Promise<void>;
   onLogout: () => Promise<void>;
   showToast: (text: string) => void;
@@ -1862,11 +1900,12 @@ function ToolWorkspace({
 
   async function uploadCover(files: FileList | null) {
     const file = files?.[0];
-    if (!file) return;
+    const targetToolId = activeTool?.id;
+    if (!file || !targetToolId) return;
     if (!file.type.startsWith("image/")) return showToast("Logo 只能使用图片文件");
     try {
       const uploaded = await uploadFile(file);
-      patchTool({ coverUrl: uploaded.url });
+      setTools((items) => items.map((item) => (item.id === targetToolId ? { ...item, coverUrl: uploaded.url } : item)));
       showToast("Logo 已上传，保存工具后生效");
     } catch {
       showToast("Logo 上传失败");
@@ -1881,6 +1920,7 @@ function ToolWorkspace({
           <button type="button" role="tab" aria-selected="false" onClick={onOpenProducts}>商品</button>
           <button className="active" type="button" role="tab" aria-selected="true">工具</button>
           <button type="button" role="tab" aria-selected="false" onClick={onOpenDistribution}>分销</button>
+          {onOpenPaid && <button type="button" role="tab" aria-selected="false" onClick={onOpenPaid}>付费</button>}
         </div>
         <div className="rail-head"><strong>工具管理</strong><button className="icon-button" type="button" onClick={createTool} title="新建工具"><Plus size={17} /></button></div>
         <div className="rail-actions"><button type="button" onClick={() => void onRefresh()}><RefreshCw size={15} />刷新</button><button type="button" onClick={() => void onLogout()}><LogOut size={15} />退出</button></div>
@@ -1937,6 +1977,9 @@ function PaidAccessWorkspace({
   accounts,
   setOrders,
   onOpenPosts,
+  onOpenProducts,
+  onOpenTools,
+  onOpenDistribution,
   onRefresh,
   onLogout,
   showToast,
@@ -1946,6 +1989,9 @@ function PaidAccessWorkspace({
   accounts: AdminReaderAccount[];
   setOrders: React.Dispatch<React.SetStateAction<AdminArticleOrder[]>>;
   onOpenPosts: () => void;
+  onOpenProducts?: () => void;
+  onOpenTools?: () => void;
+  onOpenDistribution?: () => void;
   onRefresh: () => Promise<void>;
   onLogout: () => Promise<void>;
   showToast: (text: string) => void;
@@ -1975,7 +2021,13 @@ function PaidAccessWorkspace({
   return (
     <main className="admin-shell">
       <aside className="post-rail">
-        <div className="workspace-tabs" role="tablist" aria-label="后台工作区"><button type="button" onClick={onOpenPosts}>文章</button><button className="active" type="button">付费</button></div>
+        <div className="workspace-tabs" role="tablist" aria-label="后台工作区">
+          <button type="button" role="tab" aria-selected="false" onClick={onOpenPosts}>文章</button>
+          {onOpenProducts && <button type="button" role="tab" aria-selected="false" onClick={onOpenProducts}>商品</button>}
+          {onOpenTools && <button type="button" role="tab" aria-selected="false" onClick={onOpenTools}>工具</button>}
+          {onOpenDistribution && <button type="button" role="tab" aria-selected="false" onClick={onOpenDistribution}>分销</button>}
+          <button className="active" type="button" role="tab" aria-selected="true">付费</button>
+        </div>
         <div className="rail-head"><strong>读者账号</strong><span>{accounts.length} 人</span></div>
         <div className="rail-actions"><button type="button" onClick={() => void onRefresh()}><RefreshCw size={15} />刷新</button><button type="button" onClick={() => void onLogout()}><LogOut size={15} />退出</button></div>
         <div className="post-list affiliate-list">{accounts.map((account) => <button key={account.id} type="button" onClick={() => void resetReaderPassword(account)}><span>{account.loginName}</span><small>{formatDate(account.createdAt)} · 点击重置密码</small></button>)}</div>
@@ -1998,6 +2050,7 @@ function DistributionWorkspace({
   onOpenPosts,
   onOpenProducts,
   onOpenTools,
+  onOpenPaid,
   onRefresh,
   onLogout,
   showToast,
@@ -2010,6 +2063,7 @@ function DistributionWorkspace({
   onOpenPosts: () => void;
   onOpenProducts: () => void;
   onOpenTools: () => void;
+  onOpenPaid?: () => void;
   onRefresh: () => Promise<void>;
   onLogout: () => Promise<void>;
   showToast: (text: string) => void;
@@ -2038,8 +2092,12 @@ function DistributionWorkspace({
     const response = await fetch(`/api/admin/affiliates/${affiliate.id}/reset-password`, { method: "POST", credentials: "include" });
     if (!response.ok) return showToast("查询密码重置失败");
     const { queryPassword } = await response.json() as { queryPassword: string };
-    await navigator.clipboard.writeText(queryPassword);
-    showToast(`新查询密码 ${queryPassword} 已复制`);
+    try {
+      await navigator.clipboard.writeText(queryPassword);
+      showToast(`新查询密码 ${queryPassword} 已复制`);
+    } catch {
+      prompt("新查询密码只显示这一次，请手动复制：", queryPassword);
+    }
   }
 
   async function updateOrder(order: AdminAffiliateOrder, patch: Partial<Pick<AdminAffiliateOrder, "orderStatus" | "commissionStatus">>) {
@@ -2069,6 +2127,7 @@ function DistributionWorkspace({
           <button type="button" role="tab" aria-selected="false" onClick={onOpenProducts}>商品</button>
           <button type="button" role="tab" aria-selected="false" onClick={onOpenTools}>工具</button>
           <button className="active" type="button" role="tab" aria-selected="true">分销</button>
+          {onOpenPaid && <button type="button" role="tab" aria-selected="false" onClick={onOpenPaid}>付费</button>}
         </div>
         <div className="rail-head"><strong>推广者</strong><span>{affiliates.length} 人</span></div>
         <div className="rail-actions"><button type="button" onClick={() => void onRefresh()}><RefreshCw size={15} />刷新</button><button type="button" onClick={() => void onLogout()}><LogOut size={15} />退出</button></div>
@@ -2121,7 +2180,14 @@ function formatPriceInput(cents: number): string {
 }
 
 function formatMoney(cents: number, currency: string): string {
-  return new Intl.NumberFormat("zh-CN", { style: "currency", currency: currency || "CNY", minimumFractionDigits: 2 }).format(cents / 100);
+  const normalized = typeof currency === "string" && /^[A-Z]{3}$/.test(currency.trim().toUpperCase())
+    ? currency.trim().toUpperCase()
+    : "CNY";
+  try {
+    return new Intl.NumberFormat("zh-CN", { style: "currency", currency: normalized, minimumFractionDigits: 2 }).format(cents / 100);
+  } catch {
+    return new Intl.NumberFormat("zh-CN", { style: "currency", currency: "CNY", minimumFractionDigits: 2 }).format(cents / 100);
+  }
 }
 
 async function fileToEditorHtml(file: File): Promise<string> {
@@ -2130,7 +2196,8 @@ async function fileToEditorHtml(file: File): Promise<string> {
     return `${editorImageHtml(uploaded.url, uploaded.name)}<p><br></p>`;
   }
 
-  return `<div class="editor-attachment" data-fp-type="attachment" data-name="${escapeAttribute(uploaded.name)}" data-href="${escapeAttribute(uploaded.url)}" contenteditable="false"><span>${escapeHtml(uploaded.name)}</span><a href="${escapeAttribute(uploaded.url)}" download="${escapeAttribute(uploaded.name)}">下载 / 查看</a></div><p><br></p>`;
+  const safeHref = sanitizeEditorMediaUrl(uploaded.url);
+  return `<div class="editor-attachment" data-fp-type="attachment" data-name="${escapeAttribute(uploaded.name)}" data-href="${escapeAttribute(safeHref)}" contenteditable="false"><span>${escapeHtml(uploaded.name)}</span><a href="${escapeAttribute(safeHref)}" download="${escapeAttribute(uploaded.name)}">下载 / 查看</a></div><p><br></p>`;
 }
 
 async function uploadEmbeddedImage(src: string, name: string): Promise<UploadedFile> {
@@ -2280,7 +2347,7 @@ function markdownFragmentToEditorHtml(markdown: string): string {
       continue;
     }
 
-    const image = line.match(/^!\[(.*)]\((.*)\)$/);
+    const image = line.match(/^!\[([^\]]*)]\(([^)\s]+)\)$/);
     if (image) {
       flushParagraph();
       flushList();
@@ -2292,7 +2359,8 @@ function markdownFragmentToEditorHtml(markdown: string): string {
     if (attachment) {
       flushParagraph();
       flushList();
-      html.push(`<div class="editor-attachment" data-fp-type="attachment" data-name="${escapeAttribute(attachment[1] ?? "")}" data-href="${escapeAttribute(attachment[2] ?? "")}" contenteditable="false"><span>${escapeHtml(attachment[1] ?? "")}</span><a href="${escapeAttribute(attachment[2] ?? "")}" download="${escapeAttribute(attachment[1] ?? "")}">下载 / 查看</a></div>`);
+      const safeAttachmentHref = sanitizeEditorMediaUrl(attachment[2] ?? "");
+      html.push(`<div class="editor-attachment" data-fp-type="attachment" data-name="${escapeAttribute(attachment[1] ?? "")}" data-href="${escapeAttribute(safeAttachmentHref)}" contenteditable="false"><span>${escapeHtml(attachment[1] ?? "")}</span><a href="${escapeAttribute(safeAttachmentHref)}" download="${escapeAttribute(attachment[1] ?? "")}">下载 / 查看</a></div>`);
       continue;
     }
 
@@ -2427,6 +2495,12 @@ function nodeToMarkdown(node: Node): string {
   }
 
   if (node.querySelector("figure.editor-image,figure.editor-youtube,img,.editor-attachment")) {
+    if (
+      !node.querySelector("figure.editor-image,figure.editor-youtube,.editor-attachment") &&
+      /^(STRONG|B|EM|I|DEL|S|STRIKE|U|CODE|SPAN|A)$/.test(node.tagName)
+    ) {
+      return inlineNodeToMarkdown(node).trim();
+    }
     const childMarkdown = [...node.childNodes].map(nodeToMarkdown).filter((value) => value.trim());
     if (childMarkdown.length) {
       return childMarkdown.join("\n\n");
@@ -2520,22 +2594,43 @@ function inlineNodeToMarkdown(node: Node): string {
   return content || (node.textContent ?? "");
 }
 
-function formatInlineMarkdown(value: string): string {
-  return restoreSafeInlineHtml(value
-    // BUG-FM01: include mailto: and tel: so links inserted via the link tool
-    // are rendered as <a> when the article is reloaded.
-    .replace(
-      /\[([^\]]+)]\((https?:\/\/[^)\s]+|\/[^)\s]+|mailto:[^\s)]+|tel:[^\s)]+)\)/g,
-      '<a href="$2">$1</a>'
-    )
+function applyInlineEmphasis(value: string): string {
+  return value
     .replace(/\*\*(.*?)\*\*/g, "<strong>$1</strong>")
     .replace(/~~(.*?)~~/g, "<del>$1</del>")
-    .replace(/\*(.*?)\*/g, "<em>$1</em>")
+    .replace(/\*(.*?)\*/g, "<em>$1</em>");
+}
+
+function formatInlineMarkdown(value: string): string {
+  const tokens: string[] = [];
+  const storeToken = (replacement: string): string => {
+    const token = `\u0000FPTOKEN_${tokens.length}_\u0000`;
+    tokens.push(replacement);
+    return token;
+  };
+
+  let formatted = value
     // BUG-FM02: match double-backtick delimited code first (used when the code
     // content contains a backtick, e.g. ``value`more``), then single-backtick.
-    // Order matters: the double-backtick rule must come before the single one.
-    .replace(/``([^`](?:[^`]|`(?!`))*[^`]|[^`])``/g, "<code>$1</code>")
-    .replace(/(?<!`)`([^`]+)`(?!`)/g, "<code>$1</code>"));
+    // Order matters: extract code spans before links and emphasis so *, ~, or
+    // link syntax inside inline code is never altered.
+    .replace(/``([^`](?:[^`]|`(?!`))*[^`]|[^`])``/g, (_match, code: string) => storeToken(`<code>${code}</code>`))
+    .replace(/(?<!`)`([^`]+)`(?!`)/g, (_match, code: string) => storeToken(`<code>${code}</code>`))
+    // BUG-FM01: include mailto: and tel: so links inserted via the link tool
+    // are rendered as <a> when the article is reloaded. Extract links into
+    // tokens so *, **, or ~~ inside hrefs do not corrupt the URL.
+    .replace(
+      /\[([^\]]+)]\((https?:\/\/[^)\s]+|\/[^)\s]+|mailto:[^\s)]+|tel:[^\s)]+)\)/g,
+      (_match, label: string, href: string) => storeToken(`<a href="${href}">${applyInlineEmphasis(label)}</a>`)
+    );
+
+  formatted = applyInlineEmphasis(formatted);
+
+  for (let index = tokens.length - 1; index >= 0; index -= 1) {
+    formatted = formatted.replaceAll(`\u0000FPTOKEN_${index}_\u0000`, tokens[index] ?? "");
+  }
+
+  return restoreSafeInlineHtml(formatted);
 }
 
 function restoreSafeInlineHtml(value: string): string {

@@ -86,16 +86,22 @@ export function setPaidContentProtection(container: HTMLElement, enabled: boolea
     for (const eventName of ["copy", "cut", "contextmenu", "dragstart", "selectstart"] as const) {
       container.addEventListener(eventName, (event) => {
         if (!container.classList.contains("paid-content-protected")) return;
+        if (isEditableEventTarget(event.target)) return;
         event.preventDefault();
       });
     }
     document.addEventListener("keydown", (event) => {
       if (!container.classList.contains("paid-content-protected")) return;
+      if (isEditableEventTarget(event.target)) return;
       if (shouldBlockPaidShortcut(event.key, event.ctrlKey, event.metaKey)) {
         event.preventDefault();
       }
     });
   }
+}
+
+function isEditableEventTarget(target: EventTarget | null): boolean {
+  return target instanceof Element && Boolean(target.closest('input, textarea, [contenteditable="true"]'));
 }
 
 export function shouldBlockPaidShortcut(key: string, ctrlKey: boolean, metaKey: boolean): boolean {
@@ -230,9 +236,19 @@ function loadTurnstile(): Promise<TurnstileApi> {
     script.defer = true;
     script.onload = () => {
       const loaded = (window as Window & { turnstile?: TurnstileApi }).turnstile;
-      return loaded ? resolve(loaded) : reject(new Error("人机验证加载失败"));
+      if (loaded) {
+        resolve(loaded);
+      } else {
+        script.remove();
+        turnstileLoader = null;
+        reject(new Error("人机验证加载失败"));
+      }
     };
-    script.onerror = () => reject(new Error("人机验证加载失败"));
+    script.onerror = () => {
+      script.remove();
+      turnstileLoader = null;
+      reject(new Error("人机验证加载失败"));
+    };
     document.head.append(script);
   });
   return turnstileLoader;

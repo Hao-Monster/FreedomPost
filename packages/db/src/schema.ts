@@ -1,5 +1,6 @@
 import {
   bigint,
+  bigserial,
   boolean,
   check,
   date,
@@ -175,9 +176,12 @@ export const affiliateOrders = pgTable(
     productTitle: text("product_title").notNull(),
     priceCents: integer("price_cents").notNull(),
     commissionCents: integer("commission_cents").notNull(),
+    baseCommissionCents: integer("base_commission_cents").notNull().default(0),
+    markupCommissionCents: integer("markup_commission_cents").notNull().default(0),
     currency: varchar("currency", { length: 8 }).notNull().default("CNY"),
     orderStatus: varchar("order_status", { length: 16 }).notNull().default("pending"),
     commissionStatus: varchar("commission_status", { length: 16 }).notNull().default("not_due"),
+    notes: text("notes").notNull().default(""),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
     completedAt: timestamp("completed_at", { withTimezone: true }),
@@ -187,6 +191,41 @@ export const affiliateOrders = pgTable(
     affiliateIdx: index("idx_affiliate_orders_affiliate").on(table.affiliateId, table.createdAt),
     statusIdx: index("idx_affiliate_orders_status").on(table.orderStatus, table.commissionStatus)
   })
+);
+
+export const affiliateOrderRequests = pgTable(
+  "affiliate_order_requests",
+  {
+    ownerHash: varchar("owner_hash", { length: 64 }).notNull(),
+    requestKey: uuid("request_key").notNull(),
+    inputHash: varchar("input_hash", { length: 64 }).notNull(),
+    orderId: uuid("order_id")
+      .notNull()
+      .unique()
+      .references(() => affiliateOrders.id, { onDelete: "restrict" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow()
+  },
+  (table) => ({
+    primaryKey: primaryKey({ columns: [table.ownerHash, table.requestKey] })
+  })
+);
+
+export const affiliateOrderSupportDeliveries = pgTable(
+  "affiliate_order_support_deliveries",
+  {
+    orderId: uuid("order_id")
+      .primaryKey()
+      .references(() => affiliateOrders.id, { onDelete: "restrict" }),
+    status: varchar("status", { length: 24 }).notNull().default("awaiting_session"),
+    bindingId: varchar("binding_id", { length: 256 }),
+    messageId: bigint("message_id", { mode: "number" }),
+    conversationId: bigint("conversation_id", { mode: "number" }),
+    attempts: integer("attempts").notNull().default(0),
+    errorCode: varchar("error_code", { length: 64 }).notNull().default(""),
+    leaseUntil: timestamp("lease_until", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow()
+  }
 );
 
 export const postArtifacts = pgTable(
@@ -254,6 +293,9 @@ export const attachments = pgTable(
     width: integer("width"),
     height: integer("height"),
     sha256: varchar("sha256", { length: 128 }),
+    claimTokenHash: varchar("claim_token_hash", { length: 64 }),
+    pendingUntil: timestamp("pending_until", { withTimezone: true }),
+    sourceHost: text("source_host"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow()
   },
   (table) => ({
@@ -305,6 +347,92 @@ export const adminSessions = pgTable("admin_sessions", {
   lastUsedAt: timestamp("last_used_at", { withTimezone: true }).notNull().defaultNow(),
   revokedAt: timestamp("revoked_at", { withTimezone: true })
 });
+
+export const readerAccounts = pgTable("reader_accounts", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  loginName: text("login_name").notNull(),
+  normalizedLogin: text("normalized_login").notNull().unique(),
+  passwordHash: text("password_hash").notNull(),
+  credentialVersion: integer("credential_version").notNull().default(1),
+  status: varchar("status", { length: 16 }).notNull().default("active"),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow()
+});
+
+export const readerSessions = pgTable("reader_sessions", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  accountId: uuid("account_id")
+    .notNull()
+    .references(() => readerAccounts.id, { onDelete: "cascade" }),
+  tokenHash: varchar("token_hash", { length: 64 }).notNull().unique(),
+  credentialVersion: integer("credential_version").notNull(),
+  userAgentHash: varchar("user_agent_hash", { length: 64 }),
+  ipHash: varchar("ip_hash", { length: 64 }),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  lastSeenAt: timestamp("last_seen_at", { withTimezone: true }).notNull().defaultNow(),
+  revokedAt: timestamp("revoked_at", { withTimezone: true })
+});
+
+export const articleOrders = pgTable(
+  "article_orders",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    orderCode: varchar("order_code", { length: 24 }).notNull().unique(),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => readerAccounts.id, { onDelete: "restrict" }),
+    postId: uuid("post_id")
+      .notNull()
+      .references(() => posts.id, { onDelete: "restrict" }),
+    postTitle: text("post_title").notNull(),
+    priceCents: integer("price_cents").notNull(),
+    currency: varchar("currency", { length: 8 }).notNull().default("CNY"),
+    status: varchar("status", { length: 16 }).notNull().default("pending"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+    completedAt: timestamp("completed_at", { withTimezone: true }),
+    completedBy: text("completed_by")
+  },
+  (table) => ({
+    accountCreatedIdx: index("idx_article_orders_account_created").on(table.accountId, table.createdAt),
+    statusCreatedIdx: index("idx_article_orders_status_created").on(table.status, table.createdAt)
+  })
+);
+
+export const articleEntitlements = pgTable(
+  "article_entitlements",
+  {
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => readerAccounts.id, { onDelete: "cascade" }),
+    postId: uuid("post_id")
+      .notNull()
+      .references(() => posts.id, { onDelete: "cascade" }),
+    sourceOrderId: uuid("source_order_id").references(() => articleOrders.id, { onDelete: "set null" }),
+    grantedAt: timestamp("granted_at", { withTimezone: true }).notNull().defaultNow(),
+    grantedBy: text("granted_by").notNull()
+  },
+  (table) => ({
+    primaryKey: primaryKey({ columns: [table.accountId, table.postId] })
+  })
+);
+
+export const articleAccessAuditLog = pgTable(
+  "article_access_audit_log",
+  {
+    id: bigserial("id", { mode: "number" }).primaryKey(),
+    actorType: varchar("actor_type", { length: 16 }).notNull(),
+    actorId: text("actor_id"),
+    action: varchar("action", { length: 64 }).notNull(),
+    targetType: varchar("target_type", { length: 32 }).notNull(),
+    targetId: text("target_id").notNull(),
+    metadata: jsonb("metadata").notNull().default({}),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow()
+  },
+  (table) => ({
+    targetIdx: index("idx_article_access_audit_target").on(table.targetType, table.targetId, table.createdAt)
+  })
+);
 
 export const commentRateLimits = pgTable(
   "comment_rate_limits",

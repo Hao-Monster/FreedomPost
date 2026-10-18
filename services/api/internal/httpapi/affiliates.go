@@ -54,7 +54,6 @@ func (s *Server) affiliateAccess(w http.ResponseWriter, r *http.Request) {
 	created := false
 	generatedPassword := ""
 	if affiliate == nil {
-		created = true
 		generatedPassword, err = generateAffiliatePassword()
 		if err != nil {
 			s.internalError(w, r, err)
@@ -67,10 +66,19 @@ func (s *Server) affiliateAccess(w http.ResponseWriter, r *http.Request) {
 		}
 		affiliate, err = s.repo.CreateAffiliate(ctx, input.WechatID, hash)
 		if err != nil {
-			s.internalError(w, r, err)
-			return
+			existing, lookupErr := s.repo.GetAffiliateByWechatID(ctx, input.WechatID)
+			if lookupErr == nil && existing != nil {
+				affiliate = existing
+				generatedPassword = ""
+			} else {
+				s.internalError(w, r, err)
+				return
+			}
+		} else {
+			created = true
 		}
-	} else {
+	}
+	if !created {
 		if affiliate.Status != domain.AffiliateStatusActive {
 			writeError(w, http.StatusForbidden, "AFFILIATE_DISABLED", "该推广账号已停用")
 			return
@@ -244,6 +252,10 @@ func (s *Server) affiliateRecordClick(w http.ResponseWriter, r *http.Request) {
 func (s *Server) createOrder(w http.ResponseWriter, r *http.Request) {
 	if _, present := r.Header["Idempotency-Key"]; present || r.Header.Get("X-Order-CSRF") != "" {
 		s.createOwnedOrder(w, r)
+		return
+	}
+	if r.Header.Get("Sec-Fetch-Site") == "cross-site" || (r.Header.Get("Origin") != "" && !s.orderOriginAllowed(r)) {
+		writeError(w, http.StatusForbidden, "ORIGIN_FORBIDDEN", "请求来源不被允许")
 		return
 	}
 	ip := s.remoteIP(r)

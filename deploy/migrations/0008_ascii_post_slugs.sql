@@ -1,3 +1,5 @@
+BEGIN;
+
 CREATE TABLE IF NOT EXISTS post_slug_aliases (
   slug VARCHAR(32) PRIMARY KEY,
   post_id UUID NOT NULL REFERENCES posts(id) ON DELETE CASCADE,
@@ -14,8 +16,6 @@ ON CONFLICT (slug) DO UPDATE SET post_id = EXCLUDED.post_id;
 
 UPDATE posts
 SET slug = 'tmp-' || substring(replace(id::text, '-', '') FROM 1 FOR 28);
-
-BEGIN;
 
 CREATE TEMP TABLE migration_0008_post_slugs (
   id UUID PRIMARY KEY,

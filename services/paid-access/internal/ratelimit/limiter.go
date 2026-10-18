@@ -41,8 +41,9 @@ func (limiter *Redis) Ping(ctx context.Context) error { return limiter.client.Pi
 func (limiter *Redis) Close() error                   { return limiter.client.Close() }
 
 type memoryBucket struct {
-	started time.Time
-	count   int
+	started   time.Time
+	expiresAt time.Time
+	count     int
 }
 
 type Memory struct {
@@ -58,14 +59,14 @@ func (limiter *Memory) Allow(_ context.Context, key string, limit int, window ti
 	defer limiter.mu.Unlock()
 	now := limiter.now()
 	bucket := limiter.buckets[key]
-	if bucket.started.IsZero() || now.Sub(bucket.started) >= window {
-		bucket = memoryBucket{started: now}
+	if bucket.expiresAt.IsZero() || !now.Before(bucket.expiresAt) {
+		bucket = memoryBucket{started: now, expiresAt: now.Add(window)}
 	}
 	bucket.count++
 	limiter.buckets[key] = bucket
 	if len(limiter.buckets) > 10_000 {
 		for item, value := range limiter.buckets {
-			if now.Sub(value.started) >= window {
+			if !now.Before(value.expiresAt) {
 				delete(limiter.buckets, item)
 			}
 		}

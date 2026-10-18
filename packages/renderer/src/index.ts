@@ -168,7 +168,14 @@ export function renderAttachmentCards(html: string): string {
   return html.replace(
     /<p><a href="([^"]+)"(?:\s+target="[^"]*")?(?:\s+rel="[^"]*")?>(?:附件:|附件：)\s*([^<]+)<\/a><\/p>/g,
     (_match, href: string, filename: string) =>
-      `<div class="attachment-card"><span>${escapeHtml(filename)}</span><a href="${href}" target="_blank" rel="noreferrer noopener" download>下载 / 查看</a></div>`
+      `<div class="attachment-card"><span>${escapeHtml(
+        filename
+          .replace(/&quot;/g, '"')
+          .replace(/&#0?39;/g, "'")
+          .replace(/&lt;/g, "<")
+          .replace(/&gt;/g, ">")
+          .replace(/&amp;/g, "&")
+      )}</span><a href="${href}" target="_blank" rel="noreferrer noopener" download>下载 / 查看</a></div>`
   );
 }
 

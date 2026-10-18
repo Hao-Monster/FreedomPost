@@ -41,7 +41,10 @@ func hmacHex(key, data []byte) string {
 
 // hmacEqual compares two hex HMAC strings in constant time.
 func hmacEqual(a, b string) bool {
-	ab, _ := hex.DecodeString(a)
-	bb, _ := hex.DecodeString(b)
+	ab, errA := hex.DecodeString(a)
+	bb, errB := hex.DecodeString(b)
+	if errA != nil || errB != nil || len(ab) == 0 {
+		return false
+	}
 	return hmac.Equal(ab, bb)
 }

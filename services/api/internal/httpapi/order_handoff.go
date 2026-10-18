@@ -81,12 +81,22 @@ func (s *Server) orderCSRF(cookie string) string {
 }
 
 func (s *Server) orderOriginAllowed(r *http.Request) bool {
+	if r.Header.Get("Sec-Fetch-Site") == "cross-site" {
+		return false
+	}
 	origin := r.Header.Get("Origin")
 	if origin == "" {
 		return false
 	}
 	u, err := url.Parse(origin)
-	return err == nil && u.User == nil && u.Path == "" && u.RawQuery == "" && u.Fragment == "" && u.Host == r.Host && s.cfg.AllowedOrigins()[origin]
+	if err != nil || u.User != nil || u.Path != "" || u.RawQuery != "" || u.Fragment != "" || u.Host == "" {
+		return false
+	}
+	allowed := s.cfg.AllowedOrigins()
+	if len(allowed) > 0 {
+		return allowed[origin]
+	}
+	return u.Host == r.Host && (u.Scheme == "https" || (!s.cfg.CookieSecure && u.Scheme == "http"))
 }
 
 func (s *Server) requireOrderOwner(w http.ResponseWriter, r *http.Request, write bool) string {

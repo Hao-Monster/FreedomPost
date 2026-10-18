@@ -168,6 +168,7 @@ func newSafeHTTPClient(timeout time.Duration, resolver Resolver) *http.Client {
 		TLSHandshakeTimeout:   timeout,
 		ResponseHeaderTimeout: timeout,
 		IdleConnTimeout:       30 * time.Second,
+		DisableKeepAlives:     true,
 	}
 	return &http.Client{
 		Transport: transport,
@@ -176,8 +177,12 @@ func newSafeHTTPClient(timeout time.Duration, resolver Resolver) *http.Client {
 			if len(via) > maxRedirects {
 				return &Failure{Code: "TOO_MANY_REDIRECTS", Message: "图片来源重定向次数过多", Resolution: "请上传本地图片，或使用不需要多次跳转的 HTTPS 图片链接"}
 			}
-			_, err := parsePublicHTTPSURL(request.Context(), resolver, request.URL.String())
-			return err
+			parsed, err := parsePublicHTTPSURL(request.Context(), resolver, request.URL.String())
+			if err != nil {
+				return err
+			}
+			request.URL = parsed
+			return nil
 		},
 	}
 }
@@ -267,8 +272,8 @@ func Filename(name, mimeType string) string {
 	if name == "" {
 		name = "imported-image"
 	}
-	if len(name) > 128 {
-		name = name[:128]
+	if runes := []rune(name); len(runes) > 128 {
+		name = string(runes[:128])
 	}
 	if strings.ContainsAny(name, `/\\`) {
 		name = "imported-image"

@@ -315,6 +315,9 @@ func Load() (*Config, error) {
 		if cfg.R2SecretAccessKey == "" {
 			errs = append(errs, "R2_SECRET_ACCESS_KEY is required when STORAGE_DRIVER=r2")
 		}
+		if cfg.R2PublicBaseURL == "" {
+			errs = append(errs, "R2_PUBLIC_BASE_URL is required when STORAGE_DRIVER=r2")
+		}
 	}
 	if len(cfg.PaidAccessInternalSecret) < 32 {
 		errs = append(errs, "PAID_ACCESS_INTERNAL_SECRET must contain at least 32 characters")
