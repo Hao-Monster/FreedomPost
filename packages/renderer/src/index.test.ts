@@ -145,6 +145,20 @@ describe("renderMarkdownArticle", () => {
     expect(result.html).not.toContain("bad-class");
     expect(result.html).not.toContain("<img>");
   });
+
+  it("extracts plain text from headings with links, emphasis, and inline code for TOC and anchor IDs", () => {
+    const result = renderMarkdownArticle({
+      slug: "heading-inline",
+      title: "Heading Inline",
+      markdown: "## Hello [World](https://example.com) and `code` **bold**",
+      createdAt: "2026-07-02T00:00:00.000Z",
+      updatedAt: "2026-07-02T00:00:00.000Z"
+    });
+
+    expect(result.toc[0]?.text).toBe("Hello World and code bold");
+    expect(result.toc[0]?.id).toBe("hello-world-and-code-bold");
+    expect(result.html).toContain('<h2 id="hello-world-and-code-bold">');
+  });
 });
 
 describe("YouTube link parsing", () => {

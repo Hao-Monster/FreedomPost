@@ -84,7 +84,14 @@ export function createMarkdownRenderer(toc: TocItem[], usedIds: Map<string, numb
     if (!token) return "";
     const next = tokens[idx + 1];
     const level = Number(token.tag.slice(1)) as TocItem["level"];
-    const text = next?.content ?? "";
+    const text =
+      next?.children
+        ?.filter((child) => child.type === "text" || child.type === "code_inline")
+        .map((child) => child.content)
+        .join("")
+        .trim() ||
+      next?.content ||
+      "";
     const id = uniqueSlug(slugify(text), usedIds);
     token.attrSet("id", id);
     toc.push({ id, text, level });

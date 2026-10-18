@@ -170,17 +170,17 @@ func (s *Server) benefitClaim(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 7. Network daily limit check
-	sinceStr := time.Now().UTC().Add(-24 * time.Hour).Format(time.RFC3339)
-	recentCount, _ := s.repo.CountBenefitClaimsByNetworkSince(r.Context(), webmasterCampaignID, networkKeyHash, sinceStr)
-	if recentCount >= b.NetworkDailyLimit {
-		writeError(w, http.StatusTooManyRequests, "NETWORK_DAILY_LIMIT", "今日该网络已达领取上限")
-		return
-	}
-
-	// 8. Create claim if not exists
+	// 7. Create claim if not exists (apply daily network limit only to new claims
+	// so retrying an existing pending/failed claim is not blocked by its own row).
 	isNew := false
 	if claim == nil {
+		sinceStr := time.Now().UTC().Add(-24 * time.Hour).Format(time.RFC3339)
+		recentCount, _ := s.repo.CountBenefitClaimsByNetworkSince(r.Context(), webmasterCampaignID, networkKeyHash, sinceStr)
+		if recentCount >= b.NetworkDailyLimit {
+			writeError(w, http.StatusTooManyRequests, "NETWORK_DAILY_LIMIT", "今日该网络已达领取上限")
+			return
+		}
+
 		created, createErr := s.repo.CreateBenefitClaim(r.Context(), domain.CreateBenefitClaimInput{
 			CampaignID:      webmasterCampaignID,
 			ExternalClaimID: newBenefitClaimID(),

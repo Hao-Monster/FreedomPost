@@ -97,17 +97,30 @@ func (rw *responseWriter) WriteHeader(status int) {
 
 func realIP(r *http.Request, trustProxy bool) string {
 	if trustProxy {
+		for _, header := range []string{"CF-Connecting-IP", "X-Real-IP"} {
+			if raw := strings.TrimSpace(r.Header.Get(header)); raw != "" {
+				if parsed := net.ParseIP(raw); parsed != nil {
+					return parsed.String()
+				}
+			}
+		}
 		if fwd := r.Header.Get("X-Forwarded-For"); fwd != "" {
 			parts := splitAndTrim(fwd, ",")
-			if len(parts) > 0 {
-				if parsed := net.ParseIP(parts[0]); parsed != nil {
+			for i := len(parts) - 1; i >= 0; i-- {
+				if parsed := net.ParseIP(parts[i]); parsed != nil {
 					return parsed.String()
 				}
 			}
 		}
 	}
 	if host, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
+		if parsed := net.ParseIP(host); parsed != nil {
+			return parsed.String()
+		}
 		return host
+	}
+	if parsed := net.ParseIP(strings.Trim(r.RemoteAddr, "[]")); parsed != nil {
+		return parsed.String()
 	}
 	return strings.Trim(r.RemoteAddr, "[]")
 }

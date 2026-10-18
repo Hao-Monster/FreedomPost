@@ -25,7 +25,7 @@ const (
 	deliveryTTL                 = 24 * time.Hour
 )
 
-var conversationReference = regexp.MustCompile(`(?s)^\s*FP-CW:(\d+)\s+(.+?)\s*$`)
+var conversationReference = regexp.MustCompile(`(?is)^\s*FP-CW:(\d+)\s+(.+?)\s*$`)
 
 // WebhookEvent is the minimal, untrusted Chatwoot event shape consumed by the
 // bridge. Unknown fields are ignored so Chatwoot can add fields compatibly.
@@ -249,6 +249,9 @@ func (s *Service) HandleWeComMessage(ctx context.Context, message wecom.Message)
 			s.releaseClaim(ctx, deliveryKey)
 		}
 		return err
+	}
+	if s.mappings != nil {
+		_ = s.mappings.Put(ctx, fmt.Sprintf("wecom:%s:%d", s.operatorUserID, conversationID), conversationID, mappingTTL)
 	}
 	return nil
 }

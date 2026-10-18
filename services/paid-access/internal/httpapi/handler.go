@@ -313,6 +313,10 @@ func (api *API) createOrder(response http.ResponseWriter, request *http.Request)
 		writeError(response, http.StatusConflict, "ALREADY_PURCHASED", "已拥有该文章阅读权限")
 		return
 	}
+	if errors.Is(err, domain.ErrInvalidState) {
+		writeError(response, http.StatusConflict, "ARTICLE_NOT_PAID", "该文章无需购买")
+		return
+	}
 	if err != nil {
 		api.internalError(response, request, err)
 		return
@@ -537,15 +541,35 @@ func (api *API) allowKey(request *http.Request, key string, limit int, window ti
 
 func (api *API) remoteIP(request *http.Request) string {
 	if api.config.TrustProxy {
-		if forwarded := strings.TrimSpace(strings.Split(request.Header.Get("X-Forwarded-For"), ",")[0]); net.ParseIP(forwarded) != nil {
-			return forwarded
+		for _, header := range []string{"CF-Connecting-IP", "X-Real-IP"} {
+			if raw := strings.TrimSpace(request.Header.Get(header)); raw != "" {
+				if parsed := net.ParseIP(raw); parsed != nil {
+					return parsed.String()
+				}
+			}
+		}
+		if fwd := request.Header.Get("X-Forwarded-For"); fwd != "" {
+			parts := strings.Split(fwd, ",")
+			for i := len(parts) - 1; i >= 0; i-- {
+				if candidate := strings.TrimSpace(parts[i]); candidate != "" {
+					if parsed := net.ParseIP(candidate); parsed != nil {
+						return parsed.String()
+					}
+				}
+			}
 		}
 	}
 	host, _, err := net.SplitHostPort(request.RemoteAddr)
 	if err == nil {
+		if parsed := net.ParseIP(host); parsed != nil {
+			return parsed.String()
+		}
 		return host
 	}
-	return request.RemoteAddr
+	if parsed := net.ParseIP(strings.Trim(request.RemoteAddr, "[]")); parsed != nil {
+		return parsed.String()
+	}
+	return strings.Trim(request.RemoteAddr, "[]")
 }
 
 func (api *API) writeTurnstileError(response http.ResponseWriter, err error) {

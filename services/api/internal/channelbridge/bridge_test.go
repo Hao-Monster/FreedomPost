@@ -129,6 +129,12 @@ func TestBridgeRoutesBothDirectionsWithConversationReference(t *testing.T) {
 	if sentToChatwoot != "第一行\n第二行" {
 		t.Fatalf("multiline sentToChatwoot = %q", sentToChatwoot)
 	}
+	if err := service.HandleWeComMessage(context.Background(), wecom.Message{FromUserName: "operator", MsgType: "text", MsgID: "m1-lowercase", Content: "fp-cw:42 小写前缀回复"}); err != nil {
+		t.Fatal(err)
+	}
+	if sentToChatwoot != "小写前缀回复" {
+		t.Fatalf("lowercase sentToChatwoot = %q", sentToChatwoot)
+	}
 	if err := service.HandleWeComMessage(context.Background(), wecom.Message{FromUserName: "operator", MsgType: "text", MsgID: "m1-malformed", Content: "FP-CW:101"}); err == nil {
 		t.Fatal("malformed FP-CW prefix should not fall back to unprefixed active conversation")
 	}

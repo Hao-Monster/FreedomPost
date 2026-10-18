@@ -111,8 +111,8 @@ class BenefitPageController {
       if (!this.campaign.turnstileSiteKey) {
         throw new BenefitApiError(503, "BENEFIT_UNAVAILABLE");
       }
-      await this.prepareTurnstile();
       this.renderState("idle", "完成人机验证后即可领取");
+      await this.prepareTurnstile();
     } catch (error) {
       if (!this.destroyed) this.renderError(error);
     }
@@ -271,11 +271,21 @@ class BenefitPageController {
       await this.start();
       return;
     }
-    this.renderState("idle", "请重新完成人机验证");
     try {
+      const restored = await this.client.restoreClaim(this.requestController.signal);
+      if (!this.isActive()) return;
+      if (restored?.status === "ready") {
+        await this.renderReady(restored);
+        return;
+      }
+      if (restored?.status === "provisioning") {
+        this.beginProvisioning(restored);
+        return;
+      }
+      this.renderState("idle", "请重新完成人机验证");
       await this.prepareTurnstile();
     } catch (error) {
-      this.renderError(error);
+      if (!this.destroyed) this.renderError(error);
     }
   }
 

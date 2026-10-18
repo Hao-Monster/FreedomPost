@@ -101,7 +101,11 @@ func (store *Postgres) FindArticle(ctx context.Context, slug string) (domain.Art
 	err := store.pool.QueryRow(ctx, `
 		SELECT id, slug, title, COALESCE(excerpt, ''), content_html, visibility, price_cents, currency,
 		       created_at, updated_at, view_count, comment_count, attachment_count
-		FROM posts WHERE slug = $1`, slug,
+		FROM posts
+		WHERE slug = $1
+		   OR id = (SELECT post_id FROM post_slug_aliases WHERE slug = $1)
+		ORDER BY (slug = $1) DESC
+		LIMIT 1`, slug,
 	).Scan(&article.ID, &article.Slug, &article.Title, &article.Excerpt, &article.ContentHTML, &article.Visibility,
 		&article.PriceCents, &article.Currency, &article.CreatedAt, &article.UpdatedAt, &article.ViewCount, &article.CommentCount, &article.AttachmentCount)
 	return article, mapError(err)

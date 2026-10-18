@@ -274,7 +274,7 @@ func (p *Postgres) UpdatePost(ctx context.Context, input domain.UpdatePostInput)
 		); err != nil {
 			return nil, fmt.Errorf("record post slug alias: %w", err)
 		}
-		_, _ = tx.Exec(ctx, `DELETE FROM post_slug_aliases WHERE slug = $1 AND post_id = $2`, newSlug, input.ID)
+		_, _ = tx.Exec(ctx, `DELETE FROM post_slug_aliases WHERE slug = $1`, newSlug)
 	}
 	for _, attachmentID := range claimedIDs {
 		result, err := tx.Exec(ctx, `
@@ -825,7 +825,7 @@ func (p *Postgres) CreateTool(ctx context.Context, input domain.ToolInput) (*dom
 		 RETURNING id, slug, title, summary, description, category, url, COALESCE(cover_url, '') AS cover_url,
 		           status, sort_order, created_at, updated_at`,
 		id, slug, coalesce(input.Title, "未命名工具"), input.Summary, input.Description,
-		coalesce(input.Category, "other"), coalesce(input.LinkURL, "#"), input.IconURL,
+		coalesce(input.Category, "other"), coalesce(input.URL, input.LinkURL), nullStr(coalesce(input.CoverURL, input.IconURL)),
 		coalesce(input.Status, "draft"), input.SortOrder, now, now,
 	)
 	return scanTool(row)
@@ -840,7 +840,7 @@ func (p *Postgres) UpdateTool(ctx context.Context, id string, input domain.ToolI
 		 RETURNING id, slug, title, summary, description, category, url, COALESCE(cover_url, '') AS cover_url,
 		           status, sort_order, created_at, updated_at`,
 		id, coalesce(input.Title, "未命名工具"), input.Summary, input.Description,
-		coalesce(input.Category, "other"), coalesce(input.LinkURL, "#"), input.IconURL,
+		coalesce(input.Category, "other"), coalesce(input.URL, input.LinkURL), nullStr(coalesce(input.CoverURL, input.IconURL)),
 		coalesce(input.Status, "draft"), input.SortOrder, time.Now(),
 	)
 	return scanTool(row)
@@ -1245,11 +1245,19 @@ func (p *Postgres) UpdateAffiliateOrderStatus(ctx context.Context, id, orderStat
 					WHEN u.prev_status = 'completed' AND u.order_status <> 'completed' THEN -1
 					ELSE 0
 				END),
+				stock = CASE
+					WHEN p.stock < 0 THEN p.stock
+					WHEN u.prev_status <> 'canceled' AND u.order_status = 'canceled' THEN p.stock + 1
+					WHEN u.prev_status = 'canceled' AND u.order_status <> 'canceled' THEN GREATEST(0, p.stock - 1)
+					ELSE p.stock
+				END,
 				updated_at = NOW()
 			FROM updated u
 			WHERE p.id = u.product_id
 			  AND ((u.prev_status <> 'completed' AND u.order_status = 'completed')
-			    OR (u.prev_status = 'completed' AND u.order_status <> 'completed'))
+			    OR (u.prev_status = 'completed' AND u.order_status <> 'completed')
+			    OR (u.prev_status <> 'canceled' AND u.order_status = 'canceled')
+			    OR (u.prev_status = 'canceled' AND u.order_status <> 'canceled'))
 		)
 		SELECT u.id, u.order_code, u.affiliate_id, COALESCE(a.wechat_id, ''),
 		       COALESCE(u.product_id::text, ''), u.product_title,
@@ -1528,7 +1536,10 @@ func (p *Postgres) uniqueProductSlug(ctx context.Context, title string) (string,
 		if i > 0 {
 			slug = fmt.Sprintf("%s-%d", base, i+1)
 		}
-		prod, _ := p.GetProductBySlug(ctx, slug)
+		prod, err := p.GetProductBySlug(ctx, slug)
+		if err != nil {
+			return "", err
+		}
 		if prod == nil {
 			return slug, nil
 		}

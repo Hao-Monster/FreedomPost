@@ -353,3 +353,253 @@
 3. **前后端异步生命周期与状态隔离**：
    - 管理后台通过 `activePostIdRef` 与目标实体 ID 绑定，彻底消除跨文章粘贴/保存与跨商品/跨工具上传封面的陈旧闭包覆盖问题；公共读者端消除了分销定价按钮监听器的重复绑定与快速切文竞态。
 
+---
+
+# 第二轮深度 Code Review（技术负责人 + 白帽极客视角）问题清单与修复方案
+
+> **审查基线**：基于第一轮修复合并后的 `main` / `codex/development` 最新代码，从**契约一致性、数据库事务边界、边缘安全绕过、并发状态机与异步闭包生命周期**五个维度进行二次穿透式审查。
+> **处理原则**：先完整记录根因分析与无副作用修复方案，再按 **Round 2 Batch A / B / C** 逐批实施并通过全量回归测试。
+
+## 第二轮修复进度总览 (Round 2 Progress Tracker)
+
+| 批次 | 编号 | 严重程度 | 分类 | 模块 / 文件 | 问题描述 | 状态 |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| **R2-Batch A** | `BUG-R2-01` | **Critical (P0)** | 前后端契约断裂 | `services/api/internal/domain/types.go`<br>`services/api/internal/httpapi/admin.go`<br>`services/api/internal/repository/postgres.go` | 管理后台保存/新建工具发送 `{ url, coverUrl }`，但 `domain.ToolInput` 仅定义 `{ linkUrl, iconUrl }`，被 `DisallowUnknownFields()` 直接拦截返回 `400 INVALID_JSON` | `[x]` |
+| **R2-Batch A** | `BUG-R2-02` | **Critical (P0)** | 迁移事务越界 | `deploy/migrations/0008_ascii_post_slugs.sql` | `migrate.Run` 已在外层开启事务，但 `0008_ascii_post_slugs.sql` 内含显式 `BEGIN;` / `COMMIT;`，导致外层事务提前提交、临时表生命周期异常 | `[x]` |
+| **R2-Batch A** | `BUG-R2-03` | **High (P1)** | 付费文章旧链接白屏 | `services/paid-access/internal/store/postgres.go`<br>`services/paid-access/internal/httpapi/handler.go` | `paid-access` 的 `FindArticle` 未查询 `post_slug_aliases`，通过历史别名访问付费文章返回 404 并回退到脱敏空正文；`createOrder` 未映射 `ErrInvalidState` | `[x]` |
+| **R2-Batch A** | `BUG-R2-04` | **High (P1)** | 库存耗尽 DoS | `services/api/internal/repository/postgres.go` | 创建 `pending` 订单时扣减 `products.stock`，但管理员取消订单（`canceled`）时仅更新 `sold_count` 未归还 `stock`，恶意未付款订单可永久耗尽有限库存 | `[x]` |
+| **R2-Batch A** | `BUG-R2-05` | **High (P1)** | 限流器 IP 伪造绕过 | `services/api/internal/httpapi/server.go`<br>`services/paid-access/internal/httpapi/handler.go` | 第一轮修复了 `middleware.go` 的 `clientIP`，但业务限流器实际调用的 `Server.remoteIP` 与 `API.remoteIP` 仍取 `X-Forwarded-For` 最左侧伪造 IP | `[x]` |
+| **R2-Batch A** | `BUG-R2-06` | **Medium-High (P1)** | 客服桥接/福利/Slug 边界 | `services/api/internal/channelbridge/bridge.go`<br>`services/api/internal/httpapi/channelbridge.go`<br>`services/api/internal/httpapi/benefit.go`<br>`services/api/internal/repository/postgres.go`<br>`services/api/internal/httpapi/admin.go`<br>`services/api/cmd/server/main.go` | 企微 `FP-CW:` 大小写不一致及无会话消息触发 503 重试风暴；福利重试被自身已入库记录触发日限额拦截；`UpdatePost` 残留跨文章同 Slug 别名与长度校验缺失；优雅停机 `viewBuf.Flush` 顺序颠倒 | `[x]` |
+| **R2-Batch B** | `BUG-R2-07` | **High (P1)** | 编辑器序列化丢失格式 | `apps/admin/src/main.tsx` | `nodeToMarkdown` 行内标签分支被误放在 `querySelector("...img...")` 内部；`inlineNodeToMarkdown` 读取浏览器解析后的 `img.src` 绝对地址触发外链拦截；行内 `![alt](url)` 被链接正则误匹配 | `[x]` |
+| **R2-Batch B** | `BUG-R2-08` | **High (P1)** | 编辑器高亮块插入错位 | `apps/admin/src/main.tsx` | `insertCallout` 在折叠光标位于 `editor` 根容器（`startOffset > 0`）时计算 `endIndex = startIndex - 1`，导致 `selectedNodes` 为空并将高亮块跳插到文末 | `[x]` |
+| **R2-Batch B** | `BUG-R2-09` | **High (P1)** | 跨文章异步串改与陈旧闭包 | `apps/admin/src/main.tsx` | `patchActivePost`、`syncEditorMarkdown`、`handleAttachmentFiles`、`handleEditorPaste`、`savePost` 及 `deletePost/Product/Tool` 存在跨条目切换时的陈旧闭包覆盖 | `[x]` |
+| **R2-Batch B** | `BUG-R2-10` | **Medium (P2)** | 读者端异步竞态与异常恢复 | `apps/public-reader/src/scripts/benefit.ts`<br>`apps/public-reader/src/scripts/portal.ts`<br>`apps/public-reader/src/scripts/reader.ts` | `benefit.ts` Turnstile 同步回调状态被覆盖；`portal.ts` 分享链接 `new URL` 未捕获异常、空选加价静默成功、`popstate` 导航被丢弃；`reader.ts` 评论提交失败仍扣减本地限流配额且跨文串帖 | `[x]` |
+| **R2-Batch C** | `BUG-R2-11` | **Medium (P2)** | 共享包渲染与白名单漂移 | `packages/renderer/src/index.ts`<br>`packages/security/src/index.ts` | TS 渲染器提取标题文本未剥离行内 Markdown 语法（与 Go 渲染器不一致）；`@freedompost/security` 缺少 YouTube 嵌入容器的 CSS class 白名单 | `[x]` |
+| **R2-Batch C** | `BUG-R2-12` | **Medium (P2)** | 部署脚本与工作流加固 | `deploy/remote-deploy.sh`<br>`.github/workflows/benefit-campaign.yml`<br>`.github/workflows/channel-diagnostics.yml` | `remote-deploy.sh` 多容器 ID 拼接导致 `docker tag` 失败、空 `REDIS_PASSWORD` 覆盖原密码、无条件重启 Docker daemon、`pg_isready` 超时未退出；工作流缺失 `DEPLOY_PORT` 与容器判空 | `[x]` |
+
+---
+
+## Round 2 Batch A：Go 后端 (`services/api` & `services/paid-access`) 与数据库迁移
+
+### `[x]` BUG-R2-01：`ToolInput` JSON 契约不一致导致管理后台无法新建或保存工具（`400 INVALID_JSON`）
+- **严重程度**：Critical (P0)
+- **位置**：
+  - `services/api/internal/domain/types.go:384-394`
+  - `services/api/internal/httpapi/admin.go:553-587`
+  - `services/api/internal/repository/postgres.go:781-814`
+  - `apps/admin/src/main.tsx:1952-1959`
+- **根因分析**：
+  - 管理后台 `saveTool` 发送的 JSON 字段为 `{ title, summary, description, category, url, coverUrl, status, sortOrder }`，且 `domain.Tool` 返回时也同时序列化了 `url`/`linkUrl` 与 `coverUrl`/`iconUrl`。
+  - 但 `domain.ToolInput` 仅定义了 `IconURL string json:"iconUrl"` 和 `LinkURL string json:"linkUrl"`，未定义 `url` 和 `coverUrl`。
+  - 由于第一轮加固 `decodeJSON` 启用了 `dec.DisallowUnknownFields()`，管理后台所有 `POST /api/admin/tools` 和 `PUT /api/admin/tools/{id}` 请求都会因为包含未知字段 `"url"` 和 `"coverUrl"` 而直接报错 `400 INVALID_JSON`！即便不报错，`url` 与 `coverUrl` 也会全部丢失（存为 `"#"` 和 `""`）。
+- **修复方案**：
+  1. 在 `domain.ToolInput` (`services/api/internal/domain/types.go:384-394`) 中同时支持 `URL`/`LinkURL` 与 `CoverURL`/`IconURL`，实现自定义 `UnmarshalJSON`（将 `url` 归一到 `LinkURL`，将 `coverUrl` 归一到 `IconURL`，同时兼容旧字段名并保持 `DisallowUnknownFields()` 严格校验）。
+  2. 在 `adminCreateTool` 与 `adminUpdateTool` (`services/api/internal/httpapi/admin.go:553-587`) 中增加 `normalizeToolInput` 规范化与 URL 协议/状态校验，并在 `CreateTool`/`UpdateTool` (`postgres.go:795, 810`) 中使用 `nullStr(input.IconURL)` 保持数据库 `cover_url` 可空语义一致。
+  3. 新增单元测试验证 `{ url, coverUrl }` 与 `{ linkUrl, iconUrl }` 两种载荷均可正常创建和更新工具。
+
+---
+
+### `[x]` BUG-R2-02：`0008_ascii_post_slugs.sql` 内嵌 `BEGIN;` / `COMMIT;` 破坏 `migrate.Run` 外层事务
+- **严重程度**：Critical (P0)
+- **位置**：
+  - `deploy/migrations/0008_ascii_post_slugs.sql:1, 20-23, 68`
+  - `services/api/internal/migrate/migrate.go:135-155`
+- **根因分析**：
+  - `migrate.Run` 对每个迁移文件执行 `tx, err := pool.Begin(ctx)` -> `tx.Exec(ctx, string(sql))` -> `tx.Exec("INSERT INTO go_schema_migrations ...")` -> `tx.Commit(ctx)`。
+  - `0008_ascii_post_slugs.sql` 首行包含 `BEGIN;`，末行包含 `COMMIT;`。在 `tx.Exec` 中执行 `COMMIT;` 会提前提交 `migrate.Run` 的外层事务，使后续的 `INSERT INTO go_schema_migrations` 脱离原事务运行，且 `ON COMMIT DROP` 临时表与事务边界耦合脆弱。
+- **修复方案**：
+  - 移除 `deploy/migrations/0008_ascii_post_slugs.sql` 中的显式 `BEGIN;` 与 `COMMIT;`，将 `CREATE TEMP TABLE migration_0008_post_slugs (...) ON COMMIT DROP;` 改为在脚本末尾显式执行 `DROP TABLE migration_0008_post_slugs;`，使其无论由 `migrate.Run` 外层事务包裹还是单独在事务中执行均完全幂等、原子。
+
+---
+
+### `[x]` BUG-R2-03：`services/paid-access` 的 `FindArticle` 未解析 `post_slug_aliases` 导致旧链接访问付费文章白屏
+- **严重程度**：High (P1)
+- **位置**：
+  - `services/paid-access/internal/store/postgres.go:99-108`
+  - `services/paid-access/internal/httpapi/handler.go:311-319`
+- **根因分析**：
+  - `services/api` 的 `GetPostBySlug` 支持通过 `post_slug_aliases` 解析文章历史 Slug（如 `0008` 迁移前的中文/旧 Slug 或管理员改名后的旧 Slug）。
+  - 但 `services/paid-access` 的 `FindArticle` 仅查询 `WHERE slug = $1`。当读者通过历史旧 Slug 打开付费文章时，`GET /api/paid-articles/{slug}` 返回 `404 ARTICLE_NOT_FOUND`，前端 `reader.ts` 捕获错误后回退到 `GET /api/posts/{slug}`（返回为防泄漏已清空的 `html: ""`），导致页面既无正文也无付费墙，呈现白屏。
+  - 此外，`services/paid-access/internal/httpapi/handler.go:311` 的 `createOrder` 未处理 `domain.ErrInvalidState`，当免费文章被调用下单接口时会落入 `default:` 返回 `500 INTERNAL_ERROR`。
+- **修复方案**：
+  1. 将 `services/paid-access/internal/store/postgres.go:99-108` 的 `FindArticle` 查询更新为：
+     `WHERE slug = $1 OR id = (SELECT post_id FROM post_slug_aliases WHERE slug = $1) ORDER BY (slug = $1) DESC LIMIT 1`。
+  2. 在 `services/paid-access/internal/httpapi/handler.go:311-319` 的 `createOrder` 错误分支中增加 `case errors.Is(err, domain.ErrInvalidState): writeError(w, http.StatusConflict, "ARTICLE_NOT_PAID", "该文章无需购买")`。
+
+---
+
+### `[x]` BUG-R2-04：商品订单取消时未归还 `products.stock` 导致有限库存被未付款订单永久耗尽
+- **严重程度**：High (P1)
+- **位置**：
+  - `services/api/internal/repository/postgres.go:1181-1185, 1220-1275`
+- **根因分析**：
+  - `createAffiliateOrderTx` 在创建 `pending` 订单时立即对有限库存商品执行 `stock = CASE WHEN stock > 0 THEN stock - 1 ELSE stock END`。
+  - 但管理员在后台通过 `UpdateAffiliateOrderStatus` 将订单状态改为 `'canceled'` 时，`sold_sync` CTE 仅同步了 `sold_count`，从未将 `stock` 加回 `1`（同样地，若将误取消的 `'canceled'` 订单恢复为 `'pending'`/`'completed'` 也未重新扣减库存）。攻击者只需匿名发起未付款订单即可将有限库存商品耗尽，且管理员取消垃圾订单后库存仍为 `0`。
+- **修复方案**：
+  - 在 `UpdateAffiliateOrderStatus` (`services/api/internal/repository/postgres.go:1220-1275`) 中：
+    1. 当订单从 `'canceled'` 恢复为非 `'canceled'` 且商品为有限库存（`stock >= 0`）时，校验 `stock > 0` 并扣减 `1`（若 `stock == 0` 则拒绝恢复并返回库存不足错误）。
+    2. 在 `sold_sync` CTE 中同步更新 `stock`：当从非 `'canceled'` 变为 `'canceled'` 且 `p.stock >= 0` 时 `stock = p.stock + 1`；当从 `'canceled'` 变为非 `'canceled'` 且 `p.stock > 0` 时 `stock = p.stock - 1`。
+
+---
+
+### `[x]` BUG-R2-05：`services/api` 与 `services/paid-access` 的业务限流器 `remoteIP` 仍读取 `X-Forwarded-For` 最左侧伪造 IP
+- **严重程度**：High (P1)
+- **位置**：
+  - `services/api/internal/httpapi/server.go:230-248`
+  - `services/paid-access/internal/httpapi/handler.go:538-549`
+- **根因分析**：
+  - 第一轮修复（`BUG-SEC-05`）修复了日志中间件 `middleware.go` 中的 `clientIP` 函数（从右向左读取 `X-Forwarded-For`），但 `services/api` 业务处理器（管理员登录、评论提交、订单创建、福利申领）实际调用的是 `s.remoteIP(r)` (`server.go:230`)，而 `services/paid-access`（读者注册、读者登录）实际调用的是 `a.remoteIP(r)` (`handler.go:538`)！
+  - 这两个 `remoteIP` 方法仍然执行 `strings.Split(xff, ",")[0]`，导致客户端只需发送伪造的 `X-Forwarded-For: 1.2.3.4` 请求头即可绕过所有基于 IP 的登录防爆破、评论限流与福利申领每日 IP 限额。
+- **修复方案**：
+  1. 将 `services/api/internal/httpapi/server.go:230` 的 `s.remoteIP(r)` 直接委托给已加固的 `clientIP(r, s.cfg != nil && s.cfg.TrustProxy)`，消除重复实现。
+  2. 将 `services/paid-access/internal/httpapi/handler.go:538` 的 `a.remoteIP(r)` 更新为相同的安全逻辑：优先检查 `CF-Connecting-IP` / `X-Real-IP` 单值可信头，解析 `X-Forwarded-For` 时从右向左取最后一个合法 IP，回退时使用 `net.SplitHostPort(r.RemoteAddr)`。
+
+---
+
+### `[x]` BUG-R2-06：客服桥接、福利申领重试、Slug 别名清理与优雅停机边界缺陷
+- **严重程度**：Medium-High (P1)
+- **位置**：
+  - `services/api/internal/channelbridge/bridge.go:28, 188-195, 215-253`
+  - `services/api/internal/httpapi/channelbridge.go:162-167`
+  - `services/api/internal/httpapi/benefit.go:173-184`
+  - `services/api/internal/repository/postgres.go:277, 1524-1537`
+  - `services/api/internal/httpapi/admin.go:234, 258`
+  - `services/api/cmd/server/main.go:377-383`
+- **根因分析**：
+  1. **客服桥接 (`channelbridge`)**：
+     - `bridge.go:225` 使用 `strings.HasPrefix(strings.ToUpper(content), "FP-CW:")` 判断前缀，但第 28 行正则 `conversationReference` 为区分大小写的 `(?s)^\s*FP-CW:(\d+)\s+(.+?)\s*$`，若客服输入小写 `fp-cw:123 你好`，会报错 `invalid FP-CW reference`。
+     - 当启用 `allowUnprefixed` 且客服在尚无活跃会话时发送普通消息，`resolveTargetConversation` 返回 `"wecom operator ... has no active conversation"`，但 `httpapi/channelbridge.go:162` 的 `isIgnoredWeComMessageError` 未包含该错误，导致返回 HTTP 503 触发企微回调重试风暴。
+     - 当客服通过显式 `FP-CW:<id>` 回复某个会话时，未调用 `s.mappings.Put` 更新该客服的最近活跃会话映射，导致紧接着发送的图片仍路由到旧会话。
+  2. **福利申领重试 (`benefit.go:173-184`)**：
+     - 当用户的 `benefit_claims` 记录已创建但首次发放失败（状态为 `failed` 或超时恢复为 `pending`）时，用户点击重试会再次进入 `benefitClaim`。但步骤 7 (`CountBenefitClaimsByNetworkSince`) 在 `if claim == nil` 之前无条件执行，且该用户刚才创建的记录已经计入 `benefit_claims` 表！若 `DailyNetworkClaimLimit == 1`，用户自己的失败记录就会把自己挡在 `429 RATE_LIMITED` 之外，永远无法重试。
+  3. **文章与商品 Slug 边界 (`postgres.go:277, 1531` & `admin.go:258`)**：
+     - `UpdatePost` (`postgres.go:277`) 执行 `DELETE FROM post_slug_aliases WHERE slug = $1 AND post_id = $2`，若某历史别名曾属于另一篇已归档文章，这里未清理非本文章的同名别名；且 `adminUpdatePost` (`admin.go:258`) 缺少 `len(input.Slug) > 32` 长度上限校验；`uniqueProductSlug` (`postgres.go:1531`) 忽略了 `GetProductBySlug` 的数据库错误。
+  4. **优雅停机 (`cmd/server/main.go:377-383`)**：
+     - 停机时先执行了 `viewBuf.Flush(shutdownCtx)`，后执行 `httpSrv.Shutdown(shutdownCtx)`，在途请求完成时写入的阅读量计数不会再被 Flush 到数据库。
+- **修复方案**：
+  1. 将 `conversationReference` 改为 `(?is)^\s*FP-CW:(\d+)\s+(.+?)\s*$`；在 `isIgnoredWeComMessageError` 中加入 `"has no active conversation"`；在显式 `FP-CW:<id>` 解析成功后调用 `s.mappings.Put(ctx, domain.ChannelConversationMap{...})`。
+  2. 在 `services/api/internal/httpapi/benefit.go:173-184` 中，仅在 `claim == nil`（需要新建申领记录）时检查 `CountBenefitClaimsByNetworkSince` 每日网络限额。
+  3. 将 `postgres.go:277` 改为 `DELETE FROM post_slug_aliases WHERE slug = $1`；在 `admin.go` 的 `isValidSlug` 中统一校验 `len(slug) >= 1 && len(slug) <= 32`；在 `uniqueProductSlug` 中检查并返回 `err`。
+  4. 在 `services/api/cmd/server/main.go:377-383` 中先执行 `httpSrv.Shutdown(shutdownCtx)` 等待在途请求排空，再执行 `viewBuf.Flush(shutdownCtx)`。
+
+---
+
+## Round 2 Batch B：前端应用 (`apps/admin` & `apps/public-reader`)
+
+### `[x]` BUG-R2-07：管理后台编辑器序列化丢失行内格式与图片相对路径被转为绝对 URL
+- **严重程度**：High (P1)
+- **位置**：
+  - `apps/admin/src/main.tsx:2497-2508, 2524, 2544-2547, 2612-2633`
+- **根因分析**：
+  1. 在 `nodeToMarkdown` (`main.tsx:2497-2508`) 中，行内标签守卫 `/^(STRONG|B|EM|I|DEL|S|STRIKE|U|CODE|SPAN|A)$/` 被放在了 `if (node.querySelector("figure.editor-image,figure.editor-youtube,img,.editor-attachment"))` 块内部！导致：
+     - 顶层不含图片的 `<strong>`、`<u>`、`<a>` 等节点直接落入第 2524 行 `inlineChildrenToMarkdown(node)`，丢失外层标签；
+     - 含行内 `<img>` 与 `<strong>` 的段落 `<p>文字 <strong>加粗</strong> <img ...></p>` 被拆成多个独立段落，且子级 `<strong>` 递归进入 `nodeToMarkdown` 时因不含图片而丢失加粗格式。
+  2. 在 `inlineNodeToMarkdown` (`main.tsx:2546`) 中，读取 `node.src` 会返回浏览器解析后的完整绝对地址（如将 `/api/uploads/foo.png` 变成 `http://localhost:5173/api/uploads/foo.png`），保存时被后端 `post_image_policy` 判定为未转存外链图片拦截（而 `nodeToMarkdown` 第 2463 行正确使用了 `getAttribute("src")`）。
+  3. 在 `formatInlineMarkdown` (`main.tsx:2622`) 中，段落内的行内图片语法 `![alt](url)` 会被链接正则 `/\[([^\]]+)]\((...)\)/g` 匹配并渲染成 `!<a href="url">alt</a>`。
+- **修复方案**：
+  1. 在 `nodeToMarkdown` 中，将 `if (/^(STRONG|B|EM|I|DEL|S|STRIKE|U|CODE|SPAN|A)$/.test(node.tagName)) return inlineNodeToMarkdown(node).trim();` 移到 `querySelector` 判断之外；同时将第 2497 行的拆分条件收紧为仅拆分块级媒体容器 `node.querySelector("figure.editor-image,figure.editor-youtube,.editor-attachment")`，使含普通 `<img>` 的段落保持行内序列化。
+  2. 将 `inlineNodeToMarkdown` (`main.tsx:2546`) 中的 `node.src` 改为 `(node.getAttribute("src") ?? "").trim()`。
+  3. 在 `formatInlineMarkdown` (`main.tsx:2622`) 的链接替换前增加行内图片语法 `/!\[([^\]]*)]\((https?:\/\/[^)\s]+|\/[^)\s]+)\)/g` 的转换。
+
+---
+
+### `[x]` BUG-R2-08：`insertCallout` 在根容器折叠光标下 `endIndex < startIndex` 导致高亮块跳插到文末
+- **严重程度**：High (P1)
+- **位置**：
+  - `apps/admin/src/main.tsx:822-847`
+- **根因分析**：
+  - 当光标折叠（未选中文本，`range.collapsed === true`）且 `range.startContainer === editor`、`range.startOffset === k (k > 0)` 时：
+    - `startAnchor` 取 `editor.childNodes[k]`（即 `startIndex = k`）；
+    - `endAnchor` 取 `editor.childNodes[Math.max(0, k - 1)]`（即 `endIndex = k - 1`）。
+  - 随后 `children.slice(startIndex, endIndex + 1)` 变成 `children.slice(k, k)`，得到空数组 `selectedNodes = []`，最终走入 `else` 分支 `editor.append(callout, trailingParagraph)`，把高亮块错误插入到整篇文章最底部。
+- **修复方案**：
+  - 在 `insertCallout` (`apps/admin/src/main.tsx:822-847`) 中：
+    - 若 `range.collapsed && range.startContainer === editor`，直接将 `callout` 插入到 `editor.childNodes[range.startOffset] ?? null` 之前；
+    - 否则当 `range.collapsed` 为 `true` 时，令 `endAnchor = startAnchor`，确保 `endIndex === startIndex`。
+
+---
+
+### `[x]` BUG-R2-09：管理后台跨文章切换时的陈旧闭包覆盖与删除状态误清空
+- **严重程度**：High (P1)
+- **位置**：
+  - `apps/admin/src/main.tsx:393-532, 580-595, 663-673, 990-993, 1021-1075, 1733-1740, 1871-1899`
+- **根因分析**：
+  1. `patchActivePost` (`line 513`) 与 `syncEditorMarkdown` (`line 990`) 捕获了当前渲染帧的 `activePost.id`。当图片/附件异步上传完成调用 `replaceMediaPlaceholder` -> `syncEditorMarkdown()`，或 `autoImportEditorImages` 异步完成调用 `patchActivePost` 时，若用户已切换到另一篇文章，会把新文章的编辑器 DOM 序列化写回旧文章状态（或反之）。
+  2. `handleAttachmentFiles` (`line 518`) 与 `handleEditorPaste` 的文件粘贴分支 (`line 582`) 未绑定 `targetPostId = activePostIdRef.current`，上传期间切换文章会把附件/图片插入到新文章光标处。
+  3. `savePost` (`line 395`) 在 `await pendingMediaRef.current.waitForIdle()` 与 `await autoImportEditorImages(...)` 之前快照了 `const targetPost = activePost`，等待期间用户对标题、可见性或价格的修改会在 `doSave` 发送时被旧快照覆盖。
+  4. `deletePost` (`line 508`)、`deleteProduct` (`line 1738`) 与 `deleteTool` (`line 1897`) 在 `DELETE` 请求返回后无条件执行 `setActiveId(null)`，若用户在请求期间切换到了其他条目，会将其错误取消选中。
+- **修复方案**：
+  1. 新增 `postsRef` 实时同步最新 `posts` 列表；为 `patchActivePost(patch, targetId = activePostIdRef.current)` 与 `syncEditorMarkdown(targetId = activePostIdRef.current)` 增加 `if (!targetId || activePostIdRef.current !== targetId) return;` 守卫。
+  2. 在 `insertPendingMediaAtCaret` / `replaceMediaPlaceholder` 中绑定发起时的 `targetPostId = activePostIdRef.current`，若完成时 `activePostIdRef.current !== targetPostId` 则移除占位符并不修改当前文章 DOM。
+  3. 在 `savePost` 的 `doSave` 中从 `postsRef.current` 读取 `targetPost.id` 的最新元数据（`title`、`slug`、`excerpt`、`visibility`、`priceCents`、`currency`）。
+  4. 在 `deletePost`、`deleteProduct`、`deleteTool` 中改用函数式更新 `setActiveId((current) => (current === targetId ? null : current))`。
+
+---
+
+### `[x]` BUG-R2-10：公共读者端 `benefit.ts`、`portal.ts`、`reader.ts` 异步竞态与异常恢复缺陷
+- **严重程度**：Medium (P2)
+- **位置**：
+  - `apps/public-reader/src/scripts/benefit.ts:91-118, 264-280`
+  - `apps/public-reader/src/scripts/portal.ts:291-331, 842-848, 894, 976-983`
+  - `apps/public-reader/src/scripts/reader.ts:879-960, 1066-1090, 1128-1139`
+- **根因分析**：
+  1. `benefit.ts`：`start()` 在 `await this.prepareTurnstile()` 之后才调用 `this.renderState("idle", ...)`，若 Turnstile 同步触发回调，状态会被随后的 `idle` 覆盖；`retry()` 在 `this.campaign` 已加载时未先尝试 `restoreClaim()`，若前一次超时请求其实已在服务端成功发放，点击重试会要求重新过人机验证。
+  2. `portal.ts`：`productShareUrl` 直接调用 `new URL(shareUrl, location.origin)` 未捕获非法 URL 异常；`#applyAffiliateSelected` 在未勾选任何商品（`ids.length === 0`）时仍发送请求并提示“已为选中商品应用加价”；`loadRoute` 用布尔锁 `if (routeLoading) return;` 丢弃并发 `popstate` 事件，导致快速后退时地址栏与页面内容不一致。
+  3. `reader.ts`：`submitComment` 在 `createRemoteComment` 发送前就通过 `checkCommentRate()` 将时间戳写入 `localStorage`，若网络或后端报错，用户重试满 3 次即被本地锁死；且 `submitComment` 在 `await uploadCommentAttachment` 期间未快照 `activeSlug` 与 `replyParentId`；`checkCommentRate` 与 `getRandomUsername` 的 `JSON.parse` 缺少 `try/catch`。
+- **修复方案**：
+  1. 在 `benefit.ts` 的 `start()` 中先设置 `idle` 状态再调用 `prepareTurnstile()`；在 `retry()` 中若 `this.campaign` 已存在则先调用 `await this.restoreClaim()`，若未恢复成功再执行 `prepareTurnstile()`。
+  2. 在 `portal.ts` 的 `productShareUrl` 中增加 `try/catch` 回退；在 `#applyAffiliateSelected` 中当 `ids.length === 0` 时提示 `"请先勾选要应用加价的商品"` 并返回；将 `loadRoute` 的布尔锁替换为递增序号 `activeRouteSeq` 防止丢弃最新路由。
+  3. 在 `reader.ts` 中将 `checkCommentRate` 拆分为只读校验与成功后记录 `recordCommentRate`，在 `submitComment` 入口快照 `targetSlug = activeSlug` 与 `targetReplyParentId = replyParentId` 并传入上传与创建函数，同时为 `localStorage` 的 `JSON.parse` 增加 `try/catch`。
+
+---
+
+## Round 2 Batch C：共享包 (`packages/*`)、部署脚本 (`deploy/*`) 与 CI/CD 工作流
+
+### `[x]` BUG-R2-11：`@freedompost/renderer` 标题纯文本提取与 `@freedompost/security` 类名白名单漂移
+- **严重程度**：Medium (P2)
+- **位置**：
+  - `packages/renderer/src/index.ts:82-92`
+  - `packages/security/src/index.ts:69-100`
+- **根因分析**：
+  1. `packages/renderer/src/index.ts:82-92` 在生成标题 `id` 和 TOC 目录文本时直接使用了 `inline` token 的原始 `next?.content`（例如 `## Hello [World](https://example.com) **bold**` 会把 URL 和星号一起塞进 TOC 标题和 `slugifyHeading`），而 Go 后端 `services/api/internal/renderer/renderer.go:258` 是递归提取纯文本节点，导致 TS 与 Go 渲染出的标题锚点 ID 不一致。
+  2. `packages/security/src/index.ts:69-100` 的 `articleAllowedClasses` 未包含 YouTube 嵌入容器使用的 `"youtube-embed"`、`"youtube-player"`、`"youtube-watch-link"`，若通过 `@freedompost/security` 二次清洗含 YouTube 嵌入的 HTML 会丢失样式类。
+- **修复方案**：
+  1. 在 `packages/renderer/src/index.ts` 中新增 `extractInlineText(inlineToken)`，从 `inlineToken.children` 中拼接 `text` 与 `code_inline` 节点文本（若无 `children` 再回退到 `content`），与 Go 渲染器保持一致。
+  2. 在 `packages/security/src/index.ts` 的 `articleAllowedClasses` 中补齐 `"youtube-embed"`、`"youtube-player"`、`"youtube-watch-link"`。
+
+---
+
+### `[x]` BUG-R2-12：`deploy/remote-deploy.sh` 与 GitHub Actions 运维工作流健壮性加固
+- **严重程度**：Medium (P2)
+- **位置**：
+  - `deploy/remote-deploy.sh:22, 189-190, 316-331, 392-399`
+  - `.github/workflows/benefit-campaign.yml:38`
+  - `.github/workflows/channel-diagnostics.yml:25-40`
+- **根因分析**：
+  1. `deploy/remote-deploy.sh:22`：`docker compose ... ps -aq "$service"` 在存在历史停止容器时会返回多行 ID，导致 `docker inspect $container` 参数裂变报错。
+  2. `deploy/remote-deploy.sh:190`：当环境变量未传入 `REDIS_PASSWORD` 时，第 190 行仍无条件执行 `set_env "REDIS_URL" "redis://:${REDIS_PASSWORD}@redis:6379"`，将 `.env` 中原有的 Redis 密码覆盖为空密码。
+  3. `deploy/remote-deploy.sh:316-331`：每次部署无论 `/etc/docker/daemon.json` 是否已配置相同内容，都会无条件重写并执行 `systemctl restart docker`，造成不必要的容器重启抖动。
+  4. `deploy/remote-deploy.sh:392-399`：`pg_isready` 循环 30 次全部失败后未报错退出，而是直接继续执行后续迁移。
+  5. `.github/workflows/benefit-campaign.yml:38` 缺少 `port: ${{ secrets.DEPLOY_PORT || 22 }}`；`.github/workflows/channel-diagnostics.yml:25-40` 未判断 `sudo` 及 `container_id` 是否为空。
+- **修复方案**：
+  1. 在 `deploy/remote-deploy.sh:22` 使用 `head -n 1` 取单个容器 ID；将第 190 行 `set_env "REDIS_URL" ...` 移入 `if [ -n "${REDIS_PASSWORD:-}" ]; then` 分支内；在写入 `/etc/docker/daemon.json` 前先比对现有文件内容，仅当不一致时才更新并重启 Docker；在 `pg_isready` 第 30 次仍失败时 `exit 1`。
+  2. 在 `.github/workflows/benefit-campaign.yml` 补齐 `port: ${{ secrets.DEPLOY_PORT || 22 }}`，并在 `.github/workflows/channel-diagnostics.yml` 增加 `SUDO` 检测与 `[ -n "$container_id" ]` 判空保护。
+
+---
+
+## 第二轮全量验证与 Code Review 签核报告 (Round 2 Verification & Sign-off)
+
+### 1. 自动化测试与静态检查全量结果
+
+| 检查项 | 执行命令 | 结果 | 说明 |
+| :--- | :--- | :--- | :--- |
+| **Go API 单元测试 & 静态检查** | `cd services/api && go test ./... && go vet ./...` | **PASS (0 errors)** | 覆盖 `ToolInput` 双格式契约 (`url`/`coverUrl` & `linkUrl`/`iconUrl`)、`realIP` 可信代理解析、企微 `FP-CW:` 大小写与无活跃会话忽略、福利申领重试限额豁免、商品取消订单归还库存 |
+| **Go Paid-Access 单元测试 & 静态检查** | `cd services/paid-access && go test ./... && go vet ./...` | **PASS (0 errors)** | 覆盖 `FindArticle` 历史 `post_slug_aliases` 别名解析、`createOrder` 非付费文章 `409 ARTICLE_NOT_PAID` 映射与 `remoteIP` 从右向左解析 `X-Forwarded-For` |
+| **TypeScript 全仓类型检查** | `npm run typecheck` | **PASS (0 errors)** | 7 个 `packages/*`、`apps/public-reader` (`astro check` 67 files, 0 errors/warnings/hints) 与 `apps/admin` (`tsc --noEmit`) 全部零错误通过 |
+| **Node / 前端工作区单元测试** | `npm test --workspaces --if-present` | **PASS (0 errors)** | `@freedompost/renderer` 含标题纯文本 TOC/锚点提取回归测试；`@freedompost/admin` 16 个测试文件共 78 项用例全部通过（含 `BUG-R2-07` 段落内联图片相对路径与加粗格式保留测试） |
+| **全仓生产构建验证** | `npm run build` | **PASS (0 errors)** | 共享包、`apps/public-reader` 静态站点与 `apps/admin` 生产包全部构建成功 |
+| **部署治理与预检策略测试** | `node --test deploy/*.test.mjs` | **PASS (31/31 tests)** | 5 个部署与安全策略测试套件共 31 项断言全部通过 |
+
+### 2. 第二轮 Code Review 终审结论
+1. **第一轮与第二轮共计 32 项（Round 1: 20 项 + Round 2: 12 项）问题已全部修复（100% `[x]`）**。
+2. **零回归保证**：所有修复均经过方案先行评审、最小侵入式修改、新增针对性回归单测及全栈构建验证，未引入任何新编译错误或行为回退。

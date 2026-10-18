@@ -242,6 +242,11 @@ func (s *Server) adminUpdatePost(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &input) {
 		return
 	}
+	input.Slug = strings.TrimSpace(input.Slug)
+	if len(input.Slug) > 32 {
+		writeError(w, http.StatusBadRequest, "INVALID_SLUG", "文章标识长度不能超过 32 个字符")
+		return
+	}
 	content := input.Content
 	if content == "" {
 		content = input.Markdown
@@ -558,7 +563,12 @@ func (s *Server) adminCreateTool(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &input) {
 		return
 	}
-	tool, err := s.repo.CreateTool(r.Context(), input)
+	normalized, errMsg := normalizeToolInput(input)
+	if errMsg != "" {
+		writeError(w, http.StatusBadRequest, "INVALID_TOOL", errMsg)
+		return
+	}
+	tool, err := s.repo.CreateTool(r.Context(), normalized)
 	if err != nil {
 		s.internalError(w, r, err)
 		return
@@ -574,7 +584,12 @@ func (s *Server) adminUpdateTool(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &input) {
 		return
 	}
-	tool, err := s.repo.UpdateTool(r.Context(), r.PathValue("id"), input)
+	normalized, errMsg := normalizeToolInput(input)
+	if errMsg != "" {
+		writeError(w, http.StatusBadRequest, "INVALID_TOOL", errMsg)
+		return
+	}
+	tool, err := s.repo.UpdateTool(r.Context(), r.PathValue("id"), normalized)
 	if err != nil {
 		s.internalError(w, r, err)
 		return
@@ -584,6 +599,43 @@ func (s *Server) adminUpdateTool(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, flattenedResponse("tool", tool))
+}
+
+func normalizeToolInput(input domain.ToolInput) (domain.ToolInput, string) {
+	input.Title = strings.TrimSpace(input.Title)
+	input.Summary = strings.TrimSpace(input.Summary)
+	input.Description = strings.TrimSpace(input.Description)
+	input.Category = strings.TrimSpace(input.Category)
+	input.Status = strings.TrimSpace(input.Status)
+	input.LinkURL = strings.TrimSpace(coalesce(input.URL, input.LinkURL))
+	input.URL = input.LinkURL
+	input.IconURL = strings.TrimSpace(coalesce(input.CoverURL, input.IconURL))
+	input.CoverURL = input.IconURL
+	if input.Status == "" {
+		input.Status = "draft"
+	}
+	if input.Status != "draft" && input.Status != "published" {
+		return input, "发布状态无效"
+	}
+	if utf8.RuneCountInString(input.Title) > 120 {
+		return input, "工具名称不能超过 120 个字符"
+	}
+	if utf8.RuneCountInString(input.Summary) > 500 {
+		return input, "一句话简介不能超过 500 个字符"
+	}
+	if utf8.RuneCountInString(input.Description) > 12000 {
+		return input, "使用说明不能超过 12000 个字符"
+	}
+	if input.LinkURL != "" && input.LinkURL != "#" && !validProductURL(input.LinkURL) {
+		return input, "工具链接地址无效"
+	}
+	if !validProductURL(input.IconURL) {
+		return input, "工具 Logo 地址无效"
+	}
+	if input.Status == "published" && (input.LinkURL == "" || input.LinkURL == "#") {
+		return input, "公开发布前，请填写官网地址"
+	}
+	return input, ""
 }
 
 func (s *Server) adminDeleteTool(w http.ResponseWriter, r *http.Request) {
