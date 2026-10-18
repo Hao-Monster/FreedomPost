@@ -266,4 +266,12 @@ func TestRealIPUsesRightmostTrustedXForwardedFor(t *testing.T) {
 	if got := realIP(reqMalformedTail, true); got != "10.0.0.2" {
 		t.Fatalf("realIP with malformed rightmost XFF hop = %q, want fallback 10.0.0.2", got)
 	}
+
+	reqCloudflare := httptest.NewRequest(http.MethodPost, "/api/admin/login", nil)
+	reqCloudflare.RemoteAddr = "172.18.0.2:12345"
+	reqCloudflare.Header.Set("CF-Connecting-IP", "203.0.113.55")
+	reqCloudflare.Header.Set("X-Forwarded-For", "1.2.3.4, 172.64.0.15")
+	if got := realIP(reqCloudflare, true); got != "203.0.113.55" {
+		t.Fatalf("realIP behind trusted Cloudflare CIDR = %q, want visitor IP 203.0.113.55", got)
+	}
 }

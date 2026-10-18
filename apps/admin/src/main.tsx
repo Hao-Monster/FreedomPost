@@ -2394,7 +2394,7 @@ function markdownFragmentToEditorHtml(markdown: string): string {
       continue;
     }
 
-    const image = line.match(/^!\[((?:\\.|(?!]\()[^])*)]\((\S+)\)$/);
+    const image = line.match(/^!\[((?:[^\\\]]|\\.)*)]\(([^)\s]+)\)$/);
     if (image) {
       flushParagraph();
       flushList();
@@ -2402,7 +2402,7 @@ function markdownFragmentToEditorHtml(markdown: string): string {
       continue;
     }
 
-    const attachment = line.match(/^\[附件[:：]\s*((?:\\.|(?!]\()[^])+?)]\((.+)\)$/);
+    const attachment = line.match(/^\[附件[:：]\s*((?:[^\\\]]|\\.)+?)]\(([^)\s]+)\)$/);
     if (attachment) {
       flushParagraph();
       flushList();
@@ -2669,7 +2669,7 @@ function formatInlineMarkdown(value: string): string {
     // are rendered as <a> when the article is reloaded. Extract links into
     // tokens so *, **, or ~~ inside hrefs do not corrupt the URL.
     .replace(
-      /!\[((?:\\.|[^\]])*)]\((https?:\/\/[^)\s]+|\/[^)\s]+)\)/g,
+      /!\[((?:[^\\\]]|\\.)*)]\((https?:\/\/[^)\s]+|\/[^)\s]+)\)/g,
       (_match, alt: string, src: string) => storeToken(`<img src="${src}" alt="${unescapeMarkdown(alt) || "图片"}" />`)
     )
     .replace(
@@ -2713,7 +2713,7 @@ function sanitizeInlineClassList(value: string): string {
 // Images are emitted as standalone <img> elements; surrounding text becomes <p>.
 // Returns null when the text contains no external Markdown image syntax.
 function markdownImagesToPasteHtml(text: string): string | null {
-  if (!text || !/!\[(?:\\.|[^\]])*\]\(https?:\/\//i.test(text)) return null;
+  if (!text || !/!\[(?:[^\\\]]|\\.)*\]\(https?:\/\//i.test(text)) return null;
 
   const parts: string[] = [];
   for (const rawLine of text.split(/\r?\n/)) {
@@ -2722,7 +2722,7 @@ function markdownImagesToPasteHtml(text: string): string | null {
 
     const images: Array<{ alt: string; url: string }> = [];
     const textWithoutImages = line
-      .replace(/!\[((?:\\.|[^\]])*)\]\((https?:\/\/[^)]+)\)/gi, (_, alt: string, url: string) => {
+      .replace(/!\[((?:[^\\\]]|\\.)*)\]\((https?:\/\/[^)\s]+)\)/gi, (_, alt: string, url: string) => {
         images.push({ alt: unescapeMarkdown(alt), url });
         return "";
       })

@@ -713,3 +713,73 @@
   - `npm run build` — 全工作区生产构建通过
 - **部署与治理脚本验证**：
   - `deploy/*.test.mjs` — 全部通过（含新增的回滚快照 `test -n "$container"` 强校验与禁止 `|| true` 治理测试）
+
+---
+
+# 第四轮独立复审反馈（3 项发现）根因分析与修复方案
+
+> **审查基线**：针对 `735a81f..d1094f4`（[PR #70](https://github.com/Hao-Monster/FreedomPost/pull/70)）的第三方独立复审反馈。第三轮 6 项问题的原始触发场景均已确认关闭，但复审发现 3 项回归问题（**1 项 P1、2 项 P2**）。
+> **处理原则**：先完整记录根因与修复方案，再逐项修复并通过独立复审复现脚本与全工作区测试验证。
+
+## 第四轮修复进度总览 (Round 4 Progress Tracker)
+
+| 编号 | 严重程度 | 模块 / 文件 | 问题描述 | 状态 |
+| :--- | :--- | :--- | :--- | :--- |
+| `BUG-R4-01` | **High (P1)** | `deploy/caddy/Caddyfile`<br>`deploy/production-preflight.test.mjs`<br>`services/api/internal/httpapi/middleware.go`<br>`services/paid-access/internal/httpapi/handler.go` | **Cloudflare 后的不同访客会共用限流额度**：`Caddyfile` 使用 `header_up X-Forwarded-For {remote_host}` 并无条件剥离 `CF-Connecting-IP`，当流量经由 Cloudflare 代理到达源站时，`{remote_host}` 为 Cloudflare 边缘节点 IP，导致同一边缘节点后的不同真实访客共享同一限流配额 | `[x]` |
+| `BUG-R4-02` | **Medium (P2)** | `apps/admin/src/main.tsx` | **图片正则的指数回溯可长时间阻塞编辑器**：`markdownFragmentToEditorHtml` 的图片匹配正则 `/^!\[((?:\\.|(?!]\()[^])*)]\((\S+)\)$/` 中，`\\.` 与 `(?!]\()[^]` 均能匹配反斜杠 `\`，在连续反斜杠输入下产生 $O(\phi^n)$ 指数级回溯（ReDoS） | `[x]` |
+| `BUG-R4-03` | **Medium (P2)** | `apps/admin/src/main.tsx` | **相邻图片被吞并为一个错误的图片地址**：同一段落内的相邻行内图片（如 `![a](/api/uploads/a.png)![b](/api/uploads/b.png)`）被块级图片正则中的 `(?!]\()[^]*` 与 `(\S+)` 跨越边界吞并成单张错误 URL 的图片 | `[x]` |
+
+---
+
+### `[x]` BUG-R4-01：Cloudflare 后的不同访客会共用限流额度 (`deploy/caddy/Caddyfile:40-42`)
+- **严重程度**：High (P1)
+- **位置**：
+  - `deploy/caddy/Caddyfile:1-60, 114-121`
+  - `deploy/production-preflight.test.mjs:209-212`
+  - `services/api/internal/httpapi/middleware.go:98-184`
+  - `services/paid-access/internal/httpapi/handler.go:542-629`
+- **根因分析**：
+  - 第三轮为阻断伪造 `CF-Connecting-IP` 绕过限流，在 `Caddyfile` 中保留了 `header_up X-Forwarded-For {remote_host}` 并新增 `header_up -CF-Connecting-IP`。
+  - 但在生产环境中，正常访客流量经由 Cloudflare 边缘节点进入 Caddy，此时 `{remote_host}` 是 Cloudflare 边缘节点 IP，而真实访客 IP 位于 Cloudflare 注入的 `CF-Connecting-IP` 头中。直接将 `{remote_host}` 写入 `X-Forwarded-For` 会导致所有经过同一 Cloudflare 节点的不同访客被识别为同一个 IP，共用注册、登录、评论及福利申领限流额度。
+- **修复方案**：
+  1. 在 `deploy/caddy/Caddyfile` 顶部全局配置块 `{ servers { ... } }` 中配置 `trusted_proxies static <Cloudflare 官方 IPv4/IPv6 CIDR 列表>`、`trusted_proxies_strict` 以及 `client_ip_headers CF-Connecting-IP X-Forwarded-For`：
+     - 当连接 Caddy 的直接对端（`{remote_host}`）属于受信任的 Cloudflare 边缘网段时，Caddy 从 `CF-Connecting-IP`（及回退的 `X-Forwarded-For`）提取真实访客 IP 作为 `{client_ip}`；
+     - 当对端不属于 Cloudflare 网段（如攻击者直连源站试图伪造 `CF-Connecting-IP` 或 `X-Forwarded-For`）时，Caddy 拒绝信任任何客户端传入的代理头，`{client_ip}` 严格等于直连对端 `{remote_host}`。
+  2. 将 `deploy/caddy/Caddyfile` 中所有 `reverse_proxy` 块的 `header_up X-Forwarded-For {remote_host}` 更新为 `header_up X-Forwarded-For {client_ip}`，继续配合 `header_up -CF-Connecting-IP` 与 `header_up -X-Real-IP` 向后端传递唯一经校验的真实访客 IP。
+  3. 在 Go 后端 `realIP` (`services/api`) 与 `API.remoteIP` (`services/paid-access`) 中增加纵深防御：当 `X-Forwarded-For` 最右侧可信跳属于 Cloudflare 官方网段且请求携带合法 `CF-Connecting-IP`（或前一跳合法访客 IP）时提取该真实访客 IP，若最右侧跳不属于 Cloudflare 网段则严格忽略 `CF-Connecting-IP`。
+
+---
+
+### `[x]` BUG-R4-02 & BUG-R4-03：图片正则指数回溯（ReDoS）与相邻行内图片被吞并 (`apps/admin/src/main.tsx:2397-2401`)
+- **严重程度**：Medium (P2)
+- **位置**：
+  - `apps/admin/src/main.tsx:2397-2412, 2672-2674, 2714-2734`
+- **根因分析**：
+  1. **指数回溯（ReDoS）**：第三轮将块级图片正则改为 `/^!\[((?:\\.|(?!]\()[^])*)]\((\S+)\)$/`。在重复分组 `(?:\\.|(?!]\()[^])*` 中，分支 1 `\\.` 与分支 2 `(?!]\()[^]` 的首字符集合存在交集（两者都能匹配反斜杠 `\`）。当输入包含长串连续反斜杠且末尾不匹配 `](`（如 `'![' + '\\\\'.repeat(35) + 'x'`）时，NFA 引擎在将连续反斜杠切分为双字符 `\\.` 或单字符 `[^]` 之间发生 $O(\phi^n)$ 指数级回溯，导致主线程卡死。
+  2. **相邻图片吞并**：同一行包含两张相邻图片 `![a](/api/uploads/a.png)![b](/api/uploads/b.png)` 时，由于 `(?!]\()[^]` 允许跨越未转义的 `]`，且 URL 分组被放宽为 `(\S+)`（允许匹配 `)` 与 `![`），导致整行被错误匹配为单个块级图片（要么 `alt` 吞并首张图片 URL，要么 `url` 吞并 `/api/uploads/a.png)![b](/api/uploads/b.png`）。
+- **修复方案**：
+  1. 将块级图片正则修改为严格线性时间 $O(n)$、首字符完全互斥的写法：
+     ```ts
+     const image = line.match(/^!\[((?:[^\\\]]|\\.)*)]\(([^)\s]+)\)$/);
+     ```
+     - 在 `(?:[^\\\]]|\\.)*` 中，分支 1 `[^\\\]]` 明确排除 `\` 与 `]`，分支 2 `\\.` 必须以 `\` 开头，两个分支的首字符集合 **100% 互斥**，在任何输入下均无回溯分支点（严格 $O(n)$ 线性时间）；
+     - 同时 `(?:[^\\\]]|\\.)*` 绝不跨越未转义的 `]`，且 URL 部分恢复为 `([^)\s]+)`（绝不跨越 `)` 或空白符）。
+  2. 将块级附件正则同步收敛为首字符互斥的线性正则：
+     ```ts
+     const attachment = line.match(/^\[附件[:：]\s*((?:[^\\\]]|\\.)+?)]\(([^)\s]+)\)$/);
+     ```
+  3. 将 `formatInlineMarkdown` 与 `markdownImagesToPasteHtml` 中的图片匹配正则统一更新为 `/!\[((?:[^\\\]]|\\.)*)]\((https?:\/\/[^)\s]+|\/[^)\s]+)\)/g`。当一行存在相邻图片 `![a](/api/uploads/a.png)![b](/api/uploads/b.png)` 时，块级图片正则因首张图片的 `)` 不在行尾而立即以 $O(n)$ 失败，进而交由段落行内解析器 `formatInlineMarkdown` 准确渲染为两张独立的 `<img>`。
+
+---
+
+## 第四轮独立复审反馈修复验收结果 (Round 4 Verification Summary)
+
+- **第三方独立复现脚本原位验证**：
+  - `node C:/Temp/freedompost-frontend-independent-review/check-regex-redos.mjs`：`n = 20..40` 耗时稳定在 `0.033ms ~ 0.046ms`，严格 $O(n)$ 无回溯。
+  - `npx vitest run --root C:/Temp/freedompost-frontend-independent-review --environment happy-dom`：`admin-adjacent-images.test.tsx`、`admin-image-alt.test.tsx`、`admin-save-race.test.tsx` **3/3 全部通过**。
+- **Go 后端、前端与部署治理全量回归**：
+  - `cd services/api && go vet ./... && go test ./...` — 全部通过（含 Cloudflare 可信网段访客提取与非可信源防伪造测试）。
+  - `cd services/paid-access && go vet ./... && go test ./...` — 全部通过（含 `TestCloudflareClientQuotasRemainSeparate` 独立访客配额隔离测试）。
+  - `npm run typecheck && npm test --workspaces --if-present && npm run build` — 16 个测试文件共 81 项测试全部通过，生产构建通过。
+  - `deploy/*.test.mjs` — 31 项部署与预检测试全部通过（含 Caddy `trusted_proxies static`、`client_ip_headers CF-Connecting-IP X-Forwarded-For` 与 `header_up X-Forwarded-For {client_ip}` 校验）。
+

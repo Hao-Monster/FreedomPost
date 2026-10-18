@@ -95,6 +95,74 @@ func (rw *responseWriter) WriteHeader(status int) {
 	rw.ResponseWriter.WriteHeader(status)
 }
 
+var cloudflareTrustedNets = mustParseCIDRs([]string{
+	"173.245.48.0/20",
+	"103.21.244.0/22",
+	"103.22.200.0/22",
+	"103.31.4.0/22",
+	"141.101.64.0/18",
+	"108.162.192.0/18",
+	"190.93.240.0/20",
+	"188.114.96.0/20",
+	"197.234.240.0/22",
+	"198.41.128.0/17",
+	"162.158.0.0/15",
+	"104.16.0.0/13",
+	"104.24.0.0/14",
+	"172.64.0.0/13",
+	"131.0.72.0/22",
+	"2400:cb00::/32",
+	"2606:4700::/32",
+	"2803:f800::/32",
+	"2405:b500::/32",
+	"2405:8100::/32",
+	"2a06:98c0::/29",
+	"2c0f:f248::/32",
+})
+
+func mustParseCIDRs(cidrs []string) []*net.IPNet {
+	nets := make([]*net.IPNet, 0, len(cidrs))
+	for _, cidr := range cidrs {
+		_, ipNet, err := net.ParseCIDR(cidr)
+		if err != nil {
+			panic(err)
+		}
+		nets = append(nets, ipNet)
+	}
+	return nets
+}
+
+func isCloudflareProxyIP(ip net.IP) bool {
+	if ip == nil {
+		return false
+	}
+	for _, ipNet := range cloudflareTrustedNets {
+		if ipNet.Contains(ip) {
+			return true
+		}
+	}
+	return false
+}
+
+func singleValidHeaderIP(values []string) net.IP {
+	var found net.IP
+	for _, raw := range values {
+		trimmed := strings.TrimSpace(raw)
+		if trimmed == "" {
+			continue
+		}
+		if strings.Contains(trimmed, ",") || found != nil {
+			return nil
+		}
+		parsed := net.ParseIP(trimmed)
+		if parsed == nil {
+			return nil
+		}
+		found = parsed
+	}
+	return found
+}
+
 func realIP(r *http.Request, trustProxy bool) string {
 	if trustProxy {
 		values := r.Header.Values("X-Forwarded-For")
@@ -103,6 +171,16 @@ func realIP(r *http.Request, trustProxy bool) string {
 				parts := strings.Split(raw, ",")
 				last := strings.TrimSpace(parts[len(parts)-1])
 				if parsed := net.ParseIP(last); parsed != nil {
+					if isCloudflareProxyIP(parsed) {
+						if cfIP := singleValidHeaderIP(r.Header.Values("CF-Connecting-IP")); cfIP != nil {
+							return cfIP.String()
+						}
+						if len(parts) >= 2 {
+							if prev := net.ParseIP(strings.TrimSpace(parts[len(parts)-2])); prev != nil {
+								return prev.String()
+							}
+						}
+					}
 					return parsed.String()
 				}
 				break
