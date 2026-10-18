@@ -206,7 +206,10 @@ test("deployment workflow and Caddy keep the benefit path protected", () => {
   // A missing route is NOT safe — it could fall through to a catch-all.
   // Requiring an explicit `respond 404` is the correct defence-in-depth.
   assert.match(caddy, /handle \/internal\/\*[\s\S]*?respond 404/);
-  assert.match(caddy, /header_up X-Forwarded-For \{remote_host\}.*paid-access|paid-access[\s\S]*header_up X-Forwarded-For \{remote_host\}/);
+  assert.match(caddy, /trusted_proxies static[^\n]*173\.245\.48\.0\/20[^\n]*2400:cb00::\/32/);
+  assert.match(caddy, /client_ip_headers CF-Connecting-IP X-Forwarded-For/);
+  assert.match(caddy, /header_up X-Forwarded-For \{client_ip\}.*paid-access|paid-access[\s\S]*header_up X-Forwarded-For \{client_ip\}/);
+  assert.doesNotMatch(caddy, /header_up X-Forwarded-For \{remote_host\}/);
   assert.match(caddy, /frame-src[^\n]*https:\/\/challenges\.cloudflare\.com/);
   assert.match(caddy, /connect-src[^\n]*https:\/\/challenges\.cloudflare\.com/);
   assert.match(caddy, /redir @legacyTopics \/benefit\/\?\{query\} permanent/);

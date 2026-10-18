@@ -16,6 +16,7 @@ import (
 
 	"github.com/fenghaoyun-monster/freedompost/services/paid-access/internal/auth"
 	"github.com/fenghaoyun-monster/freedompost/services/paid-access/internal/domain"
+	"github.com/fenghaoyun-monster/freedompost/services/paid-access/internal/ratelimit"
 )
 
 type fakeVerifier struct{ actions []string }
@@ -389,5 +390,40 @@ func TestRemoteIPIgnoresPassthroughHeadersAndUsesRightmostXFF(t *testing.T) {
 	reqBadTail.Header.Set("X-Forwarded-For", "1.2.3.4, invalid")
 	if got := api.remoteIP(reqBadTail); got != "10.0.0.9" {
 		t.Fatalf("remoteIP with malformed rightmost XFF hop = %q, want 10.0.0.9", got)
+	}
+}
+
+func TestCloudflareClientQuotasRemainSeparate(t *testing.T) {
+	handler, err := New(Config{
+		Enabled:        true,
+		TrustProxy:     true,
+		Store:          newFakeStore(),
+		Turnstile:      &fakeVerifier{},
+		Limiter:        ratelimit.NewMemory(),
+		PublicOrigin:   "https://example.com",
+		InternalSecret: strings.Repeat("i", 32),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	send := func(visitor string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodPost, "/api/reader/register", strings.NewReader("{}"))
+		req.RemoteAddr = "172.18.0.2:40000"
+		req.Header.Set("Origin", "https://example.com")
+		// Simulate Caddy with trusted_proxies (Cloudflare CIDR) forwarding {client_ip} in X-Forwarded-For
+		req.Header.Set("X-Forwarded-For", visitor)
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		return rec
+	}
+	for i := 0; i < 8; i++ {
+		rec := send("203.0.113.10")
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("client A attempt %d status=%d", i+1, rec.Code)
+		}
+	}
+	rec := send("203.0.113.11")
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("different real visitor inherited another visitor's IP quota: got %d want 400", rec.Code)
 	}
 }

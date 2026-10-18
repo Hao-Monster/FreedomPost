@@ -149,3 +149,42 @@ it("retains B image claim when an earlier A save returns after switching article
     vi.unstubAllGlobals();
   }
 });
+
+it("reopens adjacent inline images without swallowing the second image into the first URL and handles long backslash sequences without ReDoS", async () => {
+  vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+  const pathologicalLine = `![${"\\".repeat(50)}x`;
+  const post = {
+    id: "a",
+    slug: "a",
+    title: "A",
+    visibility: "private",
+    priceCents: 0,
+    currency: "CNY",
+    createdAt: "2026-09-09",
+    updatedAt: "2026-09-09",
+    markdown: `![a](/api/uploads/a.png)![b](/api/uploads/b.png)\n\n${pathologicalLine}`
+  };
+  vi.stubGlobal("fetch", vi.fn(async (u: string) => (
+    u.endsWith("/session")
+      ? Response.json({ session: { username: "admin" } })
+      : Response.json({ items: u.endsWith("/posts") ? [post] : [] })
+  )));
+  const container = document.createElement("div");
+  document.body.append(container);
+  const root = createRoot(container);
+  try {
+    const start = performance.now();
+    await act(async () => { root.render(<App />); });
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
+    expect(performance.now() - start).toBeLessThan(1000);
+    const editor = container.querySelector<HTMLElement>('[contenteditable="true"]')!;
+    expect([...editor.querySelectorAll("img")].map((i) => i.getAttribute("src"))).toEqual([
+      "/api/uploads/a.png",
+      "/api/uploads/b.png"
+    ]);
+  } finally {
+    await act(async () => root.unmount());
+    container.remove();
+    vi.unstubAllGlobals();
+  }
+});
