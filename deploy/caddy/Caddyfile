@@ -38,12 +38,16 @@
 	handle /api/reader/* {
 		reverse_proxy paid-access:8080 {
 			header_up X-Forwarded-For {remote_host}
+			header_up -CF-Connecting-IP
+			header_up -X-Real-IP
 		}
 	}
 
 	handle /api/* {
 		reverse_proxy api-go:3000 {
 			header_up X-Forwarded-For {remote_host}
+			header_up -CF-Connecting-IP
+			header_up -X-Real-IP
 		}
 	}
 
@@ -103,6 +107,8 @@ admin-freedompost.thinderbox.uk {
 	handle /api/* {
 		reverse_proxy api-go:3000 {
 			header_up X-Forwarded-For {remote_host}
+			header_up -CF-Connecting-IP
+			header_up -X-Real-IP
 		}
 	}
 	handle /health {

@@ -541,21 +541,15 @@ func (api *API) allowKey(request *http.Request, key string, limit int, window ti
 
 func (api *API) remoteIP(request *http.Request) string {
 	if api.config.TrustProxy {
-		for _, header := range []string{"CF-Connecting-IP", "X-Real-IP"} {
-			if raw := strings.TrimSpace(request.Header.Get(header)); raw != "" {
-				if parsed := net.ParseIP(raw); parsed != nil {
+		values := request.Header.Values("X-Forwarded-For")
+		for i := len(values) - 1; i >= 0; i-- {
+			if raw := strings.TrimSpace(values[i]); raw != "" {
+				parts := strings.Split(raw, ",")
+				last := strings.TrimSpace(parts[len(parts)-1])
+				if parsed := net.ParseIP(last); parsed != nil {
 					return parsed.String()
 				}
-			}
-		}
-		if fwd := request.Header.Get("X-Forwarded-For"); fwd != "" {
-			parts := strings.Split(fwd, ",")
-			for i := len(parts) - 1; i >= 0; i-- {
-				if candidate := strings.TrimSpace(parts[i]); candidate != "" {
-					if parsed := net.ParseIP(candidate); parsed != nil {
-						return parsed.String()
-					}
-				}
+				break
 			}
 		}
 	}

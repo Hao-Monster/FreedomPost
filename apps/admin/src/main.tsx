@@ -240,7 +240,6 @@ export function App() {
 
   useEffect(() => {
     if (!activePost || !editorRef.current) return;
-    importedImageClaimsRef.current.clear();
     failedImageImportsRef.current.clear();
     editorRef.current.innerHTML = markdownToEditorHtml(activePost.markdown);
     // Opening saved content must not rewrite its images. Absolute URLs may
@@ -440,11 +439,13 @@ export function App() {
         }
         return false;
       };
+      let sentClaimKeys: string[] = [];
       const doSave = (markdown: string) => {
         const currentPost = postsRef.current.find((post) => post.id === targetPost.id) ?? targetPost;
-        const importedImages = [...importedImageClaimsRef.current.values()]
-          .filter((claim) => markdown.includes(claim.url))
-          .map(({ id, claimToken }) => ({ id, claimToken }));
+        const matchingEntries = [...importedImageClaimsRef.current.entries()]
+          .filter(([key, claim]) => key.startsWith(`${targetPost.id}:`) && markdown.includes(claim.url));
+        sentClaimKeys = matchingEntries.map(([key]) => key);
+        const importedImages = matchingEntries.map(([, { id, claimToken }]) => ({ id, claimToken }));
         return fetch(`/api/admin/posts/${targetPost.id}`, {
           method: "PUT",
           headers: { "content-type": "application/json" },
@@ -486,7 +487,9 @@ export function App() {
       }
 
       const saved = (await response.json()) as AdminPost;
-      importedImageClaimsRef.current.clear();
+      for (const key of sentClaimKeys) {
+        importedImageClaimsRef.current.delete(key);
+      }
       setPosts((items) => items.map((item) => (item.id === saved.id ? saved : item)));
       showToast(saved.visibility === "private" ? "保存成功，仅自己可见" : saved.visibility === "paid" ? "保存成功，购买后可见" : "保存成功，文章已公开");
     } finally {
@@ -509,6 +512,11 @@ export function App() {
       return;
     }
 
+    for (const key of importedImageClaimsRef.current.keys()) {
+      if (key.startsWith(`${targetPostId}:`)) {
+        importedImageClaimsRef.current.delete(key);
+      }
+    }
     setPosts((items) => items.filter((item) => item.id !== targetPostId));
     setActiveId((current) => (current === targetPostId ? null : current));
     showToast("文章已删除");
@@ -557,7 +565,7 @@ export function App() {
             throw new Error("ARTICLE_SWITCHED");
           }
           for (const image of pastedResult.importedImages) {
-            importedImageClaimsRef.current.set(image.id, image);
+            importedImageClaimsRef.current.set(`${targetPostId ?? ""}:${image.id}`, image);
           }
           for (const failedImage of pastedResult.failedImages) {
             failedImageImportsRef.current.set(failedImage.id, failedImage);
@@ -1056,8 +1064,8 @@ export function App() {
       if (!img) continue;
       const src = img.getAttribute("src") ?? "";
       if (!src.startsWith("http://") && !src.startsWith("https://")) continue;
-      // Skip images that were already successfully imported this session
-      if ([...importedImageClaimsRef.current.values()].some((c) => c.url === src)) continue;
+      // Skip images that were already successfully imported for this article in this session
+      if ([...importedImageClaimsRef.current.entries()].some(([key, c]) => key.startsWith(`${postID}:`) && c.url === src)) continue;
       toImport.push({ figure, clientId: createClientID(), src, alt: img.getAttribute("alt") ?? "图片" });
     }
 
@@ -1076,7 +1084,7 @@ export function App() {
           item.figure.querySelector("img")?.setAttribute("src", result.url);
           item.figure.querySelector("a")?.setAttribute("href", result.url);
           if (result.claimToken) {
-            importedImageClaimsRef.current.set(result.id, { id: result.id, claimToken: result.claimToken, url: result.url });
+            importedImageClaimsRef.current.set(`${postID}:${result.id}`, { id: result.id, claimToken: result.claimToken, url: result.url });
           }
         } else {
           // Failure: replace the figure with an actionable error card
@@ -1124,7 +1132,7 @@ export function App() {
 
   function replaceFailedImageCard(card: HTMLElement, uploaded: ImportedImageFile | UploadedFile, importID: string) {
     if ("claimToken" in uploaded && uploaded.claimToken) {
-      importedImageClaimsRef.current.set(uploaded.id, { id: uploaded.id, claimToken: uploaded.claimToken, url: uploaded.url });
+      importedImageClaimsRef.current.set(`${activePostIdRef.current ?? ""}:${uploaded.id}`, { id: uploaded.id, claimToken: uploaded.claimToken, url: uploaded.url });
     }
     failedImageImportsRef.current.delete(importID);
     replaceFailedImageCardWithHtml(card, `${editorImageHtml(uploaded.url, uploaded.name)}<p><br></p>`);
@@ -2386,20 +2394,21 @@ function markdownFragmentToEditorHtml(markdown: string): string {
       continue;
     }
 
-    const image = line.match(/^!\[([^\]]*)]\(([^)\s]+)\)$/);
+    const image = line.match(/^!\[((?:\\.|(?!]\()[^])*)]\((\S+)\)$/);
     if (image) {
       flushParagraph();
       flushList();
-      html.push(editorImageHtml(image[2] ?? "", image[1] ?? "image.png"));
+      html.push(editorImageHtml(image[2] ?? "", unescapeMarkdown(image[1] ?? "") || "image.png"));
       continue;
     }
 
-    const attachment = line.match(/^\[附件[:：]\s*(.+?)]\((.+)\)$/);
+    const attachment = line.match(/^\[附件[:：]\s*((?:\\.|(?!]\()[^])+?)]\((.+)\)$/);
     if (attachment) {
       flushParagraph();
       flushList();
+      const attachmentName = unescapeMarkdown(attachment[1] ?? "");
       const safeAttachmentHref = sanitizeEditorMediaUrl(attachment[2] ?? "");
-      html.push(`<div class="editor-attachment" data-fp-type="attachment" data-name="${escapeAttribute(attachment[1] ?? "")}" data-href="${escapeAttribute(safeAttachmentHref)}" contenteditable="false"><span>${escapeHtml(attachment[1] ?? "")}</span><a href="${escapeAttribute(safeAttachmentHref)}" download="${escapeAttribute(attachment[1] ?? "")}">下载 / 查看</a></div>`);
+      html.push(`<div class="editor-attachment" data-fp-type="attachment" data-name="${escapeAttribute(attachmentName)}" data-href="${escapeAttribute(safeAttachmentHref)}" contenteditable="false"><span>${escapeHtml(attachmentName)}</span><a href="${escapeAttribute(safeAttachmentHref)}" download="${escapeAttribute(attachmentName)}">下载 / 查看</a></div>`);
       continue;
     }
 
@@ -2660,8 +2669,8 @@ function formatInlineMarkdown(value: string): string {
     // are rendered as <a> when the article is reloaded. Extract links into
     // tokens so *, **, or ~~ inside hrefs do not corrupt the URL.
     .replace(
-      /!\[([^\]]*)]\((https?:\/\/[^)\s]+|\/[^)\s]+)\)/g,
-      (_match, alt: string, src: string) => storeToken(`<img src="${src}" alt="${alt || "图片"}" />`)
+      /!\[((?:\\.|[^\]])*)]\((https?:\/\/[^)\s]+|\/[^)\s]+)\)/g,
+      (_match, alt: string, src: string) => storeToken(`<img src="${src}" alt="${unescapeMarkdown(alt) || "图片"}" />`)
     )
     .replace(
       /\[([^\]]+)]\((https?:\/\/[^)\s]+|\/[^)\s]+|mailto:[^\s)]+|tel:[^\s)]+)\)/g,
@@ -2704,7 +2713,7 @@ function sanitizeInlineClassList(value: string): string {
 // Images are emitted as standalone <img> elements; surrounding text becomes <p>.
 // Returns null when the text contains no external Markdown image syntax.
 function markdownImagesToPasteHtml(text: string): string | null {
-  if (!text || !/!\[[^\]]*\]\(https?:\/\//i.test(text)) return null;
+  if (!text || !/!\[(?:\\.|[^\]])*\]\(https?:\/\//i.test(text)) return null;
 
   const parts: string[] = [];
   for (const rawLine of text.split(/\r?\n/)) {
@@ -2713,8 +2722,8 @@ function markdownImagesToPasteHtml(text: string): string | null {
 
     const images: Array<{ alt: string; url: string }> = [];
     const textWithoutImages = line
-      .replace(/!\[([^\]]*)\]\((https?:\/\/[^)]+)\)/gi, (_, alt: string, url: string) => {
-        images.push({ alt, url });
+      .replace(/!\[((?:\\.|[^\]])*)\]\((https?:\/\/[^)]+)\)/gi, (_, alt: string, url: string) => {
+        images.push({ alt: unescapeMarkdown(alt), url });
         return "";
       })
       .trim();
@@ -2729,6 +2738,10 @@ function markdownImagesToPasteHtml(text: string): string | null {
 
 function escapeMarkdown(value: string): string {
   return value.replaceAll("[", "\\[").replaceAll("]", "\\]").replaceAll("(", "\\(").replaceAll(")", "\\)");
+}
+
+function unescapeMarkdown(value: string): string {
+  return value.replace(/\\([[\]()\\])/g, "$1");
 }
 
 function escapeHtml(value: string): string {

@@ -603,3 +603,113 @@
 ### 2. 第二轮 Code Review 终审结论
 1. **第一轮与第二轮共计 32 项（Round 1: 20 项 + Round 2: 12 项）问题已全部修复（100% `[x]`）**。
 2. **零回归保证**：所有修复均经过方案先行评审、最小侵入式修改、新增针对性回归单测及全栈构建验证，未引入任何新编译错误或行为回退。
+
+---
+
+# 第三轮独立审查反馈（6 项发现）根因分析与修复方案
+
+> **审查基线**：针对 `5bb702d..735a81f` 的第三方独立审查反馈，共确认 **6 项问题（2 项 P1、4 项 P2）**。
+> **处理原则**：先完整记录每项问题的根因分析、边界复现与无副作用修复方案，再逐项落地修复并将独立复现脚本沉淀为仓库永久回归测试。
+
+## 第三轮修复进度总览 (Round 3 Progress Tracker)
+
+| 编号 | 严重程度 | 模块 / 文件 | 问题描述 | 状态 |
+| :--- | :--- | :--- | :--- | :--- |
+| `BUG-R3-01` | **High (P1)** | `services/api/internal/httpapi/middleware.go`<br>`services/paid-access/internal/httpapi/handler.go`<br>`deploy/caddy/Caddyfile` | **透传的 IP 头可绕过两服务的限流**：Caddy 仅覆写 `X-Forwarded-For` 未清理 `CF-Connecting-IP`/`X-Real-IP`，而后端优先读取 `CF-Connecting-IP`/`X-Real-IP` 并在 `X-Forwarded-For` 中向左跳过非法项，导致客户端可伪造请求头绕过限流 | `[x]` |
+| `BUG-R3-02` | **High (P1)** | `apps/admin/src/main.tsx` | **旧文章保存响应会清空新文章的图片认领信息**：`savePost` 在 `PUT` 响应返回后无条件调用 `importedImageClaimsRef.current.clear()`，若保存期间切换到文章 B 并粘贴外链图，文章 A 的延迟响应会抹掉文章 B 的 `claimToken` | `[x]` |
+| `BUG-R3-03` | **Medium (P2)** | `services/api/internal/repository/postgres.go`<br>`services/api/internal/httpapi/admin.go`<br>`deploy/migrations/0015_affiliate_order_stock_reserved.sql` | **零库存仍可恢复取消订单，且再次取消会制造库存**：`UpdateAffiliateOrderStatus` 在 `p.stock = 0` 时使用 `GREATEST(0, p.stock - 1)` 仍允许将 `canceled` 订单恢复为 `pending`/`completed`，随后再次取消会执行 `p.stock + 1` 凭空造出库存 | `[x]` |
+| `BUG-R3-04` | **Medium (P2)** | `services/api/internal/repository/postgres.go`<br>`deploy/migrations/0015_affiliate_order_stock_reserved.sql`<br>`packages/db/src/schema.ts` | **取消未扣过库存的订单会凭空补库**：历史遗留订单或商品处于不限库存（`stock = -1`）时创建的订单未预占有限库存，后续商品改为有限库存并取消该订单时，无条件执行 `p.stock + 1` 导致库存虚增 | `[x]` |
+| `BUG-R3-05` | **Medium (P2)** | `apps/admin/src/main.tsx` | **图片说明含方括号时，重新打开文章无法显示图片**：`editorImagesMarkdown` 将 `alt` 中的 `[`、`]` 转义为 `\[`、`\]`，但 `markdownToEditorHtml` 的正则 `^!\[([^\]]*)]\(([^)\s]+)\)$` 在遇到首个 `\]` 时截断失败，导致重新打开文章时图片退化为纯文本 | `[x]` |
+| `BUG-R3-06` | **Medium (P2)** | `deploy/remote-deploy.sh`<br>`deploy/governance.test.mjs` | **回滚镜像查询失败被吞掉，部署仍会继续**：`remote-deploy.sh` 在 `docker compose ... ps -aq "$service" | head -n 1 || true` 中使用 `|| true` 吞掉了 `docker compose` 执行失败且移除了 `test -n "$container"` 强校验，破坏了生产变更必须具备可用回滚点的门禁约束 | `[x]` |
+
+---
+
+### `[x]` BUG-R3-01：透传的 `CF-Connecting-IP` / `X-Real-IP` 及 `X-Forwarded-For` 解析可绕过两服务限流
+- **严重程度**：High (P1)
+- **位置**：
+  - `services/api/internal/httpapi/middleware.go:98-116`
+  - `services/paid-access/internal/httpapi/handler.go:540-566`
+  - `deploy/caddy/Caddyfile:38-48, 103-107`
+- **根因分析**：
+  1. 网关 `deploy/caddy/Caddyfile` 仅通过 `header_up X-Forwarded-For {remote_host}` 强制覆写 `X-Forwarded-For`，并未覆写或剥离客户端请求中的 `CF-Connecting-IP` 与 `X-Real-IP`。
+  2. `services/api` 的 `realIP` 与 `services/paid-access` 的 `API.remoteIP` 在 `trustProxy` 启用时优先读取了 `CF-Connecting-IP` 与 `X-Real-IP`，攻击者只需在请求中附带伪造的 `CF-Connecting-IP` 或 `X-Real-IP` 即可完全绕过两服务的 IP 限流。
+  3. 此外，在解析 `X-Forwarded-For` 时若从右向左循环跳过非 IP 片段（或仅用 `r.Header.Get` 读取首个同名头），当存在多行 `X-Forwarded-For` 或末尾非 IP 值时可能回退读取到左侧客户端伪造段。
+- **修复方案**：
+  1. 在 `services/api/internal/httpapi/middleware.go` (`realIP`) 与 `services/paid-access/internal/httpapi/handler.go` (`API.remoteIP`) 中移除对 `CF-Connecting-IP` 和 `X-Real-IP` 的读取；当 `trustProxy` 为 `true` 时，仅取最后一个非空 `X-Forwarded-For` 请求头的**最右侧最后一项**（即紧邻可信反向代理写入的客户端地址），若该项是合法 IP 则返回，否则直接回退至 `r.RemoteAddr`。
+  2. 在 `deploy/caddy/Caddyfile` 的反向代理块中显式增加 `header_up -CF-Connecting-IP` 与 `header_up -X-Real-IP` 纵深防御。
+
+---
+
+### `[x]` BUG-R3-02：旧文章保存响应会清空新文章的图片认领信息 (`importedImageClaimsRef`)
+- **严重程度**：High (P1)
+- **位置**：
+  - `apps/admin/src/main.tsx:242, 444-449, 488-493, 515-519, 562, 1068, 1086, 1133`
+- **根因分析**：
+  - `importedImageClaimsRef` 全局共用一个 `Map`，且 `savePost` 在 `await doSave(markdown)` 返回后无条件执行 `importedImageClaimsRef.current.clear()`。
+  - 当管理员点击保存文章 A（`PUT /api/admin/posts/post-a` 仍在途），随后切换到文章 B 并在文章 B 中粘贴外链图片（转存成功后将 `claim-b` 写入 `importedImageClaimsRef`），此时文章 A 的保存请求返回，无条件执行 `.clear()`，导致文章 B 的 `claim-b` 被清空；随后保存文章 B 时 `importedImages` 为空数组 `[]`。
+- **修复方案**：
+  1. 将 `importedImageClaimsRef` 按文章维度隔离键名（`${postId}:${imageId}`），并在切换文章的 `useEffect([activePost?.id])` 中移除全量 `.clear()`。
+  2. 在 `savePost` 的 `doSave` 中记录本次实际随请求发送的 `sentClaimKeys`（仅匹配 `targetPost.id` 下且 URL 存在于当前保存 `markdown` 中的认领项）；当保存成功返回后，仅从 `importedImageClaimsRef.current` 中删除 `sentClaimKeys`，绝不影响其他文章或保存期间新粘贴的图片认领信息。
+
+---
+
+### `[x]` BUG-R3-03 & BUG-R3-04：订单库存预占标记缺失导致零库存恢复订单与取消未预占订单虚增库存
+- **严重程度**：Medium (P2)
+- **位置**：
+  - `services/api/internal/repository/postgres.go:1181-1292`
+  - `services/api/internal/httpapi/admin.go:806-815`
+  - `deploy/migrations/0015_affiliate_order_stock_reserved.sql`
+  - `packages/db/src/schema.ts`
+- **根因分析**：
+  1. `affiliate_orders` 表未记录订单创建时是否实际扣减并预占了有限库存（`stock_reserved`）。对于历史存量订单（预占功能上线前创建）或商品处于不限库存（`stock = -1`）时创建的订单，其实并未扣减库存；一旦后续将订单取消（或商品改为有限库存后取消订单），`UpdateAffiliateOrderStatus` 无条件执行 `p.stock + 1`，凭空虚增库存。
+  2. 当商品已售罄（`p.stock = 0`）时，管理员将已取消（`canceled`）的订单改回 `pending` 或 `completed`，原 SQL 使用 `GREATEST(0, p.stock - 1)`，在未扣减任何库存的情况下放行了状态恢复；若随后再次取消该订单，又会触发 `p.stock + 1` 将库存从 `0` 变成 `1`。
+- **修复方案**：
+  1. 新增迁移 `deploy/migrations/0015_affiliate_order_stock_reserved.sql`（及 `packages/db/src/schema.ts`），为 `affiliate_orders` 增加 `stock_reserved BOOLEAN NOT NULL DEFAULT FALSE`。
+  2. 在 `createAffiliateOrderTx` 中，当 `product.Stock > 0` 时扣减库存并在插入 `affiliate_orders` 时写入 `stock_reserved = TRUE`（当 `product.Stock < 0` 时写入 `FALSE`）。
+  3. 在 `UpdateAffiliateOrderStatus` 中：
+     - 使用 `order_lock` 与 `product_lock` 锁定订单与关联商品行；
+     - 当从 `'canceled'` 恢复为非 `'canceled'` 时，若关联商品为有限库存且当前 `stock = 0`，直接拒绝更新（返回 `domain.ErrInvalidState`，由 `adminUpdateAffiliateOrder` 返回 `409 PRODUCT_OUT_OF_STOCK`）；若 `stock > 0`，则扣减 `p.stock - 1` 并将 `ao.stock_reserved` 设为 `TRUE`（若 `stock < 0`，`ao.stock_reserved` 设为 `FALSE`）；
+     - 当从非 `'canceled'` 变更为 `'canceled'` 时，将 `ao.stock_reserved` 设为 `FALSE`，且**仅当原订单 `prev_reserved = TRUE` 且 `p.stock >= 0`** 时才归还 `p.stock + 1`。
+
+---
+
+### `[x]` BUG-R3-05：图片说明（`alt`）含方括号时，重新打开文章无法解析并显示图片
+- **严重程度**：Medium (P2)
+- **位置**：
+  - `apps/admin/src/main.tsx:2397-2412, 2672-2674, 2714-2743`
+- **根因分析**：
+  - `editorImagesMarkdown` 在序列化图片时调用 `escapeMarkdown(image.alt)` 将 `示例 [一]` 转义为 `![示例 \[一\]](/api/uploads/diagram.png)`。
+  - 但 `markdownToEditorHtml`（块级图片 `^!\[([^\]]*)]\(([^)\s]+)\)$`）以及 `formatInlineMarkdown`（行内图片 `/!\[([^\]]*)]\((...)\)/g`）使用 `[^\]]*` 匹配 `alt`，遇到转义的 `\]` 即提前停止匹配并因后续不是 `](` 而匹配失败，导致整行退化为普通段落文本 `<p>![示例 \[一\]](/api/uploads/diagram.png)</p>`，丢失 `<img>` 渲染。
+- **修复方案**：
+  1. 在 `apps/admin/src/main.tsx` 中新增 `unescapeMarkdown(value: string): string`（还原 `\[`、`\]`、`\(`、`\)`、`\\`）。
+  2. 在 `markdownFragmentToEditorHtml`（块级图片与附件）、`formatInlineMarkdown`（行内图片）及 `markdownImagesToPasteHtml` 中，将 `alt`/名称匹配更新为支持转义字符与内嵌方括号的正则，并在生成 HTML 前调用 `unescapeMarkdown` 还原原始说明文本，确保含方括号与圆括号的图片说明可无损往返。
+
+---
+
+### `[x]` BUG-R3-06：`deploy/remote-deploy.sh` 回滚镜像查询失败被 `|| true` 吞掉
+- **严重程度**：Medium (P2)
+- **位置**：
+  - `deploy/remote-deploy.sh:21-29`
+  - `deploy/governance.test.mjs`
+- **根因分析**：
+  - `remote-deploy.sh` 第 22 行 `container=$($SUDO docker compose ... ps -aq "$service" | head -n 1 || true)` 末尾的 `|| true` 吞掉了 `docker compose` 命令本身的执行错误，且用 `if [ -n "$container" ]` 替代了原有的 `test -n "$container"` 强校验，导致当回滚容器查询失败或容器缺失时部署脚本不会中止，违反 `AGENTS.md` “生产变更必须具备可用回滚点”的硬性规定。
+- **修复方案**：
+  1. 在 `deploy/remote-deploy.sh:21-29` 中移除 `|| true` 与 `if [ -n "$container" ]`：先无管道执行 `containers=$($SUDO docker compose --env-file "$DEPLOY_PATH/.env" -f "$DEPLOY_PATH/deploy/docker-compose.yml" ps -aq "$service")`，再通过参数展开 `container="${containers%%$'\n'*}"` 取首个容器 ID，并执行 `test -n "$container"` 强制断言非空。
+  2. 在 `deploy/governance.test.mjs` 中新增断言，确保回滚快照循环包含 `test -n "$container"` 且不包含 `|| true`。
+
+---
+
+## 第三轮独立审查反馈修复验收结果 (Round 3 Verification Summary)
+
+- **Go 后端验证**：
+  - `gofmt -w services/api services/paid-access`
+  - `cd services/api && go vet ./... && go test ./...` — 全部通过（含新增的 `TestRealIP` 伪造 `CF-Connecting-IP`/`X-Real-IP`/多段 `X-Forwarded-For` 防护单测）
+  - `cd services/paid-access && go vet ./... && go test ./...` — 全部通过（含新增的 `TestRemoteIP` 伪造 IP 头防绕过单测）
+  - 使用 PGlite 内存 PostgreSQL 验证 `UpdateAffiliateOrderStatus` 真实 SQL：覆盖正常有限库存扣减/退回、历史未预占订单（`stock_reserved = false`）取消不补库、不限库存转有限库存后取消旧单不补库、零库存（`stock = 0`）拒绝恢复已取消订单并防止凭空制造库存，6 项数据库断言全部通过。
+- **前端与全工作区验证**：
+  - `npm run typecheck` — 全工作区（含 `@freedompost/public-reader` Astro check 与 `@freedompost/admin` TS check）0 error
+  - `npm test --workspaces --if-present` — 16 个测试文件共 80 项测试全部通过（含沉淀入 `apps/admin/src/existing-post-images.test.tsx` 的括号图片说明重开测试与跨文章保存竞态测试）
+  - 独立复现脚本原位直跑：`npx vitest run --environment happy-dom C:/Temp/freedompost-frontend-independent-review/admin-image-alt.test.tsx C:/Temp/freedompost-frontend-independent-review/admin-save-race.test.tsx` — 2 项独立复现测试全部通过
+  - `npm run build` — 全工作区生产构建通过
+- **部署与治理脚本验证**：
+  - `deploy/*.test.mjs` — 全部通过（含新增的回滚快照 `test -n "$container"` 强校验与禁止 `|| true` 治理测试）
