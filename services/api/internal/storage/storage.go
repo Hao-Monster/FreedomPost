@@ -172,9 +172,13 @@ func (a *LocalAdapter) Put(_ context.Context, input PutInput) (*StoredObject, er
 }
 
 func (a *LocalAdapter) Delete(_ context.Context, storageKey string) error {
+	trimmed := strings.TrimSpace(storageKey)
+	if trimmed == "" || trimmed == "." || trimmed == "/" {
+		return fmt.Errorf("delete: invalid storage key")
+	}
 	// Safety: ensure path stays within root
-	clean := filepath.Clean(filepath.Join(a.root, filepath.Base(storageKey)))
-	if !strings.HasPrefix(clean, a.root+string(filepath.Separator)) && clean != a.root {
+	clean := filepath.Clean(filepath.Join(a.root, filepath.Base(trimmed)))
+	if !strings.HasPrefix(clean, a.root+string(filepath.Separator)) || clean == a.root {
 		return fmt.Errorf("delete: path escapes storage root")
 	}
 	if err := os.Remove(clean); err != nil && !os.IsNotExist(err) {

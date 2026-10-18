@@ -601,14 +601,33 @@ async function hydrateTools() {
   }
 }
 
+function sanitizePortalUrl(raw: string | null | undefined, allowRelative = true): string {
+  const trimmed = (raw ?? "").trim();
+  if (!trimmed) return "";
+  if (allowRelative && trimmed.startsWith("/") && !trimmed.startsWith("//")) {
+    return trimmed;
+  }
+  try {
+    const parsed = new URL(trimmed);
+    if (parsed.protocol === "http:" || parsed.protocol === "https:") {
+      return parsed.toString();
+    }
+  } catch {
+    // Reject invalid or dangerous protocols (e.g., javascript:, data:, vbscript:).
+  }
+  return "";
+}
+
 function renderToolCard(tool: CreatorTool) {
-  const cover = tool.coverUrl
-    ? `<img src="${escapeAttribute(tool.coverUrl)}" alt="${escapeAttribute(tool.title)} Logo" loading="lazy" />`
+  const safeCoverUrl = sanitizePortalUrl(tool.coverUrl);
+  const safeToolUrl = sanitizePortalUrl(tool.url, false) || "#";
+  const cover = safeCoverUrl
+    ? `<img src="${escapeAttribute(safeCoverUrl)}" alt="${escapeAttribute(tool.title)} Logo" loading="lazy" />`
     : `<span class="tool-card-mark" aria-hidden="true"><i data-lucide="wrench"></i></span>`;
   const note = tool.description.trim()
     ? `<div class="tool-card-note"><span>我的用途</span><p>${escapeHtml(tool.description)}</p></div>`
     : "";
-  return `<article class="tool-card"><header class="tool-card-header"><div class="tool-card-logo">${cover}</div><div class="tool-card-identity"><div><span class="tool-category">${escapeHtml(toolCategoryLabel(tool.category))}</span><span class="tool-used-badge">我用过</span></div><h2>${escapeHtml(tool.title)}</h2></div><button class="tool-share-button" type="button" data-share-tool="${escapeAttribute(tool.slug)}" aria-label="分享 ${escapeAttribute(tool.title)}" title="分享"><i data-lucide="share-2"></i></button></header><p class="tool-card-summary">${escapeHtml(tool.summary)}</p>${note}<footer class="tool-card-footer"><span class="tool-site"><i data-lucide="globe-2"></i>${escapeHtml(toolWebsiteLabel(tool.url))}</span><a class="button primary" href="${escapeAttribute(tool.url)}" target="_blank" rel="noopener noreferrer">访问官网 <i data-lucide="arrow-up-right"></i></a></footer></article>`;
+  return `<article class="tool-card"><header class="tool-card-header"><div class="tool-card-logo">${cover}</div><div class="tool-card-identity"><div><span class="tool-category">${escapeHtml(toolCategoryLabel(tool.category))}</span><span class="tool-used-badge">我用过</span></div><h2>${escapeHtml(tool.title)}</h2></div><button class="tool-share-button" type="button" data-share-tool="${escapeAttribute(tool.slug)}" aria-label="分享 ${escapeAttribute(tool.title)}" title="分享"><i data-lucide="share-2"></i></button></header><p class="tool-card-summary">${escapeHtml(tool.summary)}</p>${note}<footer class="tool-card-footer"><span class="tool-site"><i data-lucide="globe-2"></i>${escapeHtml(toolWebsiteLabel(tool.url))}</span><a class="button primary" href="${escapeAttribute(safeToolUrl)}" target="_blank" rel="noopener noreferrer">访问官网 <i data-lucide="arrow-up-right"></i></a></footer></article>`;
 }
 
 function toolWebsiteLabel(value: string) {
@@ -634,8 +653,9 @@ async function shareTool(tool: CreatorTool) {
 function renderMarketProduct(product: StoreProduct) {
   const displayPrice = product.customerPriceCents ?? product.priceCents;
   const availability = product.stock === 0 ? `已售出 ${product.soldCount} · 暂时售罄` : product.stock < 0 ? `已售出 ${product.soldCount} · 不限量` : `已售出 ${product.soldCount} · 库存 ${product.stock}`;
-  const cover = product.coverUrl
-    ? `<img src="${escapeAttribute(product.coverUrl)}" alt="${escapeAttribute(product.title)}" />`
+  const safeCoverUrl = sanitizePortalUrl(product.coverUrl);
+  const cover = safeCoverUrl
+    ? `<img src="${escapeAttribute(safeCoverUrl)}" alt="${escapeAttribute(product.title)}" />`
     : `<span class="market-product-placeholder"><i data-lucide="package"></i></span>`;
   const compareAt = product.compareAtCents ? `<del>${formatCurrency(product.compareAtCents, product.currency)}</del>` : "";
   return `<article class="market-product-card">
@@ -656,7 +676,8 @@ function renderMarketProduct(product: StoreProduct) {
 
 function renderProductDialog(product: StoreProduct) {
   const displayPrice = product.customerPriceCents ?? product.priceCents;
-  const cover = product.coverUrl ? `<img src="${escapeAttribute(product.coverUrl)}" alt="${escapeAttribute(product.title)}" />` : "";
+  const safeCoverUrl = sanitizePortalUrl(product.coverUrl);
+  const cover = safeCoverUrl ? `<img src="${escapeAttribute(safeCoverUrl)}" alt="${escapeAttribute(product.title)}" />` : "";
   const availability = product.stock === 0 ? `已售出 ${product.soldCount} · 暂时售罄` : product.stock < 0 ? `已售出 ${product.soldCount} · 不限量供应` : `已售出 ${product.soldCount} · 当前库存 ${product.stock}`;
   const commission = product.commissionCents > 0 ? ` · 可得 ${formatCurrency(product.commissionCents, product.currency)}` : "";
   return `<div class="product-dialog-scroll"><div class="product-dialog-cover">${cover}</div><p class="section-kicker">${escapeHtml(productCategoryLabel(product.category))}</p><h2>${escapeHtml(product.title)}</h2><p class="product-dialog-summary">${escapeHtml(product.summary)}</p><div class="product-dialog-price">${formatCurrency(displayPrice, product.currency)} <span>${availability}</span></div><div class="product-dialog-description">${escapeHtml(product.description).replace(/\n/g, "<br>")}</div></div><div class="product-dialog-actions"><button class="button secondary" type="button" data-share-product>分享此商品赚钱${escapeHtml(commission)}</button><button class="button primary" type="button" data-order-product ${product.stock === 0 ? "disabled" : ""}>立即下单</button></div>`;
@@ -706,7 +727,7 @@ async function shareMarketProduct(product: StoreProduct, button: HTMLButtonEleme
     const response = await fetch("/api/affiliate/dashboard", { headers: { Accept: "application/json" } });
     if (response.ok) {
       const result = await response.json() as { shareUrl: string };
-      const shareUrl = new URL(result.shareUrl);
+      const shareUrl = new URL(result.shareUrl, location.origin);
       shareUrl.searchParams.set("product", product.slug);
       await copyTextToClipboard(shareUrl.toString());
       if (productDialog?.open) productDialog.close();
@@ -817,10 +838,32 @@ async function hydrateAffiliateDashboard() {
   if (!form || !dashboard) return;
   form.addEventListener("submit", (event) => void accessAffiliateDashboard(event, form, dashboard));
   document.querySelector<HTMLButtonElement>("#copyAffiliateLink")?.addEventListener("click", () => void copyAffiliateShareLink());
+  document.querySelector<HTMLButtonElement>("#applyAffiliateDefault")?.addEventListener("click", () => void applyAffiliateMarkup(null));
+  document.querySelector<HTMLButtonElement>("#applyAffiliateSelected")?.addEventListener("click", () => {
+    const list = document.querySelector<HTMLElement>("#affiliateProductPricing");
+    const ids = [...(list?.querySelectorAll<HTMLInputElement>("[data-pricing-product]:checked") ?? [])]
+      .map((input) => input.dataset.pricingProduct)
+      .filter((id): id is string => Boolean(id));
+    void applyAffiliateMarkup(ids);
+  });
   document.querySelector<HTMLButtonElement>("#affiliateLogout")?.addEventListener("click", async () => {
     await fetch("/api/affiliate/logout", { method: "POST" });
     dashboard.hidden = true;
     form.hidden = false;
+    form.reset();
+    const passwordNotice = document.querySelector<HTMLElement>("#generatedPasswordNotice");
+    if (passwordNotice) {
+      passwordNotice.hidden = true;
+      passwordNotice.innerHTML = "";
+    }
+    const shareInput = document.querySelector<HTMLInputElement>("#affiliateShareUrl");
+    if (shareInput) shareInput.value = "";
+    const stats = document.querySelector<HTMLElement>("#affiliateStats");
+    if (stats) stats.innerHTML = "";
+    const orders = document.querySelector<HTMLElement>("#affiliateOrders");
+    if (orders) orders.innerHTML = "";
+    const pricing = document.querySelector<HTMLElement>("#affiliateProductPricing");
+    if (pricing) pricing.innerHTML = "";
   });
   try {
     const response = await fetch("/api/affiliate/dashboard", { headers: { Accept: "application/json" } });
@@ -890,17 +933,17 @@ function renderAffiliateDashboard(result: { shareUrl: string; dashboard: Affilia
 async function hydrateAffiliatePricing() {
   const list = document.querySelector<HTMLElement>("#affiliateProductPricing");
   if (!list) return;
+  const checkedIds = new Set(
+    [...list.querySelectorAll<HTMLInputElement>("[data-pricing-product]:checked")]
+      .map((input) => input.dataset.pricingProduct)
+      .filter((id): id is string => Boolean(id))
+  );
   const response = await fetch("/api/affiliate/catalog", { headers: { Accept: "application/json" } });
   if (!response.ok) return;
   const items = ((await response.json()) as { items: AffiliateProduct[] }).items;
   list.innerHTML = items.length
-    ? items.map((item) => `<label class="affiliate-product-price-row"><input type="checkbox" data-pricing-product="${escapeAttribute(item.id)}" /><span><strong>${escapeHtml(item.title)}</strong><small>管理员价 ${formatCurrency(item.priceCents, item.currency)} · 专属价 ${formatCurrency(item.customerPriceCents, item.currency)} · 专属链接下单每单赚${escapeHtml(formatCommissionEarnings(item.commissionCents, item.currency))}</small></span><b>${item.markupPercent}%</b></label>`).join("")
+    ? items.map((item) => `<label class="affiliate-product-price-row"><input type="checkbox" data-pricing-product="${escapeAttribute(item.id)}" ${checkedIds.has(item.id) ? "checked" : ""} /><span><strong>${escapeHtml(item.title)}</strong><small>管理员价 ${formatCurrency(item.priceCents, item.currency)} · 专属价 ${formatCurrency(item.customerPriceCents, item.currency)} · 专属链接下单每单赚${escapeHtml(formatCommissionEarnings(item.commissionCents, item.currency))}</small></span><b>${item.markupPercent}%</b></label>`).join("")
     : `<p class="affiliate-no-orders">暂无已发布商品</p>`;
-  document.querySelector<HTMLButtonElement>("#applyAffiliateDefault")?.addEventListener("click", () => void applyAffiliateMarkup(null));
-  document.querySelector<HTMLButtonElement>("#applyAffiliateSelected")?.addEventListener("click", () => {
-    const ids = [...list.querySelectorAll<HTMLInputElement>("[data-pricing-product]:checked")].map((input) => input.dataset.pricingProduct).filter((id): id is string => Boolean(id));
-    void applyAffiliateMarkup(ids);
-  });
 }
 
 async function applyAffiliateMarkup(productIds: string[] | null) {
@@ -931,10 +974,11 @@ async function copyAffiliateShareLink() {
 }
 
 function productShareUrl(shareUrl: string) {
+  const url = new URL(shareUrl, location.origin);
   const product = new URLSearchParams(location.search).get("product");
-  if (!product) return shareUrl;
-  const url = new URL(shareUrl);
-  url.searchParams.set("product", product);
+  if (product) {
+    url.searchParams.set("product", product);
+  }
   return url.toString();
 }
 
@@ -1083,7 +1127,14 @@ function formatNumber(value: number) {
 }
 
 function formatCurrency(cents: number, currency: string) {
-  return new Intl.NumberFormat("zh-CN", { style: "currency", currency: currency || "CNY", minimumFractionDigits: 2 }).format(cents / 100);
+  const normalized = typeof currency === "string" && /^[A-Z]{3}$/.test(currency.trim().toUpperCase())
+    ? currency.trim().toUpperCase()
+    : "CNY";
+  try {
+    return new Intl.NumberFormat("zh-CN", { style: "currency", currency: normalized, minimumFractionDigits: 2 }).format(cents / 100);
+  } catch {
+    return new Intl.NumberFormat("zh-CN", { style: "currency", currency: "CNY", minimumFractionDigits: 2 }).format(cents / 100);
+  }
 }
 
 function productCategoryLabel(category: string) {

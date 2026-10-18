@@ -63,7 +63,8 @@ var sensitivePathPrefixes = []string{
 	"/api/affiliate/access",
 }
 
-func requestLogger(logger *slog.Logger) func(http.Handler) http.Handler {
+func requestLogger(logger *slog.Logger, trustProxy ...bool) func(http.Handler) http.Handler {
+	trusted := len(trustProxy) > 0 && trustProxy[0]
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			start := time.Now()
@@ -71,7 +72,7 @@ func requestLogger(logger *slog.Logger) func(http.Handler) http.Handler {
 			next.ServeHTTP(ww, r)
 
 			// Hash IP for logs (never log raw IP)
-			ip := realIP(r)
+			ip := realIP(r, trusted)
 			logger.Info("request",
 				"request_id", requestIDFromRequest(r),
 				"method", r.Method,
@@ -94,15 +95,21 @@ func (rw *responseWriter) WriteHeader(status int) {
 	rw.ResponseWriter.WriteHeader(status)
 }
 
-func realIP(r *http.Request) string {
-	if fwd := r.Header.Get("X-Forwarded-For"); fwd != "" {
-		parts := splitAndTrim(fwd, ",")
-		if len(parts) > 0 {
-			return parts[0]
+func realIP(r *http.Request, trustProxy bool) string {
+	if trustProxy {
+		if fwd := r.Header.Get("X-Forwarded-For"); fwd != "" {
+			parts := splitAndTrim(fwd, ",")
+			if len(parts) > 0 {
+				if parsed := net.ParseIP(parts[0]); parsed != nil {
+					return parsed.String()
+				}
+			}
 		}
 	}
-	host, _, _ := net.SplitHostPort(r.RemoteAddr)
-	return host
+	if host, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
+		return host
+	}
+	return strings.Trim(r.RemoteAddr, "[]")
 }
 
 func maskIP(ip string) string {
@@ -206,13 +213,14 @@ func corsMiddleware(allowedOrigins map[string]bool) func(http.Handler) http.Hand
 }
 
 // adminOriginProtection rejects cross-site state-changing requests to the
-// cookie-authenticated admin API. SameSite cookies remain defense in depth.
+// cookie-authenticated admin and affiliate APIs. SameSite cookies remain defense in depth.
 func adminOriginProtection(allowedOrigins map[string]bool) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if strings.HasPrefix(r.URL.Path, "/api/admin/") && r.Method != http.MethodGet && r.Method != http.MethodHead && r.Method != http.MethodOptions {
+			if (strings.HasPrefix(r.URL.Path, "/api/admin/") || strings.HasPrefix(r.URL.Path, "/api/affiliate/")) &&
+				r.Method != http.MethodGet && r.Method != http.MethodHead && r.Method != http.MethodOptions {
 				origin := r.Header.Get("Origin")
-				if origin != "" && !allowedOrigins[origin] {
+				if r.Header.Get("Sec-Fetch-Site") == "cross-site" || (origin != "" && !allowedOrigins[origin]) {
 					writeError(w, http.StatusForbidden, "ORIGIN_FORBIDDEN", "请求来源不被允许")
 					return
 				}

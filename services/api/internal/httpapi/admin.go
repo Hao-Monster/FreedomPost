@@ -1,8 +1,10 @@
 package httpapi
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"strings"
@@ -10,6 +12,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/fenghaoyun-monster/freedompost/services/api/internal/domain"
+	"github.com/fenghaoyun-monster/freedompost/services/api/internal/paidaccess"
 	"github.com/fenghaoyun-monster/freedompost/services/api/internal/security"
 )
 
@@ -650,14 +653,41 @@ func (s *Server) adminResetAffiliatePassword(w http.ResponseWriter, r *http.Requ
 	var input struct {
 		Password string `json:"password"`
 	}
-	if !decodeJSON(w, r, &input) {
-		return
+	if r.Body != nil {
+		defer r.Body.Close()
+		limit := s.cfg.APIBodyLimitBytes
+		if limit <= 0 {
+			limit = 16 * 1024
+		}
+		raw, err := io.ReadAll(io.LimitReader(r.Body, limit+1))
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "INVALID_JSON", "请求体读取失败")
+			return
+		}
+		if int64(len(raw)) > limit {
+			writeError(w, http.StatusRequestEntityTooLarge, "BODY_TOO_LARGE", "请求体超过大小限制")
+			return
+		}
+		if trimmed := strings.TrimSpace(string(raw)); trimmed != "" {
+			if err := json.Unmarshal([]byte(trimmed), &input); err != nil {
+				writeError(w, http.StatusBadRequest, "INVALID_JSON", "请求体格式不正确")
+				return
+			}
+		}
 	}
-	if !validAffiliatePassword(input.Password) {
+	password := strings.TrimSpace(input.Password)
+	if password == "" {
+		var err error
+		password, err = generateAffiliatePassword()
+		if err != nil {
+			s.internalError(w, r, err)
+			return
+		}
+	} else if !validAffiliatePassword(password) {
 		writeError(w, http.StatusBadRequest, "INVALID_PASSWORD", "密码长度必须为 8 到 72 字节")
 		return
 	}
-	hash, err := bcryptHashReal(input.Password)
+	hash, err := bcryptHashReal(password)
 	if err != nil {
 		s.internalError(w, r, err)
 		return
@@ -671,7 +701,7 @@ func (s *Server) adminResetAffiliatePassword(w http.ResponseWriter, r *http.Requ
 		writeError(w, http.StatusNotFound, "AFFILIATE_NOT_FOUND", "推广者不存在")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "queryPassword": password})
 }
 
 func validAffiliatePassword(password string) bool {
@@ -743,19 +773,30 @@ func validAffiliateCommissionStatus(value string) bool {
 
 // ─── Reader account & article order admin handlers (via paid-access) ──────────
 
-func (s *Server) adminListArticleOrders(w http.ResponseWriter, r *http.Request) {
-	sess := s.requireAdmin(w, r)
-	if sess == nil {
-		return
-	}
-	data, err := s.paidAccess.ListArticleOrders(r.Context(), sess.Username)
+func (s *Server) writePaidAccessResult(w http.ResponseWriter, r *http.Request, data json.RawMessage, err error) {
 	if err != nil {
+		var upErr *paidaccess.UpstreamError
+		if errors.As(err, &upErr) && upErr.StatusCode >= 400 && upErr.StatusCode < 500 && len(upErr.Body) > 0 {
+			w.Header().Set("Content-Type", "application/json; charset=utf-8")
+			w.WriteHeader(upErr.StatusCode)
+			_, _ = w.Write(upErr.Body)
+			return
+		}
 		s.internalError(w, r, err)
 		return
 	}
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(data)
+}
+
+func (s *Server) adminListArticleOrders(w http.ResponseWriter, r *http.Request) {
+	sess := s.requireAdmin(w, r)
+	if sess == nil {
+		return
+	}
+	data, err := s.paidAccess.ListArticleOrders(r.Context(), sess.Username)
+	s.writePaidAccessResult(w, r, data, err)
 }
 
 func (s *Server) adminUpdateArticleOrder(w http.ResponseWriter, r *http.Request) {
@@ -769,15 +810,8 @@ func (s *Server) adminUpdateArticleOrder(w http.ResponseWriter, r *http.Request)
 	if !decodeJSON(w, r, &input) {
 		return
 	}
-	// Re-serialize for paid-access
 	data, err := s.paidAccess.UpdateArticleOrderStatus(r.Context(), r.PathValue("id"), input.Status, sess.Username)
-	if err != nil {
-		s.internalError(w, r, err)
-		return
-	}
-	w.Header().Set("Content-Type", "application/json; charset=utf-8")
-	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write(data)
+	s.writePaidAccessResult(w, r, data, err)
 }
 
 func (s *Server) adminListReaderAccounts(w http.ResponseWriter, r *http.Request) {
@@ -786,13 +820,7 @@ func (s *Server) adminListReaderAccounts(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	data, err := s.paidAccess.ListReaderAccounts(r.Context(), sess.Username)
-	if err != nil {
-		s.internalError(w, r, err)
-		return
-	}
-	w.Header().Set("Content-Type", "application/json; charset=utf-8")
-	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write(data)
+	s.writePaidAccessResult(w, r, data, err)
 }
 
 func (s *Server) adminResetReaderPassword(w http.ResponseWriter, r *http.Request) {
@@ -800,25 +828,8 @@ func (s *Server) adminResetReaderPassword(w http.ResponseWriter, r *http.Request
 	if sess == nil {
 		return
 	}
-	var input struct {
-		Password string `json:"password"`
-	}
-	if !decodeJSON(w, r, &input) {
-		return
-	}
-	hash, err := bcryptHashReal(input.Password)
-	if err != nil {
-		s.internalError(w, r, err)
-		return
-	}
-	data, err := s.paidAccess.ResetReaderPassword(r.Context(), r.PathValue("id"), hash, sess.Username)
-	if err != nil {
-		s.internalError(w, r, err)
-		return
-	}
-	w.Header().Set("Content-Type", "application/json; charset=utf-8")
-	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write(data)
+	data, err := s.paidAccess.ResetReaderPassword(r.Context(), r.PathValue("id"), sess.Username)
+	s.writePaidAccessResult(w, r, data, err)
 }
 
 // ─── Input helpers ────────────────────────────────────────────────────────────

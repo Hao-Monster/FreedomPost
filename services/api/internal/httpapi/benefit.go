@@ -43,7 +43,7 @@ func (s *Server) benefitInfo(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		s.logger.Warn("benefit: get campaign failed", "error", err)
 	}
-	enabled := s.benefit != nil && campaignIsActive(campaign)
+	enabled := s.benefit != nil && s.benefit.Turnstile != nil && s.benefit.Opus8 != nil && campaignIsActive(campaign)
 
 	// Issue a browser credential cookie if visitor doesn't have one.
 	if s.benefit != nil {
@@ -95,7 +95,7 @@ func (s *Server) benefitInfo(w http.ResponseWriter, r *http.Request) {
 //  6. Return the encrypted subscription URL
 func (s *Server) benefitClaim(w http.ResponseWriter, r *http.Request) {
 	noStoreBenefit(w)
-	if s.benefit == nil {
+	if s.benefit == nil || s.benefit.Turnstile == nil || s.benefit.Opus8 == nil {
 		writeError(w, http.StatusServiceUnavailable, "BENEFIT_UNAVAILABLE", "Benefit 功能暂不可用")
 		return
 	}
@@ -299,6 +299,8 @@ func (s *Server) benefitStatus(w http.ResponseWriter, r *http.Request) {
 		sendBenefitReady(w, claim, s.benefit)
 	case "revoked", "expired":
 		writeError(w, http.StatusGone, "BENEFIT_CLAIM_UNAVAILABLE", "该福利已不可用")
+	case "failed", "pending":
+		writeError(w, http.StatusNotFound, "BENEFIT_CLAIM_NOT_FOUND", "未找到领取记录")
 	default:
 		w.Header().Set("Retry-After", "3")
 		writeJSON(w, http.StatusAccepted, map[string]any{"status": "provisioning", "retryAfterSeconds": 3})

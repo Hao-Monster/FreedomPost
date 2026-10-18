@@ -567,7 +567,7 @@ func (api *API) validInternalRequest(request *http.Request, body []byte) bool {
 	actor := request.Header.Get("X-FreedomPost-Admin")
 	signatureText := request.Header.Get("X-FreedomPost-Signature")
 	timestamp, err := strconv.ParseInt(timestampText, 10, 64)
-	if err != nil || abs(time.Now().Unix()-timestamp) > 300 || len(nonce) < 16 || len(nonce) > 128 || !validInternalActor(actor) {
+	if err != nil || timestamp <= 0 || abs(time.Now().Unix()-timestamp) > 300 || len(nonce) < 16 || len(nonce) > 128 || !validInternalActor(actor) {
 		return false
 	}
 	bodyHash := sha256.Sum256(body)

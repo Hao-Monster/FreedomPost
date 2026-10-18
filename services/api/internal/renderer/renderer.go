@@ -12,6 +12,7 @@ package renderer
 import (
 	"bytes"
 	"fmt"
+	stdhtml "html"
 	"regexp"
 	"strings"
 	"unicode"
@@ -68,18 +69,18 @@ func Render(markdown string) Result {
 		}
 	}
 
-	// 2. Post-process
-	processed := renderAttachmentCards(renderYouTubeEmbeds(buf.String()))
+	// 2. Sanitize untrusted markdown/HTML first (matching @freedompost/renderer)
+	sanitized := policy.Sanitize(buf.String())
 
-	// 3. Sanitize
-	sanitized := policy.Sanitize(processed)
+	// 3. Post-process verified directives on sanitized HTML
+	processed := renderYouTubeEmbeds(renderAttachmentCards(sanitized))
 
 	// 4. Extract text
-	searchText := extractSearchText(sanitized)
+	searchText := extractSearchText(processed)
 	excerpt := makeExcerpt(searchText, 160)
 
 	return Result{
-		HTML:       sanitized,
+		HTML:       processed,
 		SearchText: searchText,
 		Excerpt:    excerpt,
 	}
@@ -193,7 +194,10 @@ func (t *headingIDTransformer) Transform(doc *ast.Document, reader text.Reader, 
 		}
 		h := n.(*ast.Heading)
 		var sb strings.Builder
-		for c := h.FirstChild(); c != nil; c = c.NextSibling() {
+		_ = ast.Walk(h, func(c ast.Node, childEntering bool) (ast.WalkStatus, error) {
+			if !childEntering {
+				return ast.WalkContinue, nil
+			}
 			switch c.Kind() {
 			case ast.KindText:
 				seg := c.(*ast.Text).Segment
@@ -201,7 +205,8 @@ func (t *headingIDTransformer) Transform(doc *ast.Document, reader text.Reader, 
 			case ast.KindString:
 				sb.Write(c.(*ast.String).Value)
 			}
-		}
+			return ast.WalkContinue, nil
+		})
 		id := tsUniqueSlug(sb.String(), t.usedIDs)
 		h.SetAttribute([]byte("id"), []byte(id))
 		return ast.WalkContinue, nil
@@ -350,7 +355,7 @@ func buildPolicy() *bluemonday.Policy {
 	p.AllowElements("p", "br", "hr")
 	p.AllowElements("h1", "h2", "h3", "h4", "h5", "h6")
 	p.AllowElements("ul", "ol", "li")
-	p.AllowElements("strong", "em", "s", "mark", "sup", "sub", "del")
+	p.AllowElements("strong", "em", "u", "s", "mark", "sup", "sub", "del")
 	p.AllowElements("blockquote", "pre", "code")
 	p.AllowElements("table", "thead", "tbody", "tr", "th", "td")
 	p.AllowElements("figure", "figcaption")
@@ -383,18 +388,15 @@ func buildPolicy() *bluemonday.Policy {
 	// Aside / callout
 	p.AllowAttrs("class", "role", "aria-hidden").OnElements("aside", "span", "div")
 
-	// Figure / YouTube
+	// Figure
 	p.AllowAttrs("class").OnElements("figure", "figcaption")
-	p.AllowElements("iframe")
-	p.AllowAttrs("src", "title", "loading", "referrerpolicy", "allow", "allowfullscreen", "class").OnElements("iframe")
 
 	// Footnotes
 	p.AllowElements("section", "ol")
 	p.AllowAttrs("class", "id", "href", "role", "aria-label", "data-footnote-ref", "data-footnote-backref").Matching(bluemonday.Paragraph).OnElements("a", "section", "li", "sup")
 
-	// NOTE: <button> is intentionally NOT allowed — TS sanitizer (sanitizeArticleHtml)
-	// strips button elements; buttons in code-block headers appear as plain text.
-	// The frontend JavaScript handles fold/copy functionality via click events.
+	// NOTE: <button> and raw <iframe> are intentionally NOT allowed — TS sanitizer
+	// (sanitizeArticleHtml) strips them before post-processing YouTube directives.
 
 	return p
 }
@@ -526,7 +528,7 @@ func renderAttachmentCards(html string) string {
 			return match
 		}
 		href := sub[1]
-		filename := strings.TrimSpace(sub[2])
+		filename := strings.TrimSpace(stdhtml.UnescapeString(sub[2]))
 		return fmt.Sprintf(
 			`<div class="attachment-card"><span>%s</span><a href="%s" target="_blank" rel="noreferrer noopener" download>下载 / 查看</a></div>`,
 			escapeHTML(filename), href,

@@ -267,6 +267,10 @@ class BenefitPageController {
       return;
     }
     this.lastError = null;
+    if (!this.campaign) {
+      await this.start();
+      return;
+    }
     this.renderState("idle", "请重新完成人机验证");
     try {
       await this.prepareTurnstile();

@@ -16,8 +16,24 @@ export function normalizeEditorImageAlt(value: string): string {
   return normalized;
 }
 
+export function sanitizeEditorMediaUrl(url: string): string {
+  const trimmed = url.trim();
+  if (/^\/(?!\/)/.test(trimmed)) {
+    return trimmed;
+  }
+  try {
+    const parsed = new URL(trimmed);
+    if (parsed.protocol === "http:" || parsed.protocol === "https:") {
+      return trimmed;
+    }
+  } catch {
+    // Reject invalid or unsafe scheme
+  }
+  return "#";
+}
+
 export function editorImageHtml(url: string, alt: string): string {
-  const safeUrl = escapeAttribute(url);
+  const safeUrl = escapeAttribute(sanitizeEditorMediaUrl(url));
   const safeAlt = escapeAttribute(normalizeEditorImageAlt(alt));
   return `<figure class="editor-image" data-fp-type="image"><a href="${safeUrl}" target="_blank" rel="noreferrer noopener"><img src="${safeUrl}" alt="${safeAlt}" /></a></figure>`;
 }

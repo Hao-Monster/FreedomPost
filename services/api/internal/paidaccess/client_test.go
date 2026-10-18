@@ -25,7 +25,7 @@ func TestAdminClientUsesPaidAccessRouteContract(t *testing.T) {
 	if _, err := client.ListReaderAccounts(ctx, "admin"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := client.ResetReaderPassword(ctx, "account-1", "hash", "admin"); err != nil {
+	if _, err := client.ResetReaderPassword(ctx, "account-1", "admin"); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := client.ListArticleOrders(ctx, "admin"); err != nil {

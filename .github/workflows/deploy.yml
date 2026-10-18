@@ -119,6 +119,8 @@ jobs:
           (cd services/paid-access && go run golang.org/x/vuln/cmd/govulncheck@v1.7.0 ./...)
 
       - name: Build
+        env:
+          PUBLIC_SITE_URL: ${{ vars.PUBLIC_SITE_URL || 'https://freedompost.thinderbox.uk' }}
         run: |
           npm run build
           mkdir -p services/paid-access/bin

@@ -33,6 +33,16 @@ func NewClient(baseURL, secret string) *Client {
 	}
 }
 
+// UpstreamError represents a non-2xx HTTP response from the paid-access service.
+type UpstreamError struct {
+	StatusCode int
+	Body       json.RawMessage
+}
+
+func (e *UpstreamError) Error() string {
+	return fmt.Sprintf("paid-access request failed: status %d", e.StatusCode)
+}
+
 // ─── Admin API (proxied through main API) ────────────────────────────────────
 
 // ListReaderAccounts returns all reader accounts via paid-access admin endpoint.
@@ -40,10 +50,9 @@ func (c *Client) ListReaderAccounts(ctx context.Context, adminUsername string) (
 	return c.get(ctx, "/internal/reader-accounts", adminUsername)
 }
 
-// ResetReaderPassword resets a reader account password.
-func (c *Client) ResetReaderPassword(ctx context.Context, accountID, newPasswordHash, adminUsername string) (json.RawMessage, error) {
-	body, _ := json.Marshal(map[string]string{"passwordHash": newPasswordHash})
-	return c.post(ctx, fmt.Sprintf("/internal/reader-accounts/%s/reset-password", accountID), body, adminUsername)
+// ResetReaderPassword resets a reader account password and returns the generated temporaryPassword.
+func (c *Client) ResetReaderPassword(ctx context.Context, accountID, adminUsername string) (json.RawMessage, error) {
+	return c.post(ctx, fmt.Sprintf("/internal/reader-accounts/%s/reset-password", accountID), []byte("{}"), adminUsername)
 }
 
 // ListArticleOrders returns paid article orders.
@@ -127,7 +136,7 @@ func (c *Client) do(ctx context.Context, method, path string, body []byte, actor
 	}
 
 	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
-		return nil, fmt.Errorf("paid-access request failed: status %d", resp.StatusCode)
+		return nil, &UpstreamError{StatusCode: resp.StatusCode, Body: json.RawMessage(data)}
 	}
 
 	return json.RawMessage(data), nil

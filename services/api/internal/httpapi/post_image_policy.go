@@ -14,6 +14,10 @@ import (
 func (s *Server) unmanagedArticleImageHosts(renderedHTML string) []string {
 	tokenizer := html.NewTokenizer(strings.NewReader(renderedHTML))
 	hosts := make(map[string]struct{})
+	ossBaseURL := s.cfg.AliyunOSSPublicBaseURL
+	if ossBaseURL == "" && s.cfg.AliyunOSSBucket != "" && s.cfg.AliyunOSSRegion != "" {
+		ossBaseURL = "https://" + s.cfg.AliyunOSSBucket + ".oss-" + s.cfg.AliyunOSSRegion + ".aliyuncs.com"
+	}
 	for {
 		tokenType := tokenizer.Next()
 		if tokenType == html.ErrorToken {
@@ -27,7 +31,7 @@ func (s *Server) unmanagedArticleImageHosts(renderedHTML string) []string {
 			continue
 		}
 		for _, attribute := range token.Attr {
-			if !strings.EqualFold(attribute.Key, "src") || isAllowedAttachmentURL(attribute.Val, s.cfg.PublicUploadBaseURL, s.cfg.AliyunOSSPublicBaseURL, s.cfg.R2PublicBaseURL) {
+			if !strings.EqualFold(attribute.Key, "src") || isAllowedAttachmentURL(attribute.Val, s.cfg.PublicUploadBaseURL, ossBaseURL, s.cfg.R2PublicBaseURL) {
 				continue
 			}
 			parsed, err := url.Parse(attribute.Val)

@@ -5,6 +5,7 @@ import (
 	"crypto/cipher"
 	"crypto/rand"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -193,14 +194,17 @@ func (s *ClaimCredentialService) Verify(cookieValue string) (string, bool) {
 		K string `json:"k"`
 		S string `json:"s"`
 	}
-	if err := json.Unmarshal(raw, &p); err != nil || p.K == "" || p.S == "" {
+	if err := json.Unmarshal(raw, &p); err != nil || len(p.K) != 64 || p.S == "" {
+		return "", false
+	}
+	if _, err := hex.DecodeString(p.K); err != nil {
 		return "", false
 	}
 	expected := hmacHex(s.hmacKey, []byte(p.K))
 	if !hmacEqual(expected, p.S) {
 		return "", false
 	}
-	return p.K, true
+	return strings.ToLower(p.K), true
 }
 
 // HashNetworkKey hashes the caller IP for rate-limiting (no PII stored).

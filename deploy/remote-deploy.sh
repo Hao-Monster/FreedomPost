@@ -19,12 +19,13 @@ if [ -f "$DEPLOY_PATH/.env" ]; then
     $SUDO chmod 600 "$ROLLBACK_DIR/config.tar.gz"
     printf 'services:\n' > "$ROLLBACK_DIR/images.yml"
     for service in nginx api-go paid-access; do
-      container=$($SUDO docker compose --env-file "$DEPLOY_PATH/.env" -f "$DEPLOY_PATH/deploy/docker-compose.yml" ps -aq "$service")
-      test -n "$container"
-      previous_image=$($SUDO docker inspect --format '{{.Image}}' "$container")
-      rollback_tag="freedompost-rollback-${service}:$(basename "$ROLLBACK_DIR")"
-      $SUDO docker tag "$previous_image" "$rollback_tag"
-      printf '  %s:\n    image: %s\n' "$service" "$rollback_tag" >> "$ROLLBACK_DIR/images.yml"
+      container=$($SUDO docker compose --env-file "$DEPLOY_PATH/.env" -f "$DEPLOY_PATH/deploy/docker-compose.yml" ps -aq "$service" || true)
+      if [ -n "$container" ]; then
+        previous_image=$($SUDO docker inspect --format '{{.Image}}' "$container")
+        rollback_tag="freedompost-rollback-${service}:$(basename "$ROLLBACK_DIR")"
+        $SUDO docker tag "$previous_image" "$rollback_tag"
+        printf '  %s:\n    image: %s\n' "$service" "$rollback_tag" >> "$ROLLBACK_DIR/images.yml"
+      fi
     done
     printf '%s\n' "$RELEASE_SHA" > "$ROLLBACK_DIR/replaced-by-sha"
     echo "Rollback snapshot: $ROLLBACK_DIR"
@@ -89,6 +90,7 @@ if [ ! -f .env ]; then
     printf 'CHATWOOT_TIMEOUT_MS=%s\n' "$CHATWOOT_TIMEOUT_MS"
     printf 'CHANNEL_BRIDGE_ENABLED=%s\n' "${CHANNEL_BRIDGE_ENABLED:-false}"
     printf 'CHANNEL_BRIDGE_PROVIDER=%s\n' "${CHANNEL_BRIDGE_PROVIDER:-wecom}"
+    printf 'CHANNEL_BRIDGE_ALLOW_UNPREFIXED_REPLIES=%s\n' "${CHANNEL_BRIDGE_ALLOW_UNPREFIXED_REPLIES:-false}"
     printf 'CHATWOOT_WEBHOOK_SECRET=%s\n' "${CHATWOOT_WEBHOOK_SECRET:-}"
     printf 'WECOM_BASE_URL=%s\n' "${WECOM_BASE_URL:-https://qyapi.weixin.qq.com}"
     printf 'WECOM_CORP_ID=%s\n' "${WECOM_CORP_ID:-}"
@@ -138,17 +140,22 @@ set_env() {
   # Compose interpolates dollar signs even in service env_file values.
   value="${2//\$/\$\$}"
   env_tmp="$(mktemp)"
-  awk -v key="$key" -v value="$value" '
-    BEGIN { found = 0 }
-    $0 ~ "^" key "=" {
-      print key "=" value
+  ENV_KEY="$key" ENV_VALUE="$value" awk '
+    BEGIN {
+      key = ENVIRON["ENV_KEY"]
+      value = ENVIRON["ENV_VALUE"]
+      prefix = key "="
+      found = 0
+    }
+    index($0, prefix) == 1 {
+      print prefix value
       found = 1
       next
     }
     { print }
     END {
       if (!found) {
-        print key "=" value
+        print prefix value
       }
     }
   ' .env > "$env_tmp"
@@ -189,6 +196,7 @@ set_env "CHATWOOT_INBOX_ID" "$CHATWOOT_INBOX_ID"
 set_env "CHATWOOT_TIMEOUT_MS" "$CHATWOOT_TIMEOUT_MS"
 set_env "CHANNEL_BRIDGE_ENABLED" "${CHANNEL_BRIDGE_ENABLED:-false}"
 set_env "CHANNEL_BRIDGE_PROVIDER" "${CHANNEL_BRIDGE_PROVIDER:-wecom}"
+set_env "CHANNEL_BRIDGE_ALLOW_UNPREFIXED_REPLIES" "${CHANNEL_BRIDGE_ALLOW_UNPREFIXED_REPLIES:-false}"
 set_env_if_present "CHATWOOT_WEBHOOK_SECRET" "${CHATWOOT_WEBHOOK_SECRET:-}"
 set_env "WECOM_BASE_URL" "${WECOM_BASE_URL:-https://qyapi.weixin.qq.com}"
 set_env_if_present "WECOM_CORP_ID" "${WECOM_CORP_ID:-}"

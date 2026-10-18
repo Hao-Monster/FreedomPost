@@ -65,7 +65,7 @@ jobs:
               "SELECT enabled FROM benefit_campaigns WHERE id='webmaster-benefit-v1';" | tr -d '[:space:]')
             if [ "$SQL_STATE" = true ]; then EXPECTED_DB=t; else EXPECTED_DB=f; fi
             if [ "$ACTUAL" != "$EXPECTED_DB" ]; then echo "ERROR campaign-db-verification"; exit 4; fi
-            RESPONSE=$(curl -kfsS --max-time 20 --resolve "$PREVIEW_DOMAIN:443:127.0.0.1" \
+            RESPONSE=$(curl --cacert deploy/trust/cloudflare-origin-ca-rsa.pem -fsS --max-time 20 --resolve "$PREVIEW_DOMAIN:443:127.0.0.1" \
               "https://$PREVIEW_DOMAIN/api/benefits/webmaster")
             if ! printf '%s' "$RESPONSE" | grep -Eq \
               "\"enabled\"[[:space:]]*:[[:space:]]*${EXPECTED}([,}])"; then

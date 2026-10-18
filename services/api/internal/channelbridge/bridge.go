@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/redis/go-redis/v9"
 
@@ -19,11 +20,12 @@ import (
 
 const (
 	conversationReferencePrefix = "FP-CW:"
+	maxWeComTextBytes           = 2048
 	mappingTTL                  = 30 * 24 * time.Hour
 	deliveryTTL                 = 24 * time.Hour
 )
 
-var conversationReference = regexp.MustCompile(`^\s*FP-CW:(\d+)\s+(.+?)\s*$`)
+var conversationReference = regexp.MustCompile(`(?s)^\s*FP-CW:(\d+)\s+(.+?)\s*$`)
 
 // WebhookEvent is the minimal, untrusted Chatwoot event shape consumed by the
 // bridge. Unknown fields are ignored so Chatwoot can add fields compatibly.
@@ -146,7 +148,7 @@ func (s *Service) HandleChatwootWebhook(ctx context.Context, rawBody, timestamp,
 	if content == "" {
 		return nil
 	}
-	forwarded := fmt.Sprintf("%s%d\n%s", conversationReferencePrefix, event.Conversation.ID, content)
+	forwarded := truncateWeComText(fmt.Sprintf("%s%d\n%s", conversationReferencePrefix, event.Conversation.ID, content), maxWeComTextBytes)
 	if err := s.wecom.SendText(ctx, s.operatorUserID, forwarded); err != nil {
 		if deliveryKey != "" {
 			s.releaseClaim(ctx, deliveryKey)
@@ -159,6 +161,21 @@ func (s *Service) HandleChatwootWebhook(ctx context.Context, rawBody, timestamp,
 		}
 	}
 	return nil
+}
+
+func truncateWeComText(s string, maxBytes int) string {
+	if len(s) <= maxBytes {
+		return s
+	}
+	const ellipsis = "..."
+	limit := maxBytes - len(ellipsis)
+	if limit <= 0 {
+		return s[:maxBytes]
+	}
+	for limit > 0 && !utf8.RuneStart(s[limit]) {
+		limit--
+	}
+	return s[:limit] + ellipsis
 }
 
 // HandleWeComMessage accepts only messages from the configured operator and
@@ -205,6 +222,8 @@ func (s *Service) HandleWeComMessage(ctx context.Context, message wecom.Message)
 			return errors.New("wecom conversation reference is invalid")
 		}
 		content = strings.TrimSpace(match[2])
+	} else if strings.HasPrefix(strings.ToUpper(content), conversationReferencePrefix) {
+		return errors.New("wecom conversation reference is invalid")
 	} else if s.allowUnprefixedReplies && s.mappings != nil {
 		var err error
 		conversationID, err = s.mappings.Latest(ctx, "wecom:"+s.operatorUserID)

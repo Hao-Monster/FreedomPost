@@ -140,7 +140,7 @@ func (p *Postgres) FinishOrderSupportDelivery(ctx context.Context, ownerHash, or
 		return nil, domain.ErrInvalidState
 	}
 	_, err := p.pool.Exec(ctx, `UPDATE affiliate_order_support_deliveries d SET status=$5,error_code=$6,message_id=NULLIF($7,0),conversation_id=NULLIF($8,0),lease_until=NULL,updated_at=now()
-		FROM affiliate_order_requests r WHERE r.order_id=d.order_id AND r.owner_hash=$1 AND d.order_id=$2 AND d.binding_id=$3 AND d.attempts=$4 AND d.status='sending'`, ownerHash, orderID, bindingID, attempt, status, errorCode, messageID, conversationID)
+		FROM affiliate_order_requests r WHERE r.order_id=d.order_id AND r.owner_hash=$1 AND d.order_id=$2 AND d.binding_id=$3 AND ((d.attempts=$4 AND d.status='sending') OR ($5='sent' AND d.status <> 'sent'))`, ownerHash, orderID, bindingID, attempt, status, errorCode, messageID, conversationID)
 	if err != nil {
 		return nil, fmt.Errorf("save order delivery result: %w", err)
 	}

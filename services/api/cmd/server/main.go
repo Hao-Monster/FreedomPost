@@ -214,9 +214,8 @@ func run(logger *slog.Logger) error {
 		return errors.New("unknown storage driver: " + cfg.StorageDriver)
 	}
 
-	// ── 7. View count buffer (async write to DB) ──────────────────────────────
+	// ── 7. View count buffer ──────────────────────────────────────────────────
 	viewBuf := viewcount.NewBuffer(redisClient, repo, logger)
-	go viewBuf.StartFlusher(ctx, cfg.ViewBufferFlushInterval)
 
 	// ── 8. Search index cache ─────────────────────────────────────────────────
 	searchCache := searchindex.NewCache()

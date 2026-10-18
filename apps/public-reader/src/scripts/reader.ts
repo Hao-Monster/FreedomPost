@@ -153,6 +153,8 @@ const requestedSlug = pageSearchParams.get("post")?.trim() || pathSlug || null;
 const embeddedPortal = pageSearchParams.get("embed") === "portal";
 releaseReaderBootGuardIfUnrequested(document.documentElement, document.body, requestedSlug, embeddedPortal);
 let activeSlug = requestedSlug ?? initial?.slug ?? document.body.dataset.activeSlug ?? "";
+let activeArticleMeta: ArticleMeta | null = initial?.meta ?? null;
+let openArticleRequestId = 0;
 let posts: PostListItem[] = [];
 let searchDocs: SearchDocument[] = [];
 let query = "";
@@ -237,7 +239,7 @@ function bindEvents() {
     renderList();
     const first = getFilteredPosts()[0];
     if (first && first.slug !== activeSlug) {
-      void openArticle(first.slug, { push: true, countView: true });
+      void openArticle(first.slug, { push: false, countView: false });
     }
   });
 
@@ -405,7 +407,9 @@ async function openArticle(
   slug: string,
   options: { push?: boolean; countView?: boolean } = {}
 ) {
+  const requestId = ++openArticleRequestId;
   const cached = articleCache.get(slug) ?? (await prefetchArticle(slug));
+  if (requestId !== openArticleRequestId) return;
   if (!cached) {
     if (requestedSlug) renderUnavailableArticle();
     finishReaderBootGuard(document.documentElement, document.body);
@@ -414,7 +418,15 @@ async function openArticle(
   }
 
   const canonicalSlug = cached.slug || cached.meta.slug || slug;
+  const switchingArticle = activeSlug !== canonicalSlug;
   activeSlug = canonicalSlug;
+  activeArticleMeta = cached.meta;
+  if (switchingArticle) {
+    replyParentId = null;
+    commentText.placeholder = commentDefaultPlaceholder;
+    clearPendingCommentFiles();
+    updateCommentSubmitState();
+  }
   if (cached.paid && cached.access?.purchased) articleCache.delete(canonicalSlug);
   else articleCache.set(canonicalSlug, cached);
   const lockedPaidArticle = cached.access?.locked === true && cached.paid !== undefined;
@@ -479,6 +491,7 @@ async function openArticle(
 function renderUnavailableArticle() {
   const title = "文章暂时无法加载";
   activeSlug = "";
+  activeArticleMeta = null;
   articleTitle.textContent = title;
   articleDate.textContent = "请刷新页面后重试";
   articleViews.textContent = "";
@@ -988,8 +1001,24 @@ function renderComment(comment: StoredComment, all: StoredComment[], level: numb
   </div>`;
 }
 
+function sanitizeAttachmentUrl(value: string): string {
+  const trimmed = value.trim();
+  if (/^\/(?!\/)/.test(trimmed)) {
+    return trimmed;
+  }
+  try {
+    const parsed = new URL(trimmed);
+    if (parsed.protocol === "http:" || parsed.protocol === "https:") {
+      return trimmed;
+    }
+  } catch {
+    // Reject unsafe URL scheme
+  }
+  return "";
+}
+
 function renderCommentAttachment(file: StoredCommentAttachment): string {
-  const url = file.url ?? "";
+  const url = sanitizeAttachmentUrl(file.url ?? "");
   const mimeType = attachmentMimeType(file);
   const sizeBytes = attachmentSizeBytes(file);
   const isSmallImage = url && mimeType.startsWith("image/") && sizeBytes <= 2 * 1024 * 1024;
@@ -1061,9 +1090,9 @@ function checkCommentRate(slug: string): boolean {
 }
 
 function updateCommentCounts() {
-  const cached = articleCache.get(activeSlug);
-  if (!cached) return;
-  const count = currentCommentCount(cached.meta);
+  const meta = articleCache.get(activeSlug)?.meta ?? (activeArticleMeta?.slug === activeSlug ? activeArticleMeta : null);
+  if (!meta) return;
+  const count = currentCommentCount(meta);
   articleComments.textContent = `${count} 评论`;
   topArticleComments.textContent = `${count} 评论`;
 }

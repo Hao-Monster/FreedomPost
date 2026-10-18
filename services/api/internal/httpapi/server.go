@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"strings"
 
@@ -102,7 +103,7 @@ func (s *Server) Handler() http.Handler {
 	h = adminOriginProtection(s.cfg.AllowedOrigins())(h)
 	h = corsMiddleware(s.cfg.AllowedOrigins())(h)
 	h = securityHeaders(h)
-	h = requestLogger(s.logger)(h)
+	h = requestLogger(s.logger, s.cfg.TrustProxy)(h)
 	h = recovery(s.logger)(h)
 	h = requestIDMiddleware(h)
 	return h
@@ -227,17 +228,23 @@ func (s *Server) internalError(w http.ResponseWriter, r *http.Request, err error
 
 // remoteIP extracts the client IP, respecting X-Forwarded-For when TrustProxy is set.
 func (s *Server) remoteIP(r *http.Request) string {
-	if s.cfg.TrustProxy {
+	if s.cfg != nil && s.cfg.TrustProxy {
 		if forwarded := strings.TrimSpace(strings.Split(r.Header.Get("X-Forwarded-For"), ",")[0]); forwarded != "" {
-			return forwarded
+			if parsed := net.ParseIP(forwarded); parsed != nil {
+				return parsed.String()
+			}
 		}
 	}
-	// Strip port
-	addr := r.RemoteAddr
-	if i := strings.LastIndex(addr, ":"); i > 0 {
-		return addr[:i]
+	if host, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
+		if parsed := net.ParseIP(host); parsed != nil {
+			return parsed.String()
+		}
+		return host
 	}
-	return addr
+	if parsed := net.ParseIP(strings.Trim(r.RemoteAddr, "[]")); parsed != nil {
+		return parsed.String()
+	}
+	return r.RemoteAddr
 }
 
 // renderMarkdown renders markdown using the renderer package.
