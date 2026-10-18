@@ -449,7 +449,6 @@ func (t *ToolInput) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
-
 // ─── Affiliate ───────────────────────────────────────────────────────────────
 
 type AffiliateStatus string

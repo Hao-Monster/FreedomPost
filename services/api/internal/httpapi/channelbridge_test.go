@@ -258,4 +258,3 @@ func TestRealIPUsesRightmostTrustedXForwardedFor(t *testing.T) {
 		t.Fatalf("realIP(trustProxy=false) = %q, want 10.0.0.2", got)
 	}
 }
-
