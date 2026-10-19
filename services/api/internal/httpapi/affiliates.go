@@ -18,8 +18,7 @@ var affiliateWechatIDPattern = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9_-]{5,31}$
 
 // ─── Affiliate auth ───────────────────────────────────────────────────────────
 
-// affiliateAccess handles both login and auto-registration.
-// Matches the TypeScript /api/affiliate/access endpoint exactly.
+// affiliateAccess keeps registration explicit so a login attempt cannot create an account.
 func (s *Server) affiliateAccess(w http.ResponseWriter, r *http.Request) {
 	ip := s.remoteIP(r)
 	ipKey := security.HashText(ip)
@@ -30,8 +29,10 @@ func (s *Server) affiliateAccess(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var input struct {
-		WechatID string `json:"wechatId"`
-		Password string `json:"password"`
+		WechatID       string `json:"wechatId"`
+		Password       string `json:"password"`
+		Intent         string `json:"intent"`
+		TurnstileToken string `json:"turnstileToken"`
 	}
 	if !decodeJSON(w, r, &input) {
 		return
@@ -41,6 +42,36 @@ func (s *Server) affiliateAccess(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "INVALID_WECHAT_ID", "微信号格式不正确")
 		return
 	}
+	if input.Intent != "login" && input.Intent != "register" {
+		writeError(w, http.StatusBadRequest, "INVALID_INTENT", "请选择申请链接或登录查询")
+		return
+	}
+	if input.Intent == "register" {
+		if ok, _ := s.limiter.Allow(r.Context(), "affiliate-register:"+ipKey, 3, time.Hour); !ok {
+			writeError(w, http.StatusTooManyRequests, "RATE_LIMITED", "申请次数过多，请稍后再试")
+			return
+		}
+	}
+	if !s.requirePublicChallenge(w, r, input.TurnstileToken, "affiliate_"+input.Intent) {
+		return
+	}
+	if input.Intent == "login" && !validAffiliatePassword(input.Password) {
+		writeAffiliateLoginFailure(w)
+		return
+	}
+	// Unverified traffic may consume its IP quota, but must not lock a public
+	// WeChat ID out for the account's legitimate owner on another network.
+	if input.Intent == "login" {
+		if ok, _ := s.limiter.Allow(r.Context(), "affiliate-login-account:"+security.HashText(input.WechatID), 12, time.Minute); !ok {
+			writeError(w, http.StatusTooManyRequests, "RATE_LIMITED", "操作太频繁，请稍后再试")
+			return
+		}
+	}
+	release := s.reserveAffiliateAuth(w)
+	if release == nil {
+		return
+	}
+	defer release()
 
 	ctx := r.Context()
 
@@ -53,7 +84,11 @@ func (s *Server) affiliateAccess(w http.ResponseWriter, r *http.Request) {
 
 	created := false
 	generatedPassword := ""
-	if affiliate == nil {
+	if input.Intent == "register" {
+		if affiliate != nil {
+			writeError(w, http.StatusConflict, "REGISTRATION_UNAVAILABLE", "无法申请此微信号，请使用查询密码登录或联系客服")
+			return
+		}
 		generatedPassword, err = generateAffiliatePassword()
 		if err != nil {
 			s.internalError(w, r, err)
@@ -68,8 +103,8 @@ func (s *Server) affiliateAccess(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			existing, lookupErr := s.repo.GetAffiliateByWechatID(ctx, input.WechatID)
 			if lookupErr == nil && existing != nil {
-				affiliate = existing
-				generatedPassword = ""
+				writeError(w, http.StatusConflict, "REGISTRATION_UNAVAILABLE", "无法申请此微信号，请使用查询密码登录或联系客服")
+				return
 			} else {
 				s.internalError(w, r, err)
 				return
@@ -79,16 +114,13 @@ func (s *Server) affiliateAccess(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if !created {
-		if affiliate.Status != domain.AffiliateStatusActive {
-			writeError(w, http.StatusForbidden, "AFFILIATE_DISABLED", "该推广账号已停用")
-			return
+		hash := affiliateDummyPasswordHash
+		if affiliate != nil && affiliate.Status == domain.AffiliateStatusActive {
+			hash = affiliate.PasswordHash
 		}
-		if !validAffiliatePassword(input.Password) {
-			writeError(w, http.StatusUnauthorized, "PASSWORD_REQUIRED", "请输入查询密码")
-			return
-		}
-		if err := bcryptVerifyReal(affiliate.PasswordHash, input.Password); err != nil {
-			writeError(w, http.StatusUnauthorized, "INVALID_PASSWORD", "微信号或查询密码不正确")
+		verifyErr := bcryptVerifyReal(hash, input.Password)
+		if affiliate == nil || affiliate.Status != domain.AffiliateStatusActive || verifyErr != nil {
+			writeAffiliateLoginFailure(w)
 			return
 		}
 	}
@@ -268,6 +300,7 @@ func (s *Server) createOrder(w http.ResponseWriter, r *http.Request) {
 		ProductSlug         string `json:"productSlug"`
 		RecommenderWechatID string `json:"recommenderWechatId"`
 		VisitorID           string `json:"visitorId"`
+		TurnstileToken      string `json:"turnstileToken"`
 	}
 	if !decodeJSON(w, r, &input) {
 		return
@@ -280,6 +313,9 @@ func (s *Server) createOrder(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if !s.requirePublicChallenge(w, r, input.TurnstileToken, "order_create") {
+		return
+	}
 	order, err := s.repo.CreateAffiliateOrder(r.Context(), domain.CreateOrderInput{
 		AffiliateWechatID: input.RecommenderWechatID,
 		ProductSlug:       input.ProductSlug,

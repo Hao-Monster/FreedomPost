@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"net/http/httptest"
 	"reflect"
 	"testing"
 
@@ -49,5 +50,42 @@ func TestAttachmentStorageBaseBoundaries(t *testing.T) {
 				t.Fatalf("allowed = %v, want %v", got, tc.allowed)
 			}
 		})
+	}
+}
+
+func TestProtectedArticleRejectsPublicObjectURLAliases(t *testing.T) {
+	s := &Server{cfg: &config.Config{PublicSiteURL: "https://reader.example", PublicUploadBaseURL: "/api/uploads", R2PublicBaseURL: "https://cdn.example/uploads"}}
+	r := httptest.NewRequest("PUT", "https://admin.example/api/admin/posts/qa", nil)
+	for _, raw := range []string{
+		"/api/uploads/qa.txt", "/api/uploads/qa.txt?download=1", "/api/uploads/qa.txt#download",
+		"https://READER.example:443/api/uploads//qa.txt", "/api/%75ploads/qa.txt", "/api/uploads/x/../qa.txt",
+		"https://CDN.example:443/uploads/qa.txt?download=1", "https://cdn.example/uploads/%71a.txt", "//cdn.example/uploads/qa.txt",
+	} {
+		if !s.hasPublicArticleMedia(r, `<a href="`+raw+`">file</a>`) {
+			t.Errorf("public alias accepted: %s", raw)
+		}
+	}
+	if s.hasPublicArticleMedia(r, `<a href="https://example.org/article">normal link</a>`) {
+		t.Fatal("ordinary external link was blocked")
+	}
+}
+
+func TestManagedArticleNormalizesSameOriginAbsoluteDestinations(t *testing.T) {
+	s := &Server{cfg: &config.Config{PublicSiteURL: "https://reader.example"}}
+	r := httptest.NewRequest("PUT", "https://admin.example/api/admin/posts/qa", nil)
+	path := "/api/post-media/00000000-0000-4000-8000-000000000001/00000000-0000-4000-8000-000000000002"
+	for _, raw := range []string{"https://reader.example" + path, "//reader.example" + path, "https://ADMIN.example:443" + path, "https://reader.example" + path + "?download=1"} {
+		markdown := "[附件: QA](" + raw + ")"
+		if got := s.normalizeManagedArticleReferences(r, markdown, `<a href="`+raw+`">QA</a>`); got != "[附件: QA]("+path+")" {
+			t.Errorf("not normalized: %s", got)
+		}
+		html := `<img src="` + raw + `">`
+		if got := s.normalizeManagedArticleReferences(r, html, html); got != `<img src="`+path+`">` {
+			t.Errorf("HTML source not normalized: %s", got)
+		}
+	}
+	other := "[附件: QA](https://external.example" + path + ")"
+	if got := s.normalizeManagedArticleReferences(r, other, renderMarkdown(other).HTML); got != other {
+		t.Fatal("rewrote another site's URL")
 	}
 }

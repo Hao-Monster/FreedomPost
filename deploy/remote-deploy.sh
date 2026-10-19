@@ -187,7 +187,148 @@ verify_running_admin_credentials() {
 }
 # END admin credential guard functions
 
+# BEGIN origin client certificate guard functions
+# Fixed host paths; no environment switch may disable origin authentication.
+ORIGIN_CLIENT_CA=/etc/caddy/certs/origin-pull-client-ca.crt
+ORIGIN_HEALTH_CERT=/etc/freedompost/origin-health-client.crt
+ORIGIN_HEALTH_KEY=/etc/freedompost/origin-health-client.key
+
+origin_credentials_error() {
+  printf 'Origin mTLS gate: %s\n' "$1" >&2
+  return 1
+}
+
+verify_origin_client_material() {
+  local ca="$1" cert="$2" key="$3" cert_public key_public file
+  for file in "$ca" "$cert" "$key"; do
+    $SUDO test -r "$file" \
+      || { origin_credentials_error 'required host certificate material is missing or unreadable'; return 1; }
+  done
+  [ "$($SUDO stat -c '%u:%a' "$key")" = '0:600' ] \
+    || { origin_credentials_error 'health client key must be root-owned with mode 600'; return 1; }
+  $SUDO openssl verify -purpose sslclient -CAfile "$ca" "$cert" >/dev/null 2>&1 \
+    || { origin_credentials_error 'health client certificate chain or client purpose is invalid'; return 1; }
+  $SUDO openssl x509 -in "$cert" -noout -ext extendedKeyUsage 2>/dev/null | grep -q 'TLS Web Client Authentication' \
+    || { origin_credentials_error 'health certificate must explicitly permit client authentication'; return 1; }
+  for file in "$ca" "$cert"; do
+    $SUDO openssl x509 -in "$file" -checkend 604800 -noout >/dev/null 2>&1 \
+      || { origin_credentials_error 'origin client CA or health certificate expires within seven days'; return 1; }
+  done
+  cert_public=$($SUDO openssl x509 -in "$cert" -pubkey -noout 2>/dev/null) \
+    || { origin_credentials_error 'cannot read health certificate public key'; return 1; }
+  key_public=$($SUDO openssl pkey -in "$key" -pubout -passin pass: 2>/dev/null) \
+    || { origin_credentials_error 'cannot read unencrypted health client key'; return 1; }
+  [ -n "$cert_public" ] && [ "$cert_public" = "$key_public" ] \
+    || { origin_credentials_error 'health certificate and private key do not match'; return 1; }
+}
+
+origin_curl() {
+  $SUDO curl --noproxy '*' --cacert deploy/trust/cloudflare-origin-ca-rsa.pem \
+    --cert "$ORIGIN_HEALTH_CERT" --key "$ORIGIN_HEALTH_KEY" "$@"
+}
+
+verify_origin_rejects_anonymous() {
+  local status code=0
+  status=$(curl --noproxy '*' --cacert deploy/trust/cloudflare-origin-ca-rsa.pem \
+    --max-time 10 --connect-timeout 5 --resolve "$1:443:127.0.0.1" \
+    -sS -o /dev/null -w '%{http_code}' "https://$1/" 2>/dev/null) || code=$?
+  # Positive probes already proved the listener and server certificate work.
+  # Require a TLS failure, not a timeout, refused connection or HTTP rejection.
+  [ "$status" = 000 ] && { [ "$code" -eq 35 ] || [ "$code" -eq 56 ]; }
+}
+# END origin client certificate guard functions
+
+# BEGIN managed storage guard functions
+managed_storage_error() {
+  printf 'Managed storage gate: %s\n' "$1" >&2
+  return 1
+}
+
+verify_managed_storage_configuration() {
+  local driver="${STORAGE_DRIVER:-}" name value bucket public_bucket contents line key literal
+  local -A saved=() effective=()
+  case "$driver" in
+    local|r2|oss) ;;
+    *) managed_storage_error 'STORAGE_DRIVER must be local, r2 or oss'; return 1 ;;
+  esac
+  # Match the credential guard's read-only parsing; never source .env. Only
+  # storage settings are read, and quoted values/Compose dollar escaping remain literal.
+  if [ -f "$DEPLOY_PATH/.env" ]; then
+    contents=$($SUDO awk '/^[[:space:]]*(MANAGED_R2_BUCKET|MANAGED_R2_PREFIX|MANAGED_OSS_BUCKET|MANAGED_OSS_ENDPOINT|MANAGED_OSS_PREFIX|MANAGED_MEDIA_PRIVATE_ORIGIN_CONFIRMED|R2_BUCKET|ALIYUN_OSS_BUCKET)[[:space:]]*=/' "$DEPLOY_PATH/.env" 2>/dev/null) \
+      || { managed_storage_error 'cannot read existing storage configuration'; return 1; }
+    while IFS= read -r line; do
+      [[ "$line" =~ ^[[:space:]]*(MANAGED_R2_BUCKET|MANAGED_R2_PREFIX|MANAGED_OSS_BUCKET|MANAGED_OSS_ENDPOINT|MANAGED_OSS_PREFIX|MANAGED_MEDIA_PRIVATE_ORIGIN_CONFIRMED|R2_BUCKET|ALIYUN_OSS_BUCKET)[[:space:]]*=(.*)$ ]] || continue
+      key="${BASH_REMATCH[1]}"
+      [ -z "${saved[$key]+present}" ] \
+        || { managed_storage_error 'existing storage configuration contains duplicate keys'; return 1; }
+      value="${BASH_REMATCH[2]}"
+      value="${value#"${value%%[![:space:]]*}"}"
+      value="${value%"${value##*[![:space:]]}"}"
+      literal=false
+      case "${value:0:1}" in
+        "'")
+          [[ ${#value} -ge 2 && "${value: -1}" == "'" ]] \
+            || { managed_storage_error 'unsupported storage configuration quoting'; return 1; }
+          value="${value:1:${#value}-2}"
+          literal=true
+          ;;
+        '"')
+          [[ ${#value} -ge 2 && "${value: -1}" == '"' ]] \
+            || { managed_storage_error 'unsupported storage configuration quoting'; return 1; }
+          value="${value:1:${#value}-2}"
+          ;;
+      esac
+      if [ "$literal" = false ]; then value="${value//\$\$/\$}"; fi
+      saved[$key]="$value"
+    done <<< "$contents"
+  fi
+  for name in MANAGED_R2_BUCKET MANAGED_R2_PREFIX MANAGED_OSS_BUCKET MANAGED_OSS_ENDPOINT MANAGED_OSS_PREFIX MANAGED_MEDIA_PRIVATE_ORIGIN_CONFIRMED; do
+    value="${!name:-}"
+    value="${value:-${saved[$name]:-}}"
+    effective[$name]="$value"
+    if [[ "$value" == *$'\n'* || "$value" == *$'\r'* ]]; then
+      managed_storage_error 'managed configuration must not contain line breaks'; return 1
+    fi
+  done
+  case "${effective[MANAGED_MEDIA_PRIVATE_ORIGIN_CONFIRMED]}" in
+    ''|true|false) ;;
+    *) managed_storage_error 'private-origin confirmation must be true or false when supplied'; return 1 ;;
+  esac
+  for name in r2 oss; do
+    if [ "$name" = r2 ]; then
+      bucket="${effective[MANAGED_R2_BUCKET]}"
+      # Public bucket writers only run for the active driver; historical
+      # drivers retain their stored bucket even when runner inputs differ.
+      if [ "$driver" = r2 ]; then public_bucket="${R2_BUCKET:-freedompost}";
+      else public_bucket="${saved[R2_BUCKET]:-freedompost}"; fi
+    else
+      bucket="${effective[MANAGED_OSS_BUCKET]}"
+      if [ "$driver" = oss ]; then public_bucket="${ALIYUN_OSS_BUCKET:-}";
+      else public_bucket="${saved[ALIYUN_OSS_BUCKET]:-}"; fi
+    fi
+    if [ "$driver" = "$name" ] || [ -n "$bucket" ]; then
+      [[ "$bucket" =~ ^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$ ]] \
+        || { managed_storage_error 'a valid dedicated private bucket is required'; return 1; }
+      [ -n "$public_bucket" ] && [ "$bucket" != "$public_bucket" ] \
+        || { managed_storage_error 'managed and public buckets must be distinct'; return 1; }
+      [ "${effective[MANAGED_MEDIA_PRIVATE_ORIGIN_CONFIRMED]}" = true ] \
+        || { managed_storage_error 'confirm private origin access before releasing remote managed storage'; return 1; }
+    fi
+  done
+}
+
+write_managed_storage_configuration() {
+  local name
+  # Empty runner inputs must never erase persistent private storage settings.
+  for name in MANAGED_R2_BUCKET MANAGED_R2_PREFIX MANAGED_OSS_BUCKET MANAGED_OSS_ENDPOINT MANAGED_OSS_PREFIX MANAGED_MEDIA_PRIVATE_ORIGIN_CONFIRMED; do
+    set_env_if_present "$name" "${!name:-}"
+  done
+}
+# END managed storage guard functions
+
 [[ "${RELEASE_SHA:-}" =~ ^[0-9a-f]{40}$ ]]
+verify_origin_client_material "$ORIGIN_CLIENT_CA" "$ORIGIN_HEALTH_CERT" "$ORIGIN_HEALTH_KEY"
+verify_managed_storage_configuration
 prepare_admin_credentials
 printf 'Admin credential mode: %s\n' "$ADMIN_CREDENTIAL_MODE"
 # Keep the running images tagged before the normal image-prune/build steps.
@@ -413,6 +554,7 @@ set_env "ADMIN_PASSWORD_HASH" "$ADMIN_PASSWORD_HASH"
 set_env "POSTGRES_PASSWORD" "$POSTGRES_PASSWORD"
 set_env "DATABASE_URL" "postgres://freedompost:$POSTGRES_PASSWORD@postgres:5432/freedompost"
 set_env "STORAGE_DRIVER" "$STORAGE_DRIVER"
+write_managed_storage_configuration
 set_env "TURNSTILE_SITE_KEY" "$TURNSTILE_SITE_KEY"
 set_env "TURNSTILE_SECRET_KEY" "$TURNSTILE_SECRET_KEY"
 set_env "TURNSTILE_EXPECTED_HOSTNAME" "$PREVIEW_DOMAIN"
@@ -530,19 +672,8 @@ rm -f "$DAEMON_JSON_TMP"
 docker_cmd version
 compose version
 
-if command -v ufw >/dev/null 2>&1; then
-  $SUDO ufw allow 80/tcp || true
-  $SUDO ufw allow 443/tcp || true
-fi
-if command -v firewall-cmd >/dev/null 2>&1 && firewall-cmd --state >/dev/null 2>&1; then
-  $SUDO firewall-cmd --permanent --add-service=http || true
-  $SUDO firewall-cmd --permanent --add-service=https || true
-  $SUDO firewall-cmd --reload || true
-fi
-if command -v iptables >/dev/null 2>&1; then
-  $SUDO iptables -C INPUT -p tcp --dport 80 -j ACCEPT 2>/dev/null || $SUDO iptables -I INPUT -p tcp --dport 80 -j ACCEPT || true
-  $SUDO iptables -C INPUT -p tcp --dport 443 -j ACCEPT 2>/dev/null || $SUDO iptables -I INPUT -p tcp --dport 443 -j ACCEPT || true
-fi
+# Ingress is provisioned separately: allow Cloudflare IPv4/IPv6 ranges in the
+# cloud security group. Never reopen published Docker ports to all sources.
 
 for attempt in 1 2 3; do
   compose --env-file .env -f deploy/docker-compose.yml pull postgres redis && break
@@ -588,15 +719,18 @@ verify_running_admin_credentials
 echo "=== Verifying Go API deployment health gates ==="
 for attempt in $(seq 1 60); do
   if compose --env-file .env -f deploy/docker-compose.yml exec -T api-go /fp-api -health-check \
-    && curl --cacert deploy/trust/cloudflare-origin-ca-rsa.pem -fsS --max-time 10 --connect-timeout 5 --resolve "$PREVIEW_DOMAIN:443:127.0.0.1" "https://$PREVIEW_DOMAIN/health" >/dev/null \
-    && curl --cacert deploy/trust/cloudflare-origin-ca-rsa.pem -fsS --max-time 10 --connect-timeout 5 --resolve "$ADMIN_DOMAIN:443:127.0.0.1" "https://$ADMIN_DOMAIN/" >/dev/null \
-    && curl --cacert deploy/trust/cloudflare-origin-ca-rsa.pem -sS --max-time 10 --connect-timeout 5 --resolve "$ADMIN_DOMAIN:443:127.0.0.1" -o /dev/null -w '%{http_code}' "https://$ADMIN_DOMAIN/api/admin/session" | grep -q '^401$' \
-    && curl --cacert deploy/trust/cloudflare-origin-ca-rsa.pem -sS --max-time 10 --connect-timeout 5 --resolve "$PREVIEW_DOMAIN:443:127.0.0.1" -o /dev/null -w '%{http_code}' "https://$PREVIEW_DOMAIN/api/admin/session" | grep -q '^404$' \
-    && curl --cacert deploy/trust/cloudflare-origin-ca-rsa.pem -fsS --max-time 10 --connect-timeout 5 --resolve "$PREVIEW_DOMAIN:443:127.0.0.1" -D /tmp/benefit-health.headers "https://$PREVIEW_DOMAIN/api/benefits/webmaster" >/dev/null \
-    && grep -qi '^cache-control:.*no-store' /tmp/benefit-health.headers; then
+    && origin_curl -fsS --max-time 10 --connect-timeout 5 --resolve "$PREVIEW_DOMAIN:443:127.0.0.1" "https://$PREVIEW_DOMAIN/health" >/dev/null \
+    && origin_curl -fsS --max-time 10 --connect-timeout 5 --resolve "$ADMIN_DOMAIN:443:127.0.0.1" "https://$ADMIN_DOMAIN/" >/dev/null \
+    && origin_curl -sS --max-time 10 --connect-timeout 5 --resolve "$ADMIN_DOMAIN:443:127.0.0.1" -o /dev/null -w '%{http_code}' "https://$ADMIN_DOMAIN/api/admin/session" | grep -q '^401$' \
+    && origin_curl -sS --max-time 10 --connect-timeout 5 --resolve "$PREVIEW_DOMAIN:443:127.0.0.1" -o /dev/null -w '%{http_code}' "https://$PREVIEW_DOMAIN/api/admin/session" | grep -q '^404$' \
+    && origin_curl -fsS --max-time 10 --connect-timeout 5 --resolve "$PREVIEW_DOMAIN:443:127.0.0.1" -D /tmp/benefit-health.headers "https://$PREVIEW_DOMAIN/api/benefits/webmaster" >/dev/null \
+    && grep -qi '^cache-control:.*no-store' /tmp/benefit-health.headers \
+    && verify_origin_rejects_anonymous "$ADMIN_DOMAIN" \
+    && verify_origin_rejects_anonymous "$PREVIEW_DOMAIN"; then
     echo "=== Go API health check passed (attempt $attempt) ==="
     printf '%s\n' "$RELEASE_SHA" > .release-sha
-    printf 'release_sha=%s\nrollback_dir=%s\ndeployed_at=%s\ncredential_mode=%s\n' "$RELEASE_SHA" "$ROLLBACK_DIR" "$(date -u +%FT%TZ)" "$ADMIN_CREDENTIAL_MODE" > .release-record
+    origin_ca_fingerprint=$($SUDO openssl x509 -in "$ORIGIN_CLIENT_CA" -noout -fingerprint -sha256)
+    printf 'release_sha=%s\nrollback_dir=%s\ndeployed_at=%s\ncredential_mode=%s\norigin_auth=custom-aop-required\norigin_ca_fingerprint=%s\n' "$RELEASE_SHA" "$ROLLBACK_DIR" "$(date -u +%FT%TZ)" "$ADMIN_CREDENTIAL_MODE" "$origin_ca_fingerprint" > .release-record
     echo "=== Production Deployment 100% SUCCESS ==="
     exit 0
   fi

@@ -212,14 +212,25 @@ func (s *Server) uploadCommentAttachment(w http.ResponseWriter, r *http.Request)
 		writeError(w, http.StatusTooManyRequests, "RATE_LIMITED", "上传附件太频繁，请稍后再试")
 		return
 	}
-	if !s.requireCommentAccess(w, r) {
+	post := s.requireReadablePost(w, r)
+	if post == nil {
+		return
+	}
+	if !s.requirePublicChallenge(w, r, r.Header.Get("X-Turnstile-Token"), "comment_upload") {
+		return
+	}
+	select {
+	case s.commentUploadSlots <- struct{}{}:
+		defer func() { <-s.commentUploadSlots }()
+	default:
+		writeError(w, http.StatusTooManyRequests, "UPLOAD_BUSY", "上传繁忙，请稍后再试")
 		return
 	}
 	maxBytes := s.cfg.UploadMaxBytes
 	if maxBytes > publicCommentUploadMaxBytes {
 		maxBytes = publicCommentUploadMaxBytes
 	}
-	s.handleUpload(w, r, "comment", "", "public-comment", maxBytes)
+	s.handleUpload(w, r, "comment", "", "public-comment", maxBytes, post.ID)
 }
 
 func (s *Server) requireCommentAccess(w http.ResponseWriter, r *http.Request) bool {
@@ -260,7 +271,15 @@ func isAllowedAttachmentURL(rawURL string, allowedBases ...string) bool {
 // ─── Upload helper ────────────────────────────────────────────────────────────
 
 // handleUpload processes a multipart file upload and stores it via the storage adapter.
-func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request, ownerType, ownerID, uploaderType string, maxBytes int64) {
+func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request, ownerType, ownerID, uploaderType string, maxBytes int64, contextPostIDs ...string) {
+	contextPostID := ""
+	if len(contextPostIDs) > 0 {
+		contextPostID = contextPostIDs[0]
+	}
+	if contextPostID != "" && s.managedStorage == nil {
+		writeError(w, http.StatusServiceUnavailable, "MEDIA_UNAVAILABLE", "附件存储暂不可用")
+		return
+	}
 	// Limit request body to configured max upload size
 	r.Body = http.MaxBytesReader(w, r.Body, maxBytes+multipartRequestOverheadBytes)
 
@@ -290,6 +309,10 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request, ownerType,
 	}
 	if int64(len(data)) > maxBytes {
 		writeError(w, http.StatusRequestEntityTooLarge, "FILE_TOO_LARGE", "文件超出大小限制")
+		return
+	}
+	if contextPostID != "" {
+		s.persistManagedUpload(w, r, data, header.Filename, ownerType, uploaderType, contextPostID, maxBytes)
 		return
 	}
 

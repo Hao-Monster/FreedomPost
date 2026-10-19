@@ -43,6 +43,9 @@ jobs:
       - name: Install dependencies
         run: npm ci --no-audit --no-fund
 
+      - name: Install pinned Caddy for origin TLS tests
+        run: bash deploy/install-test-caddy.sh
+
       - name: Check
         run: npm run check
 

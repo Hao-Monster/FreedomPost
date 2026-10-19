@@ -58,6 +58,13 @@ jobs:
                 exit 3
               fi
             }
+            origin_curl() {
+              $SUDO curl --noproxy '*' --cacert deploy/trust/cloudflare-origin-ca-rsa.pem \
+                --cert /etc/freedompost/origin-health-client.crt --key /etc/freedompost/origin-health-client.key \
+                --max-time 20 --resolve "$PREVIEW_DOMAIN:443:127.0.0.1" "$@"
+            }
+            # Reject missing/invalid client credentials before changing campaign data.
+            origin_curl -fsS "https://$PREVIEW_DOMAIN/health" >/dev/null
             compose --env-file .env -f deploy/docker-compose.yml exec -T postgres \
               psql -v ON_ERROR_STOP=1 -U freedompost -d freedompost \
               -c "UPDATE benefit_campaigns SET enabled=$SQL_STATE, updated_at=now() WHERE id='webmaster-benefit-v1';" >/dev/null
@@ -66,7 +73,7 @@ jobs:
               "SELECT enabled FROM benefit_campaigns WHERE id='webmaster-benefit-v1';" | tr -d '[:space:]')
             if [ "$SQL_STATE" = true ]; then EXPECTED_DB=t; else EXPECTED_DB=f; fi
             if [ "$ACTUAL" != "$EXPECTED_DB" ]; then echo "ERROR campaign-db-verification"; exit 4; fi
-            RESPONSE=$(curl --cacert deploy/trust/cloudflare-origin-ca-rsa.pem -fsS --max-time 20 --resolve "$PREVIEW_DOMAIN:443:127.0.0.1" \
+            RESPONSE=$(origin_curl -fsS \
               "https://$PREVIEW_DOMAIN/api/benefits/webmaster")
             if ! printf '%s' "$RESPONSE" | grep -Eq \
               "\"enabled\"[[:space:]]*:[[:space:]]*${EXPECTED}([,}])"; then

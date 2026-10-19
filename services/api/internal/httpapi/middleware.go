@@ -299,15 +299,15 @@ func corsMiddleware(allowedOrigins map[string]bool) func(http.Handler) http.Hand
 	}
 }
 
-// adminOriginProtection rejects cross-site state-changing requests to the
-// cookie-authenticated admin and affiliate APIs. SameSite cookies remain defense in depth.
+// adminOriginProtection covers browser write routes only. Signed integration
+// callbacks and internal service endpoints do not rely on browser Origin.
 func adminOriginProtection(allowedOrigins map[string]bool) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if (strings.HasPrefix(r.URL.Path, "/api/admin/") || strings.HasPrefix(r.URL.Path, "/api/affiliate/")) &&
+			if browserWritePath(r.URL.Path) &&
 				r.Method != http.MethodGet && r.Method != http.MethodHead && r.Method != http.MethodOptions {
 				origin := r.Header.Get("Origin")
-				if r.Header.Get("Sec-Fetch-Site") == "cross-site" || (origin != "" && !allowedOrigins[origin]) {
+				if r.Header.Get("Sec-Fetch-Site") == "cross-site" || origin == "" || !allowedOrigins[origin] {
 					writeError(w, http.StatusForbidden, "ORIGIN_FORBIDDEN", "请求来源不被允许")
 					return
 				}
@@ -318,6 +318,12 @@ func adminOriginProtection(allowedOrigins map[string]bool) func(http.Handler) ht
 }
 
 // ─── Cookie helpers ───────────────────────────────────────────────────────────
+
+func browserWritePath(path string) bool {
+	return strings.HasPrefix(path, "/api/admin/") || strings.HasPrefix(path, "/api/affiliate/") ||
+		path == "/api/orders" || strings.HasPrefix(path, "/api/orders/") ||
+		strings.HasPrefix(path, "/api/posts/") || strings.HasPrefix(path, "/api/benefits/")
+}
 
 const (
 	adminCookieName     = "fp_admin_session"

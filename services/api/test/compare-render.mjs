@@ -17,6 +17,7 @@
  * 环境变量：
  *   TS_API_URL   TypeScript API 基地址（默认 http://localhost:3000）
  *   GO_API_URL   Go API 基地址（默认 http://localhost:3001）
+ *   TEST_PUBLIC_ORIGIN / PUBLIC_SITE_URL 写请求 Origin，须在目标服务 AllowedOrigins 中
  *   ADMIN_USERNAME / ADMIN_PASSWORD
  */
 
@@ -61,10 +62,14 @@ function section(name) {
 
 // ─── HTTP helpers ─────────────────────────────────────────────────────────────
 
+function publicOrigin(base) {
+  return new URL(process.env.TEST_PUBLIC_ORIGIN ?? process.env.PUBLIC_SITE_URL ?? base).origin;
+}
+
 async function adminLogin(base) {
   const res = await fetch(`${base}/api/admin/login`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", Origin: publicOrigin(base) },
     body: JSON.stringify({ username: ADMIN_USER, password: ADMIN_PASS }),
   });
   if (!res.ok) throw new Error(`Admin login failed at ${base}: ${res.status}`);
@@ -80,6 +85,7 @@ async function createPost(base, cookie, content, contentField = "content") {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
+      Origin: publicOrigin(base),
       Cookie: cookie,
     },
     body: JSON.stringify({
@@ -105,14 +111,14 @@ async function getPost(base, slug) {
 async function deletePost(base, cookie, id) {
   await fetch(`${base}/api/admin/posts/${id}`, {
     method: "DELETE",
-    headers: { Cookie: cookie },
+    headers: { Cookie: cookie, Origin: publicOrigin(base) },
   });
 }
 
 async function adminLogout(base, cookie) {
   await fetch(`${base}/api/admin/logout`, {
     method: "POST",
-    headers: { Cookie: cookie },
+    headers: { Cookie: cookie, Origin: publicOrigin(base) },
   }).catch(() => {});
 }
 

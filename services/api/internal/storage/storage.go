@@ -28,6 +28,9 @@ type PutInput struct {
 	OwnerType    string // "post" | "comment"
 	OwnerID      string // optional
 	UploaderType string // "admin" | "public-comment"
+	// StoredFilename permits a quota reservation to name the object before Put.
+	// It must be a canonical UUID with the detected MIME type's extension.
+	StoredFilename string
 }
 
 // StoredObject is the result of a successful upload.
@@ -152,7 +155,10 @@ func (a *LocalAdapter) Put(_ context.Context, input PutInput) (*StoredObject, er
 	if err != nil {
 		return nil, err
 	}
-	storedName := GenerateStoredFilename(input.OriginalName, detectedMime)
+	storedName, err := resolveStoredFilename(input, detectedMime)
+	if err != nil {
+		return nil, err
+	}
 	dest := filepath.Join(a.root, storedName)
 	if err := os.WriteFile(dest, input.Data, 0o640); err != nil {
 		return nil, fmt.Errorf("write local file: %w", err)
@@ -172,16 +178,14 @@ func (a *LocalAdapter) Put(_ context.Context, input PutInput) (*StoredObject, er
 }
 
 func (a *LocalAdapter) Delete(_ context.Context, storageKey string) error {
-	trimmed := strings.TrimSpace(storageKey)
-	if trimmed == "" || trimmed == "." || trimmed == "/" {
-		return fmt.Errorf("delete: invalid storage key")
+	target, _, err := a.objectPath(storageKey)
+	if os.IsNotExist(err) {
+		return nil
 	}
-	// Safety: ensure path stays within root
-	clean := filepath.Clean(filepath.Join(a.root, filepath.Base(trimmed)))
-	if !strings.HasPrefix(clean, a.root+string(filepath.Separator)) || clean == a.root {
-		return fmt.Errorf("delete: path escapes storage root")
+	if err != nil {
+		return err
 	}
-	if err := os.Remove(clean); err != nil && !os.IsNotExist(err) {
+	if err := os.Remove(target); err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("delete local file: %w", err)
 	}
 	return nil

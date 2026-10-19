@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "astro dev --host 127.0.0.1 --port 4321",
-    "build": "astro build",
+    "build": "astro build && node ../../tools/check-public-reader-artifacts.mjs",
     "preview": "astro preview --host 127.0.0.1 --port 4321",
     "test": "vitest run src",
     "typecheck": "astro check"

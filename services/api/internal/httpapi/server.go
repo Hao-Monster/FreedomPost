@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"mime"
 	"net/http"
 
 	"github.com/fenghaoyun-monster/freedompost/services/api/internal/benefit"
@@ -36,20 +37,25 @@ type BenefitRuntime struct {
 
 // Server is the HTTP server with all dependencies wired in.
 type Server struct {
-	cfg           *config.Config
-	repo          domain.Repository
-	sessions      *session.Store
-	limiter       ratelimit.Limiter
-	storage       storage.Adapter
-	localStore    *storage.LocalAdapter // nil if not local
-	viewBuffer    *viewcount.Buffer
-	searchCache   *searchindex.Cache
-	paidAccess    *paidaccess.Client
-	benefit       *BenefitRuntime // nil = feature disabled
-	chatwoot      orderMessageClient
-	channelBridge *channelbridge.Service
-	logger        *slog.Logger
-	mux           *http.ServeMux
+	cfg                *config.Config
+	repo               domain.Repository
+	sessions           *session.Store
+	limiter            ratelimit.Limiter
+	storage            storage.Adapter
+	localStore         *storage.LocalAdapter // nil if not local
+	managedStorage     storage.ManagedAdapter
+	managedStores      map[string]storage.ManagedAdapter
+	publicChallenge    PublicChallengeVerifier
+	affiliateAuthSlots chan struct{}
+	commentUploadSlots chan struct{}
+	viewBuffer         *viewcount.Buffer
+	searchCache        *searchindex.Cache
+	paidAccess         *paidaccess.Client
+	benefit            *BenefitRuntime // nil = feature disabled
+	chatwoot           orderMessageClient
+	channelBridge      *channelbridge.Service
+	logger             *slog.Logger
+	mux                *http.ServeMux
 }
 
 // New creates a new Server with all dependencies.
@@ -68,18 +74,20 @@ func New(
 	logger *slog.Logger,
 ) *Server {
 	s := &Server{
-		cfg:         cfg,
-		repo:        repo,
-		sessions:    sessions,
-		limiter:     limiter,
-		storage:     stor,
-		localStore:  localStore,
-		viewBuffer:  viewBuf,
-		searchCache: searchCache,
-		paidAccess:  paidAccess,
-		benefit:     benefitRuntime,
-		logger:      logger,
-		mux:         http.NewServeMux(),
+		cfg:                cfg,
+		repo:               repo,
+		sessions:           sessions,
+		limiter:            limiter,
+		storage:            stor,
+		localStore:         localStore,
+		viewBuffer:         viewBuf,
+		searchCache:        searchCache,
+		paidAccess:         paidAccess,
+		benefit:            benefitRuntime,
+		logger:             logger,
+		mux:                http.NewServeMux(),
+		affiliateAuthSlots: make(chan struct{}, 2),
+		commentUploadSlots: make(chan struct{}, 4),
 	}
 	if chatwootClient != nil {
 		s.chatwoot = chatwootClient
@@ -112,6 +120,7 @@ func (s *Server) routes() {
 	// Health
 	s.mux.HandleFunc("GET /health", s.health)
 	s.mux.HandleFunc("GET /health/ready", s.healthReady)
+	s.mux.HandleFunc("GET /api/security/challenge", s.publicChallengeConfig)
 
 	// ── Public read API ──────────────────────────────────────────────────────
 	s.mux.HandleFunc("GET /api/posts", s.listPosts)
@@ -125,6 +134,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/tools", s.listTools)
 	s.mux.HandleFunc("GET /api/search-index", s.searchIndex)
 	s.mux.HandleFunc("GET /api/uploads/{path...}", s.serveUpload)
+	s.mux.HandleFunc("GET /api/post-media/{postID}/{attachmentID}", s.serveManagedMedia)
 
 	// ── Affiliate API ────────────────────────────────────────────────────────
 	s.mux.HandleFunc("POST /api/affiliate/access", s.affiliateAccess)
@@ -154,6 +164,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /api/admin/posts/{id}/image-imports", s.adminImportPostImages)
 	s.mux.HandleFunc("DELETE /api/admin/posts/{id}", s.adminDeletePost)
 	s.mux.HandleFunc("POST /api/admin/attachments", s.adminUploadAttachment)
+	s.mux.HandleFunc("POST /api/admin/posts/{id}/attachments", s.adminUploadPostAttachment)
 	s.mux.HandleFunc("GET /api/admin/products", s.adminListProducts)
 	s.mux.HandleFunc("POST /api/admin/products", s.adminCreateProduct)
 	s.mux.HandleFunc("PUT /api/admin/products/{id}", s.adminUpdateProduct)
@@ -266,6 +277,13 @@ func flattenedResponse(key string, value any) map[string]any {
 }
 
 func decodeJSON(w http.ResponseWriter, r *http.Request, target any) bool {
+	if browserWritePath(r.URL.Path) {
+		mediaType, _, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
+		if err != nil || mediaType != "application/json" {
+			writeError(w, http.StatusUnsupportedMediaType, "JSON_REQUIRED", "请求必须使用 application/json")
+			return false
+		}
+	}
 	dec := json.NewDecoder(io.LimitReader(r.Body, 256*1024))
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(target); err != nil {

@@ -1,4 +1,6 @@
 import { createIcons, icons } from "lucide";
+import { requestChallenge } from "../lib/public-challenge";
+import { sendViewBeacon } from "../lib/view-beacon";
 import {
   articlePermalinkPath,
   normalizeReferral,
@@ -900,7 +902,8 @@ async function submitComment(event: SubmitEvent) {
   updateCommentSubmitState();
 
   try {
-    const attachments = await Promise.all(files.map((file) => uploadCommentAttachment(file, targetSlug)));
+    const attachments: StoredCommentAttachment[] = [];
+    for (const file of files) attachments.push(await uploadCommentAttachment(file, targetSlug));
     const comment = await createRemoteComment(content, attachments, targetSlug, targetReplyParentId);
     recordCommentSubmission(targetSlug);
     commentCache.set(targetSlug, [...getComments(targetSlug), comment]);
@@ -924,11 +927,13 @@ async function submitComment(event: SubmitEvent) {
 }
 
 async function uploadCommentAttachment(file: File, slug = activeSlug): Promise<StoredCommentAttachment> {
+  const token = await requestChallenge("comment_upload");
   const formData = new FormData();
   formData.set("file", file);
 
   const response = await fetch(`/api/posts/${encodeURIComponent(slug)}/comment-attachments`, {
     method: "POST",
+    headers: { "X-Turnstile-Token": token },
     body: formData
   });
 
@@ -1156,7 +1161,7 @@ function countViewOnce(slug: string) {
   if (localStorage.getItem(key)) return;
   localStorage.setItem(key, "1");
 
-  navigator.sendBeacon?.(`/api/posts/${encodeURIComponent(slug)}/view`, JSON.stringify({ localId: getDeviceId() }));
+  sendViewBeacon(slug, getDeviceId());
 }
 
 function getRandomUsername(): string {

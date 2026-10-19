@@ -127,6 +127,7 @@ func (s *Server) createOwnedOrder(w http.ResponseWriter, r *http.Request) {
 		ProductSlug         string `json:"productSlug"`
 		RecommenderWechatID string `json:"recommenderWechatId"`
 		VisitorID           string `json:"visitorId"`
+		TurnstileToken      string `json:"turnstileToken"`
 	}
 	if !decodeJSON(w, r, &input) {
 		return
@@ -137,11 +138,24 @@ func (s *Server) createOwnedOrder(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "INVALID_ORDER", "商品或推荐人微信号格式不正确")
 		return
 	}
+	orderInput := domain.CreateOwnedOrderInput{CreateOrderInput: domain.CreateOrderInput{ProductSlug: input.ProductSlug, AffiliateWechatID: input.RecommenderWechatID}, OwnerHash: owner, RequestKey: requestKey.String()}
+	h, err := s.repo.LookupOwnedAffiliateOrder(r.Context(), orderInput)
+	if err == nil {
+		writeOrderHandoff(w, http.StatusOK, h)
+		return
+	}
+	if !errors.Is(err, domain.ErrNotFound) {
+		s.writeOrderHandoffError(w, r, err)
+		return
+	}
 	if ok, _ := s.limiter.Allow(r.Context(), "affiliate-order:"+security.HashText(s.remoteIP(r)), 20, time.Hour); !ok {
 		writeError(w, http.StatusTooManyRequests, "RATE_LIMITED", "下单请求过多，请稍后恢复原订单")
 		return
 	}
-	h, created, err := s.repo.CreateOwnedAffiliateOrder(r.Context(), domain.CreateOwnedOrderInput{CreateOrderInput: domain.CreateOrderInput{ProductSlug: input.ProductSlug, AffiliateWechatID: input.RecommenderWechatID}, OwnerHash: owner, RequestKey: requestKey.String()})
+	if !s.requirePublicChallenge(w, r, input.TurnstileToken, "order_create") {
+		return
+	}
+	h, created, err := s.repo.CreateOwnedAffiliateOrder(r.Context(), orderInput)
 	if errors.Is(err, domain.ErrNotFound) {
 		writeError(w, http.StatusNotFound, "PRODUCT_UNAVAILABLE", "商品不存在、已售罄或推荐人无效")
 		return

@@ -36,9 +36,16 @@ type Config struct {
 	VisitorHashSalt string
 
 	// Storage
-	StorageDriver       string // "local", "oss", "r2"
-	LocalStorageRoot    string
-	PublicUploadBaseURL string
+	StorageDriver                      string // "local", "oss", "r2"
+	LocalStorageRoot                   string
+	PublicUploadBaseURL                string
+	ManagedLocalRoot                   string
+	ManagedR2Bucket                    string
+	ManagedR2Prefix                    string
+	ManagedOSSBucket                   string
+	ManagedOSSEndpoint                 string
+	ManagedOSSPrefix                   string
+	ManagedMediaPrivateOriginConfirmed bool
 
 	// Aliyun OSS (optional)
 	AliyunOSSRegion          string
@@ -197,9 +204,16 @@ func Load() (*Config, error) {
 		AdminUsername:   optionalEnv("ADMIN_USERNAME", "admin"),
 		VisitorHashSalt: requireEnv("VISITOR_HASH_SALT"),
 
-		StorageDriver:       optionalEnv("STORAGE_DRIVER", "local"),
-		LocalStorageRoot:    optionalEnv("LOCAL_STORAGE_ROOT", "runtime/local-storage"),
-		PublicUploadBaseURL: optionalEnv("PUBLIC_UPLOAD_BASE_URL", "/api/uploads"),
+		StorageDriver:                      optionalEnv("STORAGE_DRIVER", "local"),
+		LocalStorageRoot:                   optionalEnv("LOCAL_STORAGE_ROOT", "runtime/local-storage"),
+		PublicUploadBaseURL:                optionalEnv("PUBLIC_UPLOAD_BASE_URL", "/api/uploads"),
+		ManagedLocalRoot:                   os.Getenv("MANAGED_LOCAL_ROOT"),
+		ManagedR2Bucket:                    os.Getenv("MANAGED_R2_BUCKET"),
+		ManagedR2Prefix:                    optionalEnv("MANAGED_R2_PREFIX", "media"),
+		ManagedOSSBucket:                   os.Getenv("MANAGED_OSS_BUCKET"),
+		ManagedOSSEndpoint:                 os.Getenv("MANAGED_OSS_ENDPOINT"),
+		ManagedOSSPrefix:                   optionalEnv("MANAGED_OSS_PREFIX", "media"),
+		ManagedMediaPrivateOriginConfirmed: os.Getenv("MANAGED_MEDIA_PRIVATE_ORIGIN_CONFIRMED") == "true",
 
 		AliyunOSSRegion:          os.Getenv("ALIYUN_OSS_REGION"),
 		AliyunOSSBucket:          os.Getenv("ALIYUN_OSS_BUCKET"),

@@ -535,10 +535,11 @@ export function App() {
 
   async function handleAttachmentFiles(files: FileList | null) {
     if (!activePost || !files?.length) return;
+    const targetPostId = activePost.id;
     try {
       await trackPendingMedia(
         insertPendingMediaAtCaret(() =>
-          Promise.all([...files].map(fileToEditorHtml)).then((snippets) => snippets.join(""))
+          Promise.all([...files].map(async (file) => fileToEditorHtml(await uploadEditorFile(file, targetPostId)))).then((snippets) => snippets.join(""))
         )
       );
       showToast(`已上传并插入 ${files.length} 个附件`);
@@ -560,7 +561,7 @@ export function App() {
       await trackPendingMedia(
         insertPendingMediaAtCaret(async () => {
           pastedResult = await localizePastedImages(html, location.href, {
-            uploadEmbeddedImage,
+            uploadEmbeddedImage: (source, name) => uploadEmbeddedImage(source, name, targetPostId ?? ""),
             importRemoteImages: (items) => importRemoteImages(targetPostId ?? "", items)
           });
           if (!pastedResult) throw new Error("No images in pasted HTML");
@@ -599,10 +600,12 @@ export function App() {
 
     if (files.length) {
       event.preventDefault();
+      const targetPostId = activePostIdRef.current;
+      if (!targetPostId) return;
       try {
         await trackPendingMedia(
           insertPendingMediaAtCaret(() =>
-            Promise.all(files.map(fileToEditorHtml)).then((snippets) => snippets.join(""))
+            Promise.all(files.map(async (file) => fileToEditorHtml(await uploadEditorFile(file, targetPostId)))).then((snippets) => snippets.join(""))
           )
         );
         showToast("图片已上传并插入");
@@ -1118,13 +1121,15 @@ export function App() {
   }
 
   async function replaceFailedImageWithLocalFile(file: File) {
+    const targetPostId = activePostIdRef.current;
     const targetID = imageReplacementTargetRef.current;
     imageReplacementTargetRef.current = null;
-    if (!targetID || !editorRef.current) return;
+    if (!targetID || !editorRef.current || !targetPostId) return;
     const card = editorRef.current.querySelector<HTMLElement>(`[data-fp-type="image-import-error"][data-import-id="${CSS.escape(targetID)}"]`);
     if (!card) return;
     try {
-      const uploaded = await uploadFile(file);
+      const uploaded = await uploadEditorFile(file, targetPostId);
+      if (activePostIdRef.current !== targetPostId) return;
       if (!uploaded.mimeType.startsWith("image/")) {
         showToast("请选择图片文件");
         return;
@@ -1142,6 +1147,14 @@ export function App() {
     }
     failedImageImportsRef.current.delete(importID);
     replaceFailedImageCardWithHtml(card, `${editorImageHtml(uploaded.url, uploaded.name)}<p><br></p>`);
+  }
+
+  async function uploadEditorFile(file: File, postID: string): Promise<UploadedFile> {
+    const uploaded = await uploadFile(file, postID);
+    if (uploaded.claimToken) {
+      importedImageClaimsRef.current.set(`${postID}:${uploaded.id}`, { id: uploaded.id, claimToken: uploaded.claimToken, url: uploaded.url });
+    }
+    return uploaded;
   }
 
   function replaceFailedImageCardWithHtml(card: HTMLElement, html: string) {
@@ -2243,8 +2256,7 @@ function formatMoney(cents: number, currency: string): string {
   }
 }
 
-async function fileToEditorHtml(file: File): Promise<string> {
-  const uploaded = await uploadFile(file);
+function fileToEditorHtml(uploaded: UploadedFile): string {
   if (uploaded.mimeType.startsWith("image/")) {
     return `${editorImageHtml(uploaded.url, uploaded.name)}<p><br></p>`;
   }
@@ -2253,18 +2265,19 @@ async function fileToEditorHtml(file: File): Promise<string> {
   return `<div class="editor-attachment" data-fp-type="attachment" data-name="${escapeAttribute(uploaded.name)}" data-href="${escapeAttribute(safeHref)}" contenteditable="false"><span>${escapeHtml(uploaded.name)}</span><a href="${escapeAttribute(safeHref)}" download="${escapeAttribute(uploaded.name)}">下载 / 查看</a></div><p><br></p>`;
 }
 
-async function uploadEmbeddedImage(src: string, name: string): Promise<UploadedFile> {
+async function uploadEmbeddedImage(src: string, name: string, postID: string): Promise<UploadedFile> {
   const response = await fetch(src);
   const blob = await response.blob();
   const file = new File([blob], filenameWithImageExtension(name, blob.type), { type: blob.type || "image/png" });
-  return uploadFile(file);
+  if (!postID) throw new Error("No active article");
+  return uploadFile(file, postID);
 }
 
-async function uploadFile(file: File): Promise<UploadedFile> {
+async function uploadFile(file: File, postID?: string): Promise<UploadedFile> {
   const formData = new FormData();
   formData.set("file", file);
 
-  const response = await fetch("/api/admin/attachments", {
+  const response = await fetch(postID ? `/api/admin/posts/${encodeURIComponent(postID)}/attachments` : "/api/admin/attachments", {
     method: "POST",
     credentials: "include",
     body: formData

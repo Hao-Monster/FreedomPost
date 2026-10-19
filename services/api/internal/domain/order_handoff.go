@@ -36,6 +36,7 @@ type CreateOwnedOrderInput struct {
 }
 
 type OrderHandoffRepository interface {
+	LookupOwnedAffiliateOrder(context.Context, CreateOwnedOrderInput) (*OrderHandoff, error)
 	CreateOwnedAffiliateOrder(context.Context, CreateOwnedOrderInput) (*OrderHandoff, bool, error)
 	RecoverOwnedAffiliateOrder(ctx context.Context, ownerHash, requestKey string) (*OrderHandoff, error)
 	GetOwnedOrderHandoff(ctx context.Context, ownerHash, orderID string) (*OrderHandoff, error)

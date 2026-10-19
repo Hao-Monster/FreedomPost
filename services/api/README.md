@@ -12,7 +12,7 @@
 - WSL2（Ubuntu 22.04+）
 - Docker Desktop（已启用 WSL2 integration）
 - Go 1.25+（`go version`）
-- Node.js 20+（仅集成测试脚本需要）
+- Node.js 20+（可选，渲染对比脚本需要）
 
 ### 一键全量测试
 
@@ -20,7 +20,9 @@
 # 在 WSL 中执行
 cd /mnt/e/CodeWorkstation/freedompost/services/api
 
-# 启动 Postgres + Redis → 编译 → 单元测试 → 集成测试
+# 此连接串仅用于下方 Docker Compose 的隔离测试库
+export TEST_DATABASE_URL='postgres://freedompost:test-password@localhost:5433/freedompost_test?sslmode=disable'
+# 启动 Postgres + Redis → 单元测试 → Go HTTP/PostgreSQL 测试
 make test-all
 ```
 
@@ -36,12 +38,17 @@ make test-unit
 # 3. 编译
 make build
 
-# 4. 后台启动 API + 运行集成测试
+# 4. 运行 Go HTTP/PostgreSQL 测试（无需后台启动 API）
+export TEST_DATABASE_URL='postgres://freedompost:test-password@localhost:5433/freedompost_test?sslmode=disable'
 make test-integration
 
 # 5. 清理
 make clean
 ```
+
+`test/integration.mjs` 使用旧的自动注册、无 challenge 契约，现已在入口立即报错，源码仅供历史参考。当前入口要求非空的 `TEST_DATABASE_URL`，直接运行 `go test -count=1 ./internal/httpapi ./internal/repository`。该数据库必须与生产隔离并已应用迁移；测试会创建和清理合成数据。本次 HTTP/数据库矩阵覆盖安全修复涉及的认证、订单和媒体等行为，不表示旧脚本每一项都已有等价替代。
+
+运行 API（与上述注入 verifier 的 HTTP 测试不同）还必须配置 `TURNSTILE_SITE_KEY`、`TURNSTILE_SECRET_KEY`、`TURNSTILE_EXPECTED_HOSTNAME`；缺失时启动失败，不会关闭人机验证继续接受公开写入。文章私有存储要求及发布前外部验收见 [安全修复记录](../../docs/security-remediation-2026-10-19.md) 和 [受保护媒体说明](../../docs/managed-media.md)。
 
 ---
 
@@ -66,7 +73,7 @@ services/api/
 │   ├── channelbridge/          # Chatwoot↔企业微信文本桥接与去重
 │   └── httpapi/                # HTTP 路由 + 所有 handler
 ├── test/
-│   └── integration.mjs         # 集成测试脚本
+│   └── integration.mjs         # 已停用，保留历史测试源码
 ├── docker-compose.test.yml     # 本地测试基础设施
 ├── .env.test                   # 测试环境配置
 ├── Makefile                    # 开发命令集合

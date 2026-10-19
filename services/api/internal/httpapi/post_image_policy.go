@@ -1,9 +1,13 @@
 package httpapi
 
 import (
+	"net/http"
 	"net/url"
+	"path"
 	"sort"
 	"strings"
+
+	"github.com/fenghaoyun-monster/freedompost/services/api/internal/mediarefs"
 
 	"golang.org/x/net/html"
 )
@@ -31,6 +35,9 @@ func (s *Server) unmanagedArticleImageHosts(renderedHTML string) []string {
 			continue
 		}
 		for _, attribute := range token.Attr {
+			if _, _, valid := mediarefs.Parse(attribute.Val); attribute.Key == "src" && valid {
+				continue
+			}
 			if !strings.EqualFold(attribute.Key, "src") || isAllowedAttachmentURL(attribute.Val, s.cfg.PublicUploadBaseURL, ossBaseURL, s.cfg.R2PublicBaseURL) {
 				continue
 			}
@@ -48,4 +55,74 @@ func (s *Server) unmanagedArticleImageHosts(renderedHTML string) []string {
 	}
 	sort.Strings(result)
 	return result
+}
+
+// Every media reference to a configured public object origin remains public,
+// even if its metadata is missing or a query/fragment aliases the old object.
+func (s *Server) hasPublicArticleMedia(r *http.Request, rendered string) bool {
+	bases := []string{s.cfg.PublicUploadBaseURL, s.cfg.R2PublicBaseURL, s.cfg.AliyunOSSPublicBaseURL}
+	if s.cfg.AliyunOSSBucket != "" && s.cfg.AliyunOSSRegion != "" {
+		bases = append(bases, "https://"+s.cfg.AliyunOSSBucket+".oss-"+s.cfg.AliyunOSSRegion+".aliyuncs.com")
+	}
+	site, _ := url.Parse(s.cfg.PublicSiteURL)
+	requestOrigin, _ := url.Parse("http://" + r.Host)
+	for _, raw := range mediarefs.URLs(rendered) {
+		if _, _, ok := mediarefs.Parse(raw); ok {
+			continue
+		}
+		candidate, err := url.Parse(raw)
+		if err != nil || raw == "" {
+			continue
+		}
+		ownHost := candidate.Host == "" || requestOrigin != nil && strings.EqualFold(candidate.Hostname(), requestOrigin.Hostname()) || site != nil && strings.EqualFold(candidate.Hostname(), site.Hostname())
+		candidatePath := path.Clean(candidate.Path)
+		if ownHost && strings.HasPrefix(candidatePath, "/api/uploads/") {
+			return true
+		}
+		for _, base := range bases {
+			if base == "" {
+				continue
+			}
+			configured, err := url.Parse(base)
+			if err != nil {
+				continue
+			}
+			basePath := strings.TrimRight(path.Clean("/"+configured.Path), "/")
+			if configured.Host != "" && !strings.EqualFold(candidate.Hostname(), configured.Hostname()) {
+				continue
+			}
+			if configured.Host == "" && !ownHost {
+				continue
+			}
+			if candidatePath == basePath || strings.HasPrefix(candidatePath, basePath+"/") {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func (s *Server) normalizeManagedArticleReferences(r *http.Request, markdown, rendered string) string {
+	site, _ := url.Parse(s.cfg.PublicSiteURL)
+	requestOrigin, _ := url.Parse("http://" + r.Host)
+	for _, raw := range mediarefs.URLs(rendered) {
+		candidate, err := url.Parse(raw)
+		if err != nil || candidate.Host == "" || (candidate.Scheme != "" && candidate.Scheme != "http" && candidate.Scheme != "https") {
+			continue
+		}
+		ownHost := requestOrigin != nil && articleOriginHost(candidate) == articleOriginHost(requestOrigin) || site != nil && articleOriginHost(candidate) == articleOriginHost(site)
+		if _, _, ok := mediarefs.Parse(candidate.Path); ownHost && ok {
+			markdown = mediarefs.RewriteMarkdown(markdown, raw, candidate.Path)
+		}
+	}
+	return markdown
+}
+
+func articleOriginHost(u *url.URL) string {
+	host := strings.ToLower(u.Hostname())
+	port := u.Port()
+	if port != "" && port != "80" && port != "443" {
+		host += ":" + port
+	}
+	return host
 }

@@ -53,7 +53,10 @@ func (a *OSSAdapter) Put(ctx context.Context, input PutInput) (*StoredObject, er
 	if err != nil {
 		return nil, err
 	}
-	storedName := GenerateStoredFilename(input.OriginalName, detectedMime)
+	storedName, err := resolveStoredFilename(input, detectedMime)
+	if err != nil {
+		return nil, err
+	}
 	key := storedName
 	if a.prefix != "" {
 		key = strings.TrimRight(a.prefix, "/") + "/" + storedName

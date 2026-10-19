@@ -179,6 +179,14 @@ func (s *Server) adminCreatePost(w http.ResponseWriter, r *http.Request) {
 	}
 
 	rendered := renderMarkdown(content)
+	if normalized := s.normalizeManagedArticleReferences(r, content, rendered.HTML); normalized != content {
+		content = normalized
+		rendered = renderMarkdown(content)
+	}
+	if input.Visibility != "public" && s.hasPublicArticleMedia(r, rendered.HTML) {
+		writeError(w, http.StatusConflict, "MEDIA_MIGRATION_REQUIRED", "文章包含公开存储附件，请先迁移到私有附件存储")
+		return
+	}
 	if hosts := s.unmanagedArticleImageHosts(rendered.HTML); len(hosts) > 0 {
 		writeImageImportError(w, http.StatusBadRequest, "EXTERNAL_IMAGE_NOT_IMPORTED", "文章包含尚未转存的外链图片", "请重新粘贴图片并等待转存完成，或上传本地图片后再保存")
 		return
@@ -200,6 +208,10 @@ func (s *Server) adminCreatePost(w http.ResponseWriter, r *http.Request) {
 		SearchText:      rendered.SearchText,
 		Excerpt:         rendered.Excerpt,
 	})
+	if errors.Is(err, domain.ErrMediaMigrationRequired) {
+		writeError(w, http.StatusConflict, "MEDIA_MIGRATION_REQUIRED", "文章包含旧版公开附件，请先完成附件迁移后再设为私密或付费")
+		return
+	}
 	if err != nil {
 		s.internalError(w, r, err)
 		return
@@ -253,6 +265,14 @@ func (s *Server) adminUpdatePost(w http.ResponseWriter, r *http.Request) {
 	}
 
 	rendered := renderMarkdown(content)
+	if normalized := s.normalizeManagedArticleReferences(r, content, rendered.HTML); normalized != content {
+		content = normalized
+		rendered = renderMarkdown(content)
+	}
+	if input.Visibility != "public" && s.hasPublicArticleMedia(r, rendered.HTML) {
+		writeError(w, http.StatusConflict, "MEDIA_MIGRATION_REQUIRED", "文章包含公开存储附件，请先迁移到私有附件存储")
+		return
+	}
 	if hosts := s.unmanagedArticleImageHosts(rendered.HTML); len(hosts) > 0 {
 		writeImageImportError(w, http.StatusBadRequest, "EXTERNAL_IMAGE_NOT_IMPORTED", "文章包含尚未转存的外链图片", "请重新粘贴图片并等待转存完成，或上传本地图片后再保存")
 		return
@@ -270,6 +290,10 @@ func (s *Server) adminUpdatePost(w http.ResponseWriter, r *http.Request) {
 		Excerpt:         rendered.Excerpt,
 		ImportedImages:  input.ImportedImages,
 	})
+	if errors.Is(err, domain.ErrMediaMigrationRequired) {
+		writeError(w, http.StatusConflict, "MEDIA_MIGRATION_REQUIRED", "文章或评论包含旧版公开附件，请先完成附件迁移后再设为私密或付费")
+		return
+	}
 	if errors.Is(err, domain.ErrInvalidAttachment) {
 		writeImageImportError(w, http.StatusBadRequest, "INVALID_IMPORTED_IMAGE", "已转存图片无效、已过期或未插入文章", "请重新粘贴该图片，或上传本地图片后再保存")
 		return
@@ -805,7 +829,7 @@ func (s *Server) adminUpdateAffiliateOrder(w http.ResponseWriter, r *http.Reques
 	}
 	order, err := s.repo.UpdateAffiliateOrderStatus(r.Context(), r.PathValue("id"), input.OrderStatus, input.CommissionStatus, input.Notes)
 	if errors.Is(err, domain.ErrInvalidState) {
-		writeError(w, http.StatusConflict, "PRODUCT_OUT_OF_STOCK", "商品库存不足，无法恢复已取消的订单")
+		writeError(w, http.StatusConflict, "PRODUCT_OUT_OF_STOCK", "库存不足，无法确认订单完成")
 		return
 	}
 	if err != nil {

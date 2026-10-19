@@ -20,6 +20,8 @@ services:
     env_file:
       - ../.env
     ports:
+      # Cloud security-group ingress must allow only Cloudflare IPv4/IPv6
+      # ranges. Docker published ports do not inherit UFW INPUT protection.
       - "80:80"
       - "443:443"
     depends_on:
@@ -29,6 +31,7 @@ services:
       - caddydata:/data
       - caddyconfig:/config
       - /etc/caddy/certs:/etc/caddy/certs:ro
+      # The health client private key stays outside this directory and mount.
     networks:
       - frontend
 
@@ -42,6 +45,9 @@ services:
         VERSION: ${IMAGE_TAG:-dev}
     env_file:
       - ../.env
+    volumes:
+      - uploads:/runtime/local-storage
+      - privateuploads:/runtime/local-storage-private
     environment:
       PORT: "3000"
       TRUST_PROXY: "true"
@@ -109,6 +115,8 @@ services:
       - backend
 
 volumes:
+  uploads:
+  privateuploads:
   caddydata:
   caddyconfig:
   pgdata:

@@ -21,11 +21,12 @@ import PortalShell from "../layouts/PortalShell.astro";
         <form id="affiliateAccessForm" class="affiliate-access-form">
           <div>
             <h2>申请或查询</h2>
-            <p>首次申请可不填查询密码，系统会自动生成并仅展示一次。</p>
+            <p>已有链接请填写查询密码后登录。首次申请请点击“申请专属链接”，系统会自动生成密码并仅展示一次。</p>
           </div>
           <label><span>微信号</span><input id="affiliateWechatId" name="wechatId" maxlength="32" autocomplete="username" required placeholder="6-32 位字母、数字、下划线或连字符" /></label>
           <label><span>查询密码</span><input id="affiliatePassword" name="password" type="password" maxlength="64" autocomplete="current-password" placeholder="已有专属链接时填写" /></label>
-          <button class="button primary" type="submit"><i data-lucide="chart-no-axes-column-increasing"></i>查看推广数据</button>
+          <button class="button primary" type="submit" name="intent" value="login"><i data-lucide="chart-no-axes-column-increasing"></i>登录查看推广数据</button>
+          <button class="button secondary" type="submit" name="intent" value="register">首次申请专属链接</button>
           <p id="affiliateAccessError" class="form-error" role="alert" hidden></p>
         </form>
 

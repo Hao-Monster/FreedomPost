@@ -26,7 +26,7 @@ test('origin acceptance verifies the actual admin hostname and trust chain', () 
   assert.match(remote, /test "\$\{ADMIN_DOMAIN:-\}" = 'admin-freedompost.thinderbox.uk'/);
   assert.match(remote, /openssl verify -CAfile .* -verify_hostname/);
   assert.match(remote, /openssl x509 .* -checkend 604800/);
-  assert.match(remote, /curl --cacert deploy\/trust\/cloudflare-origin-ca-rsa.pem/);
+  assert.match(remote, /curl --noproxy '\*' --cacert deploy\/trust\/cloudflare-origin-ca-rsa.pem/);
   assert.doesNotMatch(remote, /curl\s+-[a-zA-Z]*k/);
   assert.doesNotMatch(remote, /ps -aq "\$service"[^\n]*\|\|\s*true/);
   assert.match(remote, /for service in nginx api-go paid-access; do[\s\S]*?test -n "\$container"[\s\S]*?done/);

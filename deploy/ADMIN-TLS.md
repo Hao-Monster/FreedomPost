@@ -5,6 +5,11 @@ The admin hostname is `admin-freedompost.thinderbox.uk`. The previous
 
 ## Before rollout
 
+The current configuration also requires dedicated custom AOP and origin mTLS.
+Follow [origin access prerequisites](ORIGIN-SECURITY.md) first. Production
+certificates, Cloudflare AOP and source-network restrictions are external setup
+requirements; this repository change does not configure them.
+
 1. Configure a proxied DNS record for the new hostname pointing to the production
    origin. Preserve the existing Cloudflare Access application policy and protect
    the entire new hostname, including `/api/*`, before exposing it.
@@ -29,14 +34,16 @@ updates. Missing or invalid certificates must stop deployment.
 - Verify public HTTPS without disabling certificate validation.
 - Verify unauthenticated public requests receive the intended Access challenge;
   complete the allowed user's Access login and application login in a browser.
-- Verify the origin with the Cloudflare Origin CA root explicitly trusted:
+- Verify the origin with the Cloudflare Origin CA root explicitly trusted and
+  the dedicated host health client certificate/key supplied:
   admin `/` returns 200, `/health` returns 200, and `/api/admin/session` returns
   401 without an application session.
 - Verify public-site `/api/admin/session`, `/api/admin/login`, and `/admin/`
   return 404. The public reader must continue to return 200.
-- Verify direct origin access cannot bypass the intended Access policy. DNS
-  proxying alone is not an origin access restriction; inspect the origin
-  firewall or validate Access tokens before claiming that boundary is enforced.
+- Verify origin TLS rejects clients without the dedicated client certificate,
+  including loopback requests. Independently verify the cloud security-group
+  Cloudflare allowlist for Docker's published IPv4/IPv6 ports. DNS proxying alone
+  is not an origin access restriction. Keep Access and app session checks.
 
 ## 2026-09-09 handover validation
 
@@ -76,7 +83,9 @@ its invalid TLS prevents relying on an HTTPS redirect as a migration mechanism.
 This section records the 2026-09-09 handover. For a new rollback, follow the
 approved release process and [administrator credential governance](../docs/admin-credentials-governance.md).
 A TLS rollback must preserve current administrator credentials, Origin CA trust,
-Cloudflare Access policy, and public-site admin API isolation. Restoring historical
+custom AOP/mTLS, Cloudflare Access policy, and public-site admin API isolation.
+The initial pre-mTLS snapshot cannot supply a safe gateway rollback; follow
+[origin rollback constraints](ORIGIN-SECURITY.md#rollback). Restoring historical
 administrator credentials requires explicit authorization, synchronization of the
 unescaped bcrypt hash back to GitHub Secret, and an explicit password-rotation
 deployment when running credentials differ. Do not restore an entire historical
