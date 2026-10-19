@@ -2337,6 +2337,18 @@ function markdownToEditorHtml(markdown: string): string {
   return html || "<p><br></p>";
 }
 
+function hasBalancedAttachmentParentheses(url: string): boolean {
+  let depth = 0;
+  for (const character of url) {
+    if (character === "(") depth += 1;
+    if (character === ")") {
+      if (depth === 0) return false;
+      depth -= 1;
+    }
+  }
+  return depth === 0;
+}
+
 function markdownFragmentToEditorHtml(markdown: string): string {
   const lines = markdown.split(/\r?\n/);
   const html: string[] = [];
@@ -2402,8 +2414,9 @@ function markdownFragmentToEditorHtml(markdown: string): string {
       continue;
     }
 
-    const attachment = line.match(/^\[附件[:：]\s*((?:[^\\\]]|\\.)+?)]\(([^)\s]+)\)$/);
-    if (attachment) {
+    const attachment = line.match(/^\[附件[:：]\s*((?:[^\\\]]|\\.)+?)]\((\S+)\)$/);
+    // Keep parentheses inside storage URLs without swallowing a following link.
+    if (attachment && hasBalancedAttachmentParentheses(attachment[2] ?? "")) {
       flushParagraph();
       flushList();
       const attachmentName = unescapeMarkdown(attachment[1] ?? "");
