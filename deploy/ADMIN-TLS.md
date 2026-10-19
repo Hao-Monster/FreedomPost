@@ -73,7 +73,12 @@ bypass prevention are not yet verified.
 Preserve the former hostname's Access protection until migration is complete;
 its invalid TLS prevents relying on an HTTPS redirect as a migration mechanism.
 
-For rollback, restore the backed-up gateway configuration/image and environment
-as a matched set, then validate and reload/recreate only the affected services.
-The previous hostname was already failing public TLS; returning to that state
-is containment, not a verified restoration of public admin access.
+This section records the 2026-09-09 handover. For a new rollback, follow the
+approved release process and [administrator credential governance](../docs/admin-credentials-governance.md).
+A TLS rollback must preserve current administrator credentials, Origin CA trust,
+Cloudflare Access policy, and public-site admin API isolation. Restoring historical
+administrator credentials requires explicit authorization, synchronization of the
+unescaped bcrypt hash back to GitHub Secret, and an explicit password-rotation
+deployment when running credentials differ. Do not restore an entire historical
+environment file solely to roll back TLS. The former hostname was already failing
+public TLS; returning to it is not a verified restoration of public admin access.
