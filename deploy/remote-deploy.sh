@@ -7,7 +7,189 @@ else
   SUDO="sudo"
 fi
 
+# BEGIN admin credential guard functions
+docker_cmd() {
+  if [ -n "$SUDO" ]; then
+    $SUDO docker "$@"
+  else
+    docker "$@"
+  fi
+}
+
+compose() {
+  if docker_cmd compose version >/dev/null 2>&1; then
+    docker_cmd compose "$@"
+  elif command -v docker-compose >/dev/null 2>&1; then
+    $SUDO docker-compose "$@"
+  else
+    echo "Docker Compose is required" >&2
+    return 1
+  fi
+}
+
+admin_credentials_error() {
+  printf 'Admin credential gate: %s\n' "$1" >&2
+  return 1
+}
+
+validate_admin_password_hash() {
+  [[ "$1" =~ ^\$2[ab]\$(0[4-9]|[12][0-9]|3[01])\$[./A-Za-z0-9]{53}$ ]]
+}
+
+read_admin_env_file() {
+  local contents line key value literal hash_count=0 username_count=0
+  ADMIN_FILE_HASH=""
+  ADMIN_FILE_USERNAME="admin"
+  contents=$($SUDO awk '/^[[:space:]]*(ADMIN_PASSWORD_HASH|ADMIN_USERNAME)[[:space:]]*=/' "$1" 2>/dev/null) \
+    || { admin_credentials_error 'cannot read existing credential configuration'; return 1; }
+  while IFS= read -r line; do
+    [[ "$line" =~ ^[[:space:]]*(ADMIN_PASSWORD_HASH|ADMIN_USERNAME)[[:space:]]*=(.*)$ ]] || continue
+    key="${BASH_REMATCH[1]}"
+    value="${BASH_REMATCH[2]}"
+    value="${value#"${value%%[![:space:]]*}"}"
+    value="${value%"${value##*[![:space:]]}"}"
+    literal=false
+    case "${value:0:1}" in
+      "'")
+        [[ ${#value} -ge 2 && "${value: -1}" == "'" ]] \
+          || { admin_credentials_error 'unsupported credential quoting'; return 1; }
+        value="${value:1:${#value}-2}"
+        literal=true
+        ;;
+      '"')
+        [[ ${#value} -ge 2 && "${value: -1}" == '"' ]] \
+          || { admin_credentials_error 'unsupported credential quoting'; return 1; }
+        value="${value:1:${#value}-2}"
+        ;;
+    esac
+    if [ "$literal" = false ]; then
+      value="${value//\$\$/\$}"
+    fi
+    case "$key" in
+      ADMIN_PASSWORD_HASH) hash_count=$((hash_count + 1)); ADMIN_FILE_HASH="$value" ;;
+      ADMIN_USERNAME) username_count=$((username_count + 1)); ADMIN_FILE_USERNAME="${value:-admin}" ;;
+    esac
+  done <<< "$contents"
+  if [ "$hash_count" -ne 1 ] || [ "$username_count" -gt 1 ] || ! validate_admin_password_hash "$ADMIN_FILE_HASH"; then
+    admin_credentials_error 'existing credentials are missing, duplicated or invalid'
+    return 1
+  fi
+}
+
+parse_admin_container_credentials() {
+  local line hash_count=0 username_count=0
+  ADMIN_CONTAINER_HASH=""
+  ADMIN_CONTAINER_USERNAME="admin"
+  while IFS= read -r line; do
+    case "$line" in
+      ADMIN_PASSWORD_HASH=*) hash_count=$((hash_count + 1)); ADMIN_CONTAINER_HASH="${line#*=}" ;;
+      ADMIN_USERNAME=*) username_count=$((username_count + 1)); ADMIN_CONTAINER_USERNAME="${line#*=}"; ADMIN_CONTAINER_USERNAME="${ADMIN_CONTAINER_USERNAME:-admin}" ;;
+    esac
+  done <<< "$1"
+  if [ "$hash_count" -ne 1 ] || [ "$username_count" -gt 1 ] || ! validate_admin_password_hash "$ADMIN_CONTAINER_HASH"; then
+    admin_credentials_error 'container credentials are missing, duplicated or invalid'
+    return 1
+  fi
+}
+
+get_single_admin_container() {
+  local containers container oneoff count=0
+  ADMIN_CONTAINER_ID=""
+  containers=$(compose --env-file "$DEPLOY_PATH/.env" -f "$DEPLOY_PATH/deploy/docker-compose.yml" ps -aq api-go 2>/dev/null) \
+    || { admin_credentials_error 'cannot identify the existing API container'; return 1; }
+  while IFS= read -r container; do
+    [ -n "$container" ] || continue
+    oneoff=$(docker_cmd inspect --format '{{index .Config.Labels "com.docker.compose.oneoff"}}' "$container" 2>/dev/null) \
+      || { admin_credentials_error 'cannot classify the API container'; return 1; }
+    case "$oneoff" in
+      True|true) continue ;;
+      False|false) ;;
+      *) admin_credentials_error 'API container identity is ambiguous'; return 1 ;;
+    esac
+    count=$((count + 1))
+    ADMIN_CONTAINER_ID="$container"
+  done <<< "$containers"
+  if [ "$count" -ne 1 ]; then
+    admin_credentials_error 'expected exactly one existing API service container'
+    return 1
+  fi
+}
+
+read_admin_container_credentials() {
+  local credentials
+  credentials=$(docker_cmd inspect --format '{{range .Config.Env}}{{if or (eq (index (split . "=") 0) "ADMIN_PASSWORD_HASH") (eq (index (split . "=") 0) "ADMIN_USERNAME")}}{{println .}}{{end}}{{end}}' "$1" 2>/dev/null) \
+    || { admin_credentials_error 'cannot read API container credentials'; return 1; }
+  parse_admin_container_credentials "$credentials"
+}
+
+prepare_admin_credentials() {
+  local existing_containers rotation="${ROTATE_ADMIN_PASSWORD-false}"
+  case "$rotation" in
+    true|false) ;;
+    *) admin_credentials_error 'ROTATE_ADMIN_PASSWORD must be true or false'; return 1 ;;
+  esac
+  validate_admin_password_hash "${ADMIN_PASSWORD_HASH:-}" \
+    || { admin_credentials_error 'target must be an unquoted bcrypt $2a$/$2b$ hash'; return 1; }
+  if [ ! -f "$DEPLOY_PATH/.env" ]; then
+    if [ "$rotation" != true ]; then
+      admin_credentials_error 'initial credentials require explicit password rotation'
+      return 1
+    fi
+    if command -v docker >/dev/null 2>&1; then
+      existing_containers=$(docker_cmd ps -aq --filter 'label=com.docker.compose.service=api-go' 2>/dev/null) \
+        || { admin_credentials_error 'cannot verify an empty deployment'; return 1; }
+      if [ -n "$existing_containers" ]; then
+        admin_credentials_error 'existing API containers have no credential configuration'
+        return 1
+      fi
+    fi
+    ADMIN_USERNAME=admin
+    ADMIN_CREDENTIAL_MODE=bootstrap
+    return 0
+  fi
+  read_admin_env_file "$DEPLOY_PATH/.env" || return 1
+  get_single_admin_container || return 1
+  read_admin_container_credentials "$ADMIN_CONTAINER_ID" || return 1
+  if [ "$ADMIN_FILE_HASH" != "$ADMIN_CONTAINER_HASH" ] || [ "$ADMIN_FILE_USERNAME" != "$ADMIN_CONTAINER_USERNAME" ]; then
+    admin_credentials_error 'stored and running credentials differ; reconcile before deployment'
+    return 1
+  fi
+  ADMIN_USERNAME="$ADMIN_CONTAINER_USERNAME"
+  ADMIN_CREDENTIAL_MODE=preserve
+  if [ "$rotation" = true ]; then
+    ADMIN_CREDENTIAL_MODE=rotate
+  elif [ "$ADMIN_PASSWORD_HASH" != "$ADMIN_CONTAINER_HASH" ]; then
+    admin_credentials_error 'password change requires explicit rotation; existing credentials were preserved'
+    return 1
+  fi
+}
+
+verify_admin_credentials() {
+  if [ "$1" != "$ADMIN_PASSWORD_HASH" ] || [ "$2" != "$ADMIN_USERNAME" ]; then
+    admin_credentials_error 'container credentials do not match the selected deployment credentials'
+    return 1
+  fi
+}
+
+verify_candidate_admin_credentials() {
+  local credentials
+  credentials=$(compose --env-file .env -f deploy/docker-compose.yml run --rm --no-deps --entrypoint /bin/sh api-go -c \
+    'printf "ADMIN_PASSWORD_HASH=%s\nADMIN_USERNAME=%s\n" "$ADMIN_PASSWORD_HASH" "${ADMIN_USERNAME:-admin}"' 2>/dev/null) \
+    || { admin_credentials_error 'candidate credential check could not run'; return 1; }
+  parse_admin_container_credentials "$credentials" || return 1
+  verify_admin_credentials "$ADMIN_CONTAINER_HASH" "$ADMIN_CONTAINER_USERNAME"
+}
+
+verify_running_admin_credentials() {
+  get_single_admin_container || return 1
+  read_admin_container_credentials "$ADMIN_CONTAINER_ID" || return 1
+  verify_admin_credentials "$ADMIN_CONTAINER_HASH" "$ADMIN_CONTAINER_USERNAME"
+}
+# END admin credential guard functions
+
 [[ "${RELEASE_SHA:-}" =~ ^[0-9a-f]{40}$ ]]
+prepare_admin_credentials
+printf 'Admin credential mode: %s\n' "$ADMIN_CREDENTIAL_MODE"
 # Keep the running images tagged before the normal image-prune/build steps.
 # The snapshot contains credentials, stays on this host and is never uploaded.
 ROLLBACK_DIR="${DEPLOY_PATH}.rollback/$(date -u +%Y%m%dT%H%M%SZ)-${RELEASE_SHA:0:12}"
@@ -19,8 +201,12 @@ if [ -f "$DEPLOY_PATH/.env" ]; then
     $SUDO chmod 600 "$ROLLBACK_DIR/config.tar.gz"
     printf 'services:\n' > "$ROLLBACK_DIR/images.yml"
     for service in nginx api-go paid-access; do
-      containers=$($SUDO docker compose --env-file "$DEPLOY_PATH/.env" -f "$DEPLOY_PATH/deploy/docker-compose.yml" ps -aq "$service")
-      container="${containers%%$'\n'*}"
+      if [ "$service" = api-go ]; then
+        container="$ADMIN_CONTAINER_ID"
+      else
+        containers=$(compose --env-file "$DEPLOY_PATH/.env" -f "$DEPLOY_PATH/deploy/docker-compose.yml" ps -aq "$service")
+        container="${containers%%$'\n'*}"
+      fi
       test -n "$container"
       previous_image=$($SUDO docker inspect --format '{{.Image}}' "$container")
       rollback_tag="freedompost-rollback-${service}:$(basename "$ROLLBACK_DIR")"
@@ -59,11 +245,6 @@ $SUDO openssl x509 -in /etc/caddy/certs/admin-origin.crt -checkend 604800 -noout
 if [ -f .env ]; then
   $SUDO chown "$(id -u):$(id -g)" .env
   chmod 600 .env
-fi
-
-if [[ ! "${ADMIN_PASSWORD_HASH:-}" =~ ^\$2[ab]\$[0-9]{2}\$[./A-Za-z0-9]{53}$ ]]; then
-  echo 'ADMIN_PASSWORD_HASH must be an unquoted bcrypt $2a$/$2b$ hash' >&2
-  exit 1
 fi
 
 if [ ! -f .env ]; then
@@ -108,7 +289,7 @@ if [ ! -f .env ]; then
     printf '%s\n' "UPLOAD_MAX_BYTES=524288000"
     printf 'COOKIE_SECRET=%s\n' "$COOKIE_SECRET"
     printf 'VISITOR_HASH_SALT=%s\n' "$VISITOR_HASH_SALT"
-    printf '%s\n' "ADMIN_USERNAME=admin"
+    printf 'ADMIN_USERNAME=%s\n' "$ADMIN_USERNAME"
     printf 'ADMIN_PASSWORD_HASH=%s\n' "$ADMIN_PASSWORD_HASH"
     printf '%s\n' "POSTGRES_DB=freedompost"
     printf '%s\n' "POSTGRES_USER=freedompost"
@@ -136,18 +317,20 @@ if [ ! -f .env ]; then
 fi
 
 set_env() {
+  local key value env_tmp
   key="$1"
   # Compose interpolates dollar signs even in service env_file values.
   value="${2//\$/\$\$}"
-  env_tmp="$(mktemp)"
-  ENV_KEY="$key" ENV_VALUE="$value" awk '
+  env_tmp="$(mktemp .env.XXXXXX)"
+  if ! ENV_KEY="$key" ENV_VALUE="$value" awk '
     BEGIN {
       key = ENVIRON["ENV_KEY"]
       value = ENVIRON["ENV_VALUE"]
       prefix = key "="
+      pattern = "^[[:space:]]*" key "[[:space:]]*="
       found = 0
     }
-    index($0, prefix) == 1 {
+    $0 ~ pattern {
       print prefix value
       found = 1
       next
@@ -158,15 +341,21 @@ set_env() {
         print prefix value
       }
     }
-  ' .env > "$env_tmp"
-  cat "$env_tmp" > .env
-  rm -f "$env_tmp"
+  ' .env > "$env_tmp"; then
+    rm -f "$env_tmp"
+    return 1
+  fi
+  mv "$env_tmp" .env
 }
 
 remove_env_key() {
+  local key env_tmp
   key="$1"
-  env_tmp="$(mktemp)"
-  awk -v key="$key" 'index($0, key "=") != 1 { print }' .env > "$env_tmp"
+  env_tmp="$(mktemp .env.XXXXXX)"
+  if ! awk -v key="$key" '$0 !~ ("^[[:space:]]*" key "[[:space:]]*=") { print }' .env > "$env_tmp"; then
+    rm -f "$env_tmp"
+    return 1
+  fi
   mv "$env_tmp" .env
 }
 
@@ -218,6 +407,8 @@ set_env "VISITOR_HASH_SALT" "$VISITOR_HASH_SALT"
 # bcrypt hash above is the sole production source of truth.
 remove_env_key "ADMIN_PASSWORD"
 remove_env_key "HASH_PASSWORD"
+# Preserve the existing username line, including literal quoting and spaces.
+# Bootstrap writes admin above; password rotation must not rewrite the username.
 set_env "ADMIN_PASSWORD_HASH" "$ADMIN_PASSWORD_HASH"
 set_env "POSTGRES_PASSWORD" "$POSTGRES_PASSWORD"
 set_env "DATABASE_URL" "postgres://freedompost:$POSTGRES_PASSWORD@postgres:5432/freedompost"
@@ -336,29 +527,6 @@ if ! $SUDO cmp -s "$DAEMON_JSON_TMP" /etc/docker/daemon.json 2>/dev/null; then
 fi
 rm -f "$DAEMON_JSON_TMP"
 
-docker_cmd() {
-  if [ -n "$SUDO" ]; then
-    $SUDO docker "$@"
-  else
-    docker "$@"
-  fi
-}
-
-compose() {
-  if docker_cmd compose version >/dev/null 2>&1; then
-    docker_cmd compose "$@"
-  elif command -v docker-compose >/dev/null 2>&1; then
-    if [ -n "$SUDO" ]; then
-      $SUDO docker-compose "$@"
-    else
-      docker-compose "$@"
-    fi
-  else
-    echo "Docker Compose is required"
-    exit 1
-  fi
-}
-
 docker_cmd version
 compose version
 
@@ -390,6 +558,7 @@ docker_cmd system df || true
 
 echo "=== Building pre-compiled lightweight containers ==="
 compose --env-file .env -f deploy/docker-compose.yml build paid-access nginx api-go
+verify_candidate_admin_credentials
 
 # Validate certificate loading before replacing the running public gateway.
 compose --env-file .env -f deploy/docker-compose.yml run --rm --no-deps nginx caddy validate --config /etc/caddy/Caddyfile
@@ -413,6 +582,7 @@ compose --env-file .env -f deploy/docker-compose.yml run --rm api-go -migrate
 
 echo "=== Starting production services ==="
 compose --env-file .env -f deploy/docker-compose.yml up -d --force-recreate --remove-orphans paid-access nginx api-go
+verify_running_admin_credentials
 
 # ── Deployment gate: Go API must be healthy ────────────────────────────
 echo "=== Verifying Go API deployment health gates ==="
@@ -426,7 +596,7 @@ for attempt in $(seq 1 60); do
     && grep -qi '^cache-control:.*no-store' /tmp/benefit-health.headers; then
     echo "=== Go API health check passed (attempt $attempt) ==="
     printf '%s\n' "$RELEASE_SHA" > .release-sha
-    printf 'release_sha=%s\nrollback_dir=%s\ndeployed_at=%s\n' "$RELEASE_SHA" "$ROLLBACK_DIR" "$(date -u +%FT%TZ)" > .release-record
+    printf 'release_sha=%s\nrollback_dir=%s\ndeployed_at=%s\ncredential_mode=%s\n' "$RELEASE_SHA" "$ROLLBACK_DIR" "$(date -u +%FT%TZ)" "$ADMIN_CREDENTIAL_MODE" > .release-record
     echo "=== Production Deployment 100% SUCCESS ==="
     exit 0
   fi

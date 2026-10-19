@@ -274,15 +274,21 @@ export function App() {
 
   async function login(event: FormEvent) {
     event.preventDefault();
-    const response = await fetch("/api/admin/login", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      credentials: "include",
-      body: JSON.stringify({ username, password })
-    });
+    let response: Response;
+    try {
+      response = await fetch("/api/admin/login", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        credentials: "include",
+        body: JSON.stringify({ username, password })
+      });
+    } catch {
+      showToast("无法连接登录服务，请检查网络后重试");
+      return;
+    }
 
     if (!response.ok) {
-      showToast("登录失败");
+      showToast(await readReauthenticationFailure(response));
       return;
     }
 

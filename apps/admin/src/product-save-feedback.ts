@@ -249,8 +249,8 @@ export async function readReauthenticationFailure(response: Response): Promise<s
   const code = readErrorEnvelope(payload)?.code;
   if (code === "LOGIN_FAILED" || response.status === 401) return "用户名或密码不正确";
   if (code === "RATE_LIMITED" || response.status === 429) return "登录尝试过多，请稍后再试";
-  if (response.status >= 500) return "服务器暂时无法恢复登录，请稍后再试";
-  return `重新登录失败（HTTP ${response.status}）`;
+  if (response.status >= 500) return "登录服务暂时不可用，请稍后再试";
+  return `登录失败（HTTP ${response.status}）`;
 }
 
 function addIntegerRangeIssue(
