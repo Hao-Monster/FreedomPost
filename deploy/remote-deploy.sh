@@ -800,8 +800,8 @@ for attempt in $(seq 1 60); do
     && origin_curl -fsS --max-time 10 --connect-timeout 5 --resolve "$ADMIN_DOMAIN:443:127.0.0.1" "https://$ADMIN_DOMAIN/" >/dev/null \
     && origin_curl -sS --max-time 10 --connect-timeout 5 --resolve "$ADMIN_DOMAIN:443:127.0.0.1" -o /dev/null -w '%{http_code}' "https://$ADMIN_DOMAIN/api/admin/session" | grep -q '^401$' \
     && origin_curl -sS --max-time 10 --connect-timeout 5 --resolve "$PREVIEW_DOMAIN:443:127.0.0.1" -o /dev/null -w '%{http_code}' "https://$PREVIEW_DOMAIN/api/admin/session" | grep -q '^404$' \
-    && origin_curl -fsS --max-time 10 --connect-timeout 5 --resolve "$PREVIEW_DOMAIN:443:127.0.0.1" -D /tmp/benefit-health.headers "https://$PREVIEW_DOMAIN/api/benefits/webmaster" >/dev/null \
-    && grep -qi '^cache-control:.*no-store' /tmp/benefit-health.headers \
+    && benefit_headers=$(origin_curl -fsS --max-time 10 --connect-timeout 5 --resolve "$PREVIEW_DOMAIN:443:127.0.0.1" -D - -o /dev/null "https://$PREVIEW_DOMAIN/api/benefits/webmaster") \
+    && grep -qi '^cache-control:.*no-store' <<< "$benefit_headers" \
     && verify_origin_rejects_anonymous "$ADMIN_DOMAIN" \
     && verify_origin_rejects_anonymous "$PREVIEW_DOMAIN"; then
     echo "=== Go API health check passed (attempt $attempt) ==="

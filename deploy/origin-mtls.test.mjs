@@ -66,7 +66,7 @@ test('origin guard runs before snapshot, extraction, credentials and service cha
   assert.doesNotMatch(remote, /ufw allow|firewall-cmd --permanent|iptables -[IC] INPUT/);
   assert.match(remote, /origin_auth=custom-aop-required/);
   const probes = remote.slice(remote.indexOf('echo "=== Verifying Go API'));
-  assert.equal((probes.match(/&& origin_curl /g) ?? []).length, 5);
+  assert.equal((probes.match(/origin_curl /g) ?? []).length, 5);
   assert.doesNotMatch(probes, /&& curl /);
 });
 
