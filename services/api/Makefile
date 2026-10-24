@@ -9,6 +9,7 @@ GREEN  := \033[0;32m
 YELLOW := \033[1;33m
 RED    := \033[0;31m
 NC     := \033[0m
+VERSION ?= local-dev
 
 help: ## 显示帮助
 	@echo ""
@@ -38,13 +39,18 @@ test-infra-logs: ## 查看测试基础设施日志
 
 # ─── 编译 & 静态检查 ──────────────────────────────────────────────────────────
 
-build: ## 编译二进制（输出到 bin/fp-api）
+build: ## 编译 API 与媒体迁移工具（输出到 bin/）
 	@mkdir -p bin
 	CGO_ENABLED=0 go build \
-		-ldflags "-s -w -X main.version=local-dev" \
+		-ldflags "-s -w -X main.version=$(VERSION)" \
 		-o bin/fp-api \
 		./cmd/server
-	@echo "$(GREEN)✅ 编译完成：bin/fp-api$(NC)"
+	CGO_ENABLED=0 go build \
+		-ldflags "-s -w -X main.version=$(VERSION)" \
+		-o bin/media-migrate \
+		./cmd/media-migrate
+	@test "$$(bin/media-migrate -version)" = "$(VERSION)"
+	@echo "$(GREEN)✅ 编译完成：bin/fp-api、bin/media-migrate$(NC)"
 
 fmt: ## 格式化 Go 代码
 	gofmt -w -l .
@@ -91,13 +97,9 @@ dev-stop: ## 停止后台 Go API
 		echo "$(YELLOW)找不到 PID 文件$(NC)"; \
 	fi
 
-test-integration: dev-run ## 运行集成测试（自动启动 API）
-	@echo "$(GREEN)运行集成测试...$(NC)"
-	@GO_API_URL=http://localhost:3001 \
-	 ADMIN_USERNAME=$$(grep ADMIN_USERNAME .env.test | cut -d= -f2) \
-	 ADMIN_PASSWORD=$$(grep ADMIN_PASSWORD .env.test | cut -d= -f2 | head -1) \
-	 node test/integration.mjs
-	@$(MAKE) dev-stop
+test-integration: ## 运行 Go HTTP/PostgreSQL 测试（需 TEST_DATABASE_URL）
+	@test -n "$$TEST_DATABASE_URL" || { echo "请设置 TEST_DATABASE_URL，指向已应用迁移的隔离 PostgreSQL 测试库"; exit 1; }
+	go test -count=1 ./internal/httpapi ./internal/repository
 
 # ─── 全量测试（单元 + 集成）──────────────────────────────────────────────────
 

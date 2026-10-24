@@ -212,14 +212,25 @@ func (s *Server) uploadCommentAttachment(w http.ResponseWriter, r *http.Request)
 		writeError(w, http.StatusTooManyRequests, "RATE_LIMITED", "上传附件太频繁，请稍后再试")
 		return
 	}
-	if !s.requireCommentAccess(w, r) {
+	post := s.requireReadablePost(w, r)
+	if post == nil {
+		return
+	}
+	if !s.requirePublicChallenge(w, r, r.Header.Get("X-Turnstile-Token"), "comment_upload") {
+		return
+	}
+	select {
+	case s.commentUploadSlots <- struct{}{}:
+		defer func() { <-s.commentUploadSlots }()
+	default:
+		writeError(w, http.StatusTooManyRequests, "UPLOAD_BUSY", "上传繁忙，请稍后再试")
 		return
 	}
 	maxBytes := s.cfg.UploadMaxBytes
 	if maxBytes > publicCommentUploadMaxBytes {
 		maxBytes = publicCommentUploadMaxBytes
 	}
-	s.handleUpload(w, r, "comment", "", "public-comment", maxBytes)
+	s.handleUpload(w, r, "comment", "", "public-comment", maxBytes, post.ID)
 }
 
 func (s *Server) requireCommentAccess(w http.ResponseWriter, r *http.Request) bool {
@@ -260,36 +271,72 @@ func isAllowedAttachmentURL(rawURL string, allowedBases ...string) bool {
 // ─── Upload helper ────────────────────────────────────────────────────────────
 
 // handleUpload processes a multipart file upload and stores it via the storage adapter.
-func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request, ownerType, ownerID, uploaderType string, maxBytes int64) {
+func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request, ownerType, ownerID, uploaderType string, maxBytes int64, contextPostIDs ...string) {
+	contextPostID := ""
+	if len(contextPostIDs) > 0 {
+		contextPostID = contextPostIDs[0]
+	}
+	if contextPostID != "" && s.managedStorage == nil {
+		writeError(w, http.StatusServiceUnavailable, "MEDIA_UNAVAILABLE", "附件存储暂不可用")
+		return
+	}
 	// Limit request body to configured max upload size
 	r.Body = http.MaxBytesReader(w, r.Body, maxBytes+multipartRequestOverheadBytes)
 
-	if err := r.ParseMultipartForm(1 << 20); err != nil {
+	reader, err := r.MultipartReader()
+	if err != nil {
 		writeError(w, http.StatusBadRequest, "INVALID_REQUEST", "无效的上传请求")
 		return
 	}
-	if r.MultipartForm != nil {
-		defer r.MultipartForm.RemoveAll()
-	}
 
-	file, header, err := r.FormFile("file")
-	if err != nil {
+	var (
+		filename  string
+		data      []byte
+		foundFile bool
+	)
+	for {
+		part, nextErr := reader.NextPart()
+		if errors.Is(nextErr, io.EOF) {
+			break
+		}
+		if nextErr != nil {
+			var maxBytesErr *http.MaxBytesError
+			if errors.As(nextErr, &maxBytesErr) {
+				writeError(w, http.StatusRequestEntityTooLarge, "FILE_TOO_LARGE", "文件超出大小限制")
+				return
+			}
+			writeError(w, http.StatusBadRequest, "INVALID_REQUEST", "无效的上传请求")
+			return
+		}
+		if part.FormName() != "file" || part.FileName() == "" {
+			_ = part.Close()
+			continue
+		}
+		filename = part.FileName()
+		data, err = io.ReadAll(io.LimitReader(part, maxBytes+1))
+		_ = part.Close()
+		if err != nil {
+			var maxBytesErr *http.MaxBytesError
+			if errors.As(err, &maxBytesErr) {
+				writeError(w, http.StatusRequestEntityTooLarge, "FILE_TOO_LARGE", "文件超出大小限制")
+				return
+			}
+			writeError(w, http.StatusBadRequest, "READ_ERROR", "读取文件失败")
+			return
+		}
+		foundFile = true
+		break
+	}
+	if !foundFile {
 		writeError(w, http.StatusBadRequest, "NO_FILE", "未找到文件字段")
-		return
-	}
-	defer file.Close()
-	if header.Size > maxBytes {
-		writeError(w, http.StatusRequestEntityTooLarge, "FILE_TOO_LARGE", "文件超出大小限制")
-		return
-	}
-
-	data, err := io.ReadAll(io.LimitReader(file, maxBytes+1))
-	if err != nil {
-		writeError(w, http.StatusBadRequest, "READ_ERROR", "读取文件失败")
 		return
 	}
 	if int64(len(data)) > maxBytes {
 		writeError(w, http.StatusRequestEntityTooLarge, "FILE_TOO_LARGE", "文件超出大小限制")
+		return
+	}
+	if contextPostID != "" {
+		s.persistManagedUpload(w, r, data, filename, ownerType, uploaderType, contextPostID, maxBytes)
 		return
 	}
 
@@ -308,7 +355,7 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request, ownerType,
 
 	obj, err := s.storage.Put(r.Context(), storage.PutInput{
 		Data:         data,
-		OriginalName: header.Filename,
+		OriginalName: filename,
 		OwnerType:    ownerType,
 		OwnerID:      ownerID,
 		UploaderType: uploaderType,
@@ -325,7 +372,7 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request, ownerType,
 	// Persist attachment metadata to DB
 	att, err := s.repo.CreateAttachment(r.Context(), domain.Attachment{
 		OwnerType:        ownerType,
-		OriginalFilename: header.Filename,
+		OriginalFilename: filename,
 		StoredFilename:   obj.StoredFilename,
 		StorageProvider:  obj.StorageProvider,
 		StorageKey:       obj.StorageKey,

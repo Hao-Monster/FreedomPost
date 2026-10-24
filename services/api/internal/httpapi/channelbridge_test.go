@@ -217,6 +217,7 @@ func encryptHTTPBridgePayload(t *testing.T, keyText string, message []byte, rece
 func TestToolInputUnmarshalAndNormalize(t *testing.T) {
 	rawDraft := `{"title":"未命名工具","summary":"","description":"","category":"other","url":"","coverUrl":null,"status":"draft","sortOrder":0}`
 	req := httptest.NewRequest(http.MethodPost, "/api/admin/tools", strings.NewReader(rawDraft))
+	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
 
 	var toolIn domain.ToolInput
@@ -233,6 +234,7 @@ func TestToolInputUnmarshalAndNormalize(t *testing.T) {
 
 	rawPub := `{"title":"AI 助手","summary":"写作大纲工具","description":"详细说明","category":"ai","url":"https://example.com/tool","coverUrl":"/api/uploads/logo.png","status":"published","sortOrder":5}`
 	reqPub := httptest.NewRequest(http.MethodPut, "/api/admin/tools/1", strings.NewReader(rawPub))
+	reqPub.Header.Set("Content-Type", "application/json")
 	recPub := httptest.NewRecorder()
 	var pubIn domain.ToolInput
 	if !decodeJSON(recPub, reqPub, &pubIn) {

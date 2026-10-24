@@ -87,12 +87,12 @@ func (s *Server) adminImportPostImages(w http.ResponseWriter, r *http.Request) {
 		seenClientIDs[item.ClientID] = struct{}{}
 	}
 
-	s.cleanupExpiredPostImageImports(r.Context())
-	results := s.importPostImages(r.Context(), request.Items)
+	s.CleanupPendingAttachments(r.Context())
+	results := s.importPostImages(r.Context(), postID, request.Items)
 	writeJSON(w, http.StatusOK, map[string]any{"items": results})
 }
 
-func (s *Server) importPostImages(ctx context.Context, items []adminImageImportItem) []adminImageImportResult {
+func (s *Server) importPostImages(ctx context.Context, postID string, items []adminImageImportItem) []adminImageImportResult {
 	results := make([]adminImageImportResult, len(items))
 	jobs := make(chan int)
 	var workers sync.WaitGroup
@@ -105,7 +105,7 @@ func (s *Server) importPostImages(ctx context.Context, items []adminImageImportI
 		go func() {
 			defer workers.Done()
 			for index := range jobs {
-				results[index] = s.importOnePostImage(ctx, items[index])
+				results[index] = s.importOnePostImage(ctx, postID, items[index])
 			}
 		}()
 	}
@@ -117,8 +117,12 @@ func (s *Server) importPostImages(ctx context.Context, items []adminImageImportI
 	return results
 }
 
-func (s *Server) importOnePostImage(ctx context.Context, item adminImageImportItem) adminImageImportResult {
+func (s *Server) importOnePostImage(ctx context.Context, postID string, item adminImageImportItem) adminImageImportResult {
 	result := adminImageImportResult{ClientID: item.ClientID}
+	if s.managedStorage == nil || postID == "" {
+		result.Error = &adminImageImportFailure{Code: "IMPORT_UNAVAILABLE", Message: "附件存储尚未配置", Resolution: "请联系管理员完成私有附件存储配置"}
+		return result
+	}
 	imported, err := (mediaimport.Importer{
 		MaxBytes: s.cfg.RemoteImageImportMaxBytes,
 		Timeout:  time.Duration(s.cfg.RemoteImageImportTimeoutMS) * time.Millisecond,
@@ -135,22 +139,12 @@ func (s *Server) importOnePostImage(ctx context.Context, item adminImageImportIt
 		return result
 	}
 	filename := mediaimport.Filename(item.Name, imported.MimeType)
-	object, err := s.storage.Put(ctx, storage.PutInput{
-		Data:         imported.Data,
-		OriginalName: filename,
-		OwnerType:    "post",
-		UploaderType: "admin-image-import",
-	})
-	if errors.Is(err, storage.ErrInvalidUpload) {
-		result.Error = &adminImageImportFailure{Code: "UNSUPPORTED_IMAGE", Message: "来源内容不是受支持的图片", Resolution: "请使用 JPEG、PNG、GIF、WebP 或 AVIF 图片，或上传本地图片"}
-		return result
-	}
+	storedName := storage.GenerateStoredFilename(filename, imported.MimeType)
+	key, err := s.managedStorage.KeyForFilename(storedName)
 	if err != nil {
-		s.logger.Error("store imported post image", "source_host", imported.Host, "error", err)
-		result.Error = &adminImageImportFailure{Code: "IMPORT_UNAVAILABLE", Message: "图片转存暂时不可用", Resolution: "请稍后重试，或上传本地图片"}
+		result.Error = imageImportFailure(err)
 		return result
 	}
-
 	stageTTL := s.cfg.RemoteImageImportStageTTL
 	if stageTTL <= 0 {
 		stageTTL = 24 * time.Hour
@@ -159,14 +153,17 @@ func (s *Server) importOnePostImage(ctx context.Context, item adminImageImportIt
 	attachment, err := s.repo.CreateAttachment(ctx, domain.Attachment{
 		OwnerType:        "post",
 		OriginalFilename: filename,
-		StoredFilename:   object.StoredFilename,
-		StorageProvider:  object.StorageProvider,
-		StorageKey:       object.StorageKey,
-		PublicURL:        object.PublicURL,
-		MimeType:         object.MimeType,
-		DetectedMime:     object.DetectedMime,
-		SizeBytes:        object.SizeBytes,
-		SHA256:           object.SHA256,
+		StoredFilename:   storedName,
+		StorageProvider:  s.managedStorage.Provider(),
+		StorageKey:       key,
+		PublicURL:        "",
+		DeliveryMode:     "managed",
+		ContextPostID:    &postID,
+		UploadState:      "uploading",
+		MimeType:         imported.MimeType,
+		DetectedMime:     imported.MimeType,
+		SizeBytes:        int64(len(imported.Data)),
+		SHA256:           storage.ComputeSHA256(imported.Data),
 		ClaimToken:       claimToken,
 		ClaimTokenHash:   security.HashToken(claimToken),
 		UploaderType:     "admin-image-import",
@@ -174,19 +171,26 @@ func (s *Server) importOnePostImage(ctx context.Context, item adminImageImportIt
 		SourceHost:       imported.Host,
 	})
 	if err != nil {
-		cleanupContext, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		if cleanupErr := s.storage.Delete(cleanupContext, object.StorageKey); cleanupErr != nil {
-			s.logger.Warn("remove orphaned imported image after database failure", "storage_provider", object.StorageProvider, "error", cleanupErr)
-		}
 		s.logger.Error("persist imported post image", "source_host", imported.Host, "error", err)
 		result.Error = &adminImageImportFailure{Code: "IMPORT_UNAVAILABLE", Message: "图片转存暂时不可用", Resolution: "请稍后重试，或上传本地图片"}
+		return result
+	}
+	_, err = s.managedStorage.Put(ctx, storage.PutInput{Data: imported.Data, OriginalName: filename, StoredFilename: storedName, OwnerType: "post", UploaderType: "admin-image-import"})
+	if err == nil {
+		err = s.repo.CompleteAttachmentUpload(ctx, attachment.ID)
+	}
+	if err != nil {
+		cleanupContext, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = s.repo.AbortAttachmentUpload(cleanupContext, attachment.ID)
+		s.CleanupPendingAttachments(cleanupContext)
+		result.Error = imageImportFailure(err)
 		return result
 	}
 
 	result.File = map[string]any{
 		"id": attachment.ID, "name": attachment.OriginalFilename, "mimeType": attachment.MimeType,
-		"sizeBytes": attachment.SizeBytes, "url": attachment.PublicURL,
+		"sizeBytes": attachment.SizeBytes, "url": domain.ManagedMediaURL(postID, attachment.ID),
 		"storageProvider": attachment.StorageProvider, "storageKey": attachment.StorageKey,
 		"storedFilename": attachment.StoredFilename, "sha256": attachment.SHA256,
 		"claimToken": attachment.ClaimToken,
@@ -200,28 +204,6 @@ func imageImportFailure(err error) *adminImageImportFailure {
 		return &adminImageImportFailure{Code: failure.Code, Message: failure.Message, Resolution: failure.Resolution}
 	}
 	return &adminImageImportFailure{Code: "IMPORT_UNAVAILABLE", Message: "图片转存暂时不可用", Resolution: "请稍后重试，或上传本地图片"}
-}
-
-// cleanupExpiredPostImageImports keeps the staging area bounded. Storage
-// delete happens first: all adapters make it safe to retry, so a transient DB
-// failure leaves a row that can be retried rather than an untracked object.
-func (s *Server) cleanupExpiredPostImageImports(ctx context.Context) {
-	attachments, err := s.repo.ListExpiredPostImageImports(ctx, 100)
-	if err != nil {
-		s.logger.Warn("list expired post image imports", "error", err)
-		return
-	}
-	deletedIDs := make([]string, 0, len(attachments))
-	for _, attachment := range attachments {
-		if err := s.storage.Delete(ctx, attachment.StorageKey); err != nil {
-			s.logger.Warn("remove expired post image import", "attachment_id", attachment.ID, "storage_provider", attachment.StorageProvider, "error", err)
-			continue
-		}
-		deletedIDs = append(deletedIDs, attachment.ID)
-	}
-	if err := s.repo.DeleteAttachmentsByIDs(ctx, deletedIDs); err != nil {
-		s.logger.Warn("delete expired post image import metadata", "count", len(deletedIDs), "error", err)
-	}
 }
 
 func writeImageImportError(w http.ResponseWriter, status int, code, message, resolution string) {

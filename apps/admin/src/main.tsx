@@ -51,8 +51,9 @@ import {
   type PendingImageImport
 } from "./editor-image-import.js";
 import { editorImageHtml, editorImagesMarkdown, editorYouTubeHtml, sanitizeEditorMediaUrl } from "./editor-media.js";
-import { sanitizePastedEditorHtml } from "./editor-paste.js";
-import { focusEditorStart, insertBlockPlaceholderAtSelection } from "./editor-selection.js";
+import { editorHistoryHtml, replaceEditorSnapshotNode } from "./editor-media-history.js";
+import { pastedLinkUrl, sanitizePastedEditorHtml } from "./editor-paste.js";
+import { focusEditorStart, insertBlockPlaceholderAtSelection, resolveCalloutTargetBlocks } from "./editor-selection.js";
 import { createNewPostPayload } from "./new-post.js";
 import { startPendingMediaInsertion } from "./pending-media-insertion.js";
 import { PendingTaskBarrier } from "./pending-task-barrier.js";
@@ -228,6 +229,30 @@ export function App() {
   const pendingMediaRef = useRef(new PendingTaskBarrier());
   const importedImageClaimsRef = useRef(new Map<string, ImportedImageClaim>());
   const failedImageImportsRef = useRef(new Map<string, PendingImageImport>());
+  const busyImageImportsRef = useRef(new Set<string>());
+  const undoStackRef = useRef<
+    Array<{
+      postId: string;
+      beforeHtml: string;
+      beforeSelection: { start: { path: number[]; offset: number }; end: { path: number[]; offset: number } } | null;
+      afterHtml: string;
+      afterSelection: { start: { path: number[]; offset: number }; end: { path: number[]; offset: number } } | null;
+    }>
+  >([]);
+  const redoStackRef = useRef<
+    Array<{
+      postId: string;
+      beforeHtml: string;
+      beforeSelection: { start: { path: number[]; offset: number }; end: { path: number[]; offset: number } } | null;
+      afterHtml: string;
+      afterSelection: { start: { path: number[]; offset: number }; end: { path: number[]; offset: number } } | null;
+    }>
+  >([]);
+  const editorSnapshotRef = useRef<{
+    postId: string;
+    html: string;
+    selection: { start: { path: number[]; offset: number }; end: { path: number[]; offset: number } } | null;
+  } | null>(null);
   const postsRef = useRef<AdminPost[]>(posts);
   postsRef.current = posts;
   const activePostIdRef = useRef<string | null>(null);
@@ -241,13 +266,21 @@ export function App() {
   useEffect(() => {
     if (!activePost || !editorRef.current) return;
     failedImageImportsRef.current.clear();
+    undoStackRef.current = [];
+    redoStackRef.current = [];
     editorRef.current.innerHTML = markdownToEditorHtml(activePost.markdown);
+    ensureEditorImageIDs(editorRef.current);
     // Opening saved content must not rewrite its images. Absolute URLs may
     // already belong to managed storage; the save API validates that boundary.
     if (focusCreatedPostRef.current === activePost.id) {
       focusCreatedPostRef.current = null;
       savedRangeRef.current = focusEditorStart(editorRef.current)?.cloneRange() ?? null;
     }
+    editorSnapshotRef.current = {
+      postId: activePost.id,
+      html: editorHistoryHtml(editorRef.current),
+      selection: serializeEditorSelection(editorRef.current)
+    };
   }, [activePost?.id]);
 
   useEffect(() => {
@@ -256,10 +289,57 @@ export function App() {
       const selection = window.getSelection();
       if (!editor || !selection?.rangeCount || !editor.contains(selection.anchorNode)) return;
       savedRangeRef.current = selection.getRangeAt(0).cloneRange();
+      const targetPostId = activePostIdRef.current;
+      if (
+        targetPostId &&
+        (!editorSnapshotRef.current ||
+          editorSnapshotRef.current.postId !== targetPostId ||
+          editorSnapshotRef.current.html === editorHistoryHtml(editor))
+      ) {
+        editorSnapshotRef.current = {
+          postId: targetPostId,
+          html: editorHistoryHtml(editor),
+          selection: serializeEditorSelection(editor)
+        };
+      }
     };
 
     document.addEventListener("selectionchange", rememberEditorSelection);
     return () => document.removeEventListener("selectionchange", rememberEditorSelection);
+  }, []);
+
+  useEffect(() => {
+    const rawExecCommand =
+      typeof document.execCommand === "function" ? document.execCommand.bind(document) : null;
+    const patchedExecCommand = (commandId: string, showUI?: boolean, value?: string): boolean => {
+      const normalized = String(commandId ?? "").toLowerCase();
+      if (normalized === "undo") {
+        if (performEditorUndo()) {
+          return true;
+        }
+      } else if (normalized === "redo") {
+        if (performEditorRedo()) {
+          return true;
+        }
+      } else {
+        snapshotEditorBeforeNativeEdit();
+      }
+      const result = rawExecCommand ? rawExecCommand(commandId, showUI, value) : false;
+      if (result) {
+        if (normalized !== "undo" && normalized !== "redo") {
+          commitNativeEditorMutation();
+        }
+        syncEditorMarkdown();
+      }
+      return result;
+    };
+
+    document.execCommand = patchedExecCommand;
+    return () => {
+      if (document.execCommand === patchedExecCommand && rawExecCommand) {
+        document.execCommand = rawExecCommand;
+      }
+    };
   }, []);
 
   async function fetchSession() {
@@ -438,6 +518,10 @@ export function App() {
         return editorRef.current ? editorHtmlToMarkdown(editorRef.current) : targetPost.markdown;
       };
       const checkUnresolved = () => {
+        if (editorRef.current?.querySelector('[data-fp-type="pending-media"]')) {
+          showToast("有图片上传尚未完成，请等待完成或撤销该次插入后再保存");
+          return true;
+        }
         const count = editorRef.current?.querySelectorAll('[data-fp-type="image-import-error"]').length ?? 0;
         if (count > 0) {
           showToast(`有 ${count} 张图片尚未转存；请重试、上传本地图片或删除后再保存`);
@@ -535,10 +619,11 @@ export function App() {
 
   async function handleAttachmentFiles(files: FileList | null) {
     if (!activePost || !files?.length) return;
+    const targetPostId = activePost.id;
     try {
       await trackPendingMedia(
         insertPendingMediaAtCaret(() =>
-          Promise.all([...files].map(fileToEditorHtml)).then((snippets) => snippets.join(""))
+          Promise.all([...files].map(async (file) => fileToEditorHtml(await uploadEditorFile(file, targetPostId)))).then((snippets) => snippets.join(""))
         )
       );
       showToast(`已上传并插入 ${files.length} 个附件`);
@@ -560,7 +645,7 @@ export function App() {
       await trackPendingMedia(
         insertPendingMediaAtCaret(async () => {
           pastedResult = await localizePastedImages(html, location.href, {
-            uploadEmbeddedImage,
+            uploadEmbeddedImage: (source, name) => uploadEmbeddedImage(source, name, targetPostId ?? ""),
             importRemoteImages: (items) => importRemoteImages(targetPostId ?? "", items)
           });
           if (!pastedResult) throw new Error("No images in pasted HTML");
@@ -599,10 +684,12 @@ export function App() {
 
     if (files.length) {
       event.preventDefault();
+      const targetPostId = activePostIdRef.current;
+      if (!targetPostId) return;
       try {
         await trackPendingMedia(
           insertPendingMediaAtCaret(() =>
-            Promise.all(files.map(fileToEditorHtml)).then((snippets) => snippets.join(""))
+            Promise.all(files.map(async (file) => fileToEditorHtml(await uploadEditorFile(file, targetPostId)))).then((snippets) => snippets.join(""))
           )
         );
         showToast("图片已上传并插入");
@@ -613,17 +700,49 @@ export function App() {
     }
 
     const pastedHtml = event.clipboardData.getData("text/html");
+    const editor = editorRef.current;
+    const selection = window.getSelection();
+    const isInsideCodeBlock = Boolean(editor && selection?.anchorNode && closestPreElement(selection.anchorNode, editor));
+    const pastedText = event.clipboardData.getData("text/plain");
+    const linkUrl = pastedLinkUrl(pastedText);
+    const range = selection?.rangeCount ? selection.getRangeAt(0) : null;
+    const touchesCode = linkUrl && range && (
+      [range.startContainer, range.endContainer].some((node) =>
+        (node instanceof Element ? node : node.parentElement)?.closest("pre,code")
+      ) || range.cloneContents().querySelector("pre,code")
+    );
+
+    if (linkUrl && editor && range && editor.contains(range.commonAncestorContainer) && !touchesCode && !/<(?:img|pre|code)[\s>]/i.test(pastedHtml)) {
+      event.preventDefault();
+      const selectedText = selection?.toString() ?? "";
+      if (selectedText && document.execCommand("createLink", false, linkUrl)) {
+        syncEditorMarkdown();
+      } else {
+        insertPastedHtmlAtCaret(`<a href="${escapeHtml(linkUrl)}" target="_blank" rel="noreferrer noopener">${escapeHtml(selectedText || pastedText.trim())}</a>`);
+      }
+      return;
+    }
 
     // If no HTML in clipboard, check if plain text contains Markdown image syntax.
     // This handles pastes from VS Code, Typora, Obsidian, GitHub raw markdown, etc.
-    if (!pastedHtml) {
-      const pastedText = event.clipboardData.getData("text/plain");
+    if (!pastedHtml || isInsideCodeBlock) {
+      if (isInsideCodeBlock) {
+        return;
+      }
       const syntheticHtml = markdownImagesToPasteHtml(pastedText);
       if (syntheticHtml) {
         event.preventDefault();
         await pasteHtmlWithImages(syntheticHtml);
+        return;
       }
-      // else: let the browser handle plain text naturally (no preventDefault)
+      if (/\r?\n/.test(pastedText)) {
+        const plainHtml = plainTextToPasteHtml(pastedText);
+        if (plainHtml) {
+          event.preventDefault();
+          insertPastedHtmlAtCaret(plainHtml);
+        }
+      }
+      // else: let the browser handle single-line plain text naturally (no preventDefault)
       return;
     }
 
@@ -660,7 +779,10 @@ export function App() {
       {
         insertPlaceholder: insertMediaPlaceholderAtCaret,
         replacePlaceholder: (placeholder, html) => replaceMediaPlaceholder(placeholder, html, targetPostId),
-        removePlaceholder: (placeholder) => placeholder.remove()
+        removePlaceholder: (placeholder) => {
+          settleEditorMediaNode(`[data-pending-media-id="${CSS.escape(placeholder.dataset.pendingMediaId!)}"]`, "", targetPostId, placeholder.dataset.pendingMediaId);
+          placeholder.remove();
+        }
       }
     );
   }
@@ -672,33 +794,270 @@ export function App() {
     const placeholder = document.createElement("div");
     placeholder.className = "editor-media-placeholder";
     placeholder.dataset.fpType = "pending-media";
+    placeholder.dataset.pendingMediaId = createClientID();
     placeholder.contentEditable = "false";
     placeholder.textContent = "图片上传中…";
 
     editor.focus();
-    const selection = window.getSelection();
-    insertBlockPlaceholderAtSelection(editor, placeholder, selection);
+    recordEditorTransaction(() => {
+      const selection = window.getSelection();
+      insertBlockPlaceholderAtSelection(editor, placeholder, selection);
 
-    const nextRange = document.createRange();
-    nextRange.setStartAfter(placeholder);
-    nextRange.collapse(true);
-    selection?.removeAllRanges();
-    selection?.addRange(nextRange);
-    savedRangeRef.current = nextRange.cloneRange();
+      const nextRange = document.createRange();
+      nextRange.setStartAfter(placeholder);
+      nextRange.collapse(true);
+      selection?.removeAllRanges();
+      selection?.addRange(nextRange);
+      savedRangeRef.current = nextRange.cloneRange();
+    });
     return placeholder;
   }
 
   function replaceMediaPlaceholder(placeholder: HTMLDivElement, html: string, targetPostId = activePostIdRef.current) {
-    const editor = editorRef.current;
-    if (!editor || !editor.contains(placeholder) || !targetPostId || activePostIdRef.current !== targetPostId) {
+    if (!settleEditorMediaNode(`[data-pending-media-id="${CSS.escape(placeholder.dataset.pendingMediaId!)}"]`, html, targetPostId, placeholder.dataset.pendingMediaId)) {
       placeholder.remove();
       throw new Error("Media insertion point is no longer available");
     }
+  }
 
+  function settleEditorMediaNode(selector: string, html: string, targetPostId = activePostIdRef.current, settledPendingID?: string): boolean {
+    const editor = editorRef.current;
+    if (!editor || !targetPostId || activePostIdRef.current !== targetPostId) return false;
+
+    commitNativeEditorMutation();
     const template = document.createElement("template");
     template.innerHTML = html;
-    placeholder.replaceWith(template.content);
+    ensureEditorImageIDs(template.content);
+    html = template.innerHTML;
+    // Undo may have removed this insertion, or recreated its DOM node. Update
+    // every snapshot so a later redo restores finished media, never a dead task.
+    for (const entry of [...undoStackRef.current, ...redoStackRef.current]) {
+      if (entry.postId !== targetPostId) continue;
+      const before = replaceEditorSnapshotNode({ html: entry.beforeHtml, selection: entry.beforeSelection }, selector, html, undefined, settledPendingID);
+      const after = replaceEditorSnapshotNode({ html: entry.afterHtml, selection: entry.afterSelection }, selector, html, undefined, settledPendingID);
+      entry.beforeHtml = before.html;
+      entry.beforeSelection = before.selection;
+      entry.afterHtml = after.html;
+      entry.afterSelection = after.selection;
+    }
+    const current = editor.querySelector(selector);
+    const snapshot = replaceEditorSnapshotNode({ html: editorHistoryHtml(editor), selection: serializeEditorSelection(editor) }, selector, html, editor, settledPendingID);
+    ensureEditorImageIDs(editor);
+    undoStackRef.current = undoStackRef.current.filter((entry) => entry.beforeHtml !== entry.afterHtml);
+    redoStackRef.current = redoStackRef.current.filter((entry) => entry.beforeHtml !== entry.afterHtml);
+    refreshImageImportPresentation();
+    if (current) {
+      restoreSerializedEditorSelection(editor, snapshot.selection, document.activeElement === editor);
+    }
+    editorSnapshotRef.current = { postId: targetPostId, ...snapshot };
     syncEditorMarkdown(targetPostId);
+    return true;
+  }
+
+  function serializeDomPoint(root: HTMLElement, container: Node, offset: number): { path: number[]; offset: number } | null {
+    const path: number[] = [];
+    let current: Node | null = container;
+    while (current && current !== root) {
+      const parent: Node | null = current.parentNode;
+      if (!parent) return null;
+      const index = Array.prototype.indexOf.call(parent.childNodes, current);
+      if (index < 0) return null;
+      path.unshift(index);
+      current = parent;
+    }
+    if (current !== root) return null;
+    return { path, offset };
+  }
+
+  function resolveDomPoint(root: HTMLElement, point: { path: number[]; offset: number }): { node: Node; offset: number } | null {
+    let current: Node = root;
+    for (const index of point.path) {
+      if (index < 0 || index >= current.childNodes.length) return null;
+      current = current.childNodes[index]!;
+    }
+    const maxOffset = current.nodeType === Node.TEXT_NODE ? (current.textContent?.length ?? 0) : current.childNodes.length;
+    return { node: current, offset: Math.max(0, Math.min(point.offset, maxOffset)) };
+  }
+
+  function serializeEditorSelection(editor: HTMLElement): { start: { path: number[]; offset: number }; end: { path: number[]; offset: number } } | null {
+    const selection = window.getSelection();
+    const range =
+      selection?.rangeCount && editor.contains(selection.getRangeAt(0).commonAncestorContainer)
+        ? selection.getRangeAt(0)
+        : savedRangeRef.current && editor.contains(savedRangeRef.current.commonAncestorContainer)
+          ? savedRangeRef.current
+          : null;
+    if (!range) return null;
+    const start = serializeDomPoint(editor, range.startContainer, range.startOffset);
+    const end = serializeDomPoint(editor, range.endContainer, range.endOffset);
+    if (!start || !end) return null;
+    return { start, end };
+  }
+
+  function restoreSerializedEditorSelection(
+    editor: HTMLElement,
+    serialized: { start: { path: number[]; offset: number }; end: { path: number[]; offset: number } } | null,
+    moveSelection = true
+  ) {
+    if (moveSelection) editor.focus();
+    if (!serialized) return;
+    const start = resolveDomPoint(editor, serialized.start);
+    const end = resolveDomPoint(editor, serialized.end);
+    if (!start || !end) return;
+    const nextRange = document.createRange();
+    nextRange.setStart(start.node, start.offset);
+    nextRange.setEnd(end.node, end.offset);
+    savedRangeRef.current = nextRange.cloneRange();
+    if (!moveSelection) return;
+    const selection = window.getSelection();
+    if (!selection) return;
+    selection.removeAllRanges();
+    selection.addRange(nextRange);
+  }
+
+  function snapshotEditorBeforeNativeEdit() {
+    const targetPostId = activePostIdRef.current;
+    const editor = editorRef.current;
+    if (!targetPostId || !editor) return;
+
+    if (!editorSnapshotRef.current || editorSnapshotRef.current.postId !== targetPostId) {
+      editorSnapshotRef.current = {
+        postId: targetPostId,
+        html: editorHistoryHtml(editor),
+        selection: serializeEditorSelection(editor)
+      };
+      return;
+    }
+
+    if (editorSnapshotRef.current.html === editorHistoryHtml(editor)) {
+      editorSnapshotRef.current = {
+        postId: targetPostId,
+        html: editorHistoryHtml(editor),
+        selection: serializeEditorSelection(editor) ?? editorSnapshotRef.current.selection
+      };
+    }
+  }
+
+  function commitNativeEditorMutation() {
+    const targetPostId = activePostIdRef.current;
+    const editor = editorRef.current;
+    if (!targetPostId || !editor) return;
+
+    ensureEditorImageIDs(editor);
+    const currentHtml = editorHistoryHtml(editor);
+    const currentSelection = serializeEditorSelection(editor);
+    const prev = editorSnapshotRef.current;
+
+    if (prev && prev.postId === targetPostId && prev.html !== currentHtml) {
+      undoStackRef.current.push({
+        postId: targetPostId,
+        beforeHtml: prev.html,
+        beforeSelection: prev.selection,
+        afterHtml: currentHtml,
+        afterSelection: currentSelection
+      });
+      redoStackRef.current = [];
+    }
+
+    editorSnapshotRef.current = {
+      postId: targetPostId,
+      html: currentHtml,
+      selection: currentSelection
+    };
+  }
+
+  function recordEditorTransaction(mutate: (editor: HTMLElement) => void) {
+    const targetPostId = activePostIdRef.current;
+    const editor = editorRef.current;
+    if (!targetPostId || !editor) return;
+
+    commitNativeEditorMutation();
+    const beforeHtml = editorHistoryHtml(editor);
+    const beforeSelection = serializeEditorSelection(editor);
+    mutate(editor);
+    ensureEditorImageIDs(editor);
+    const afterHtml = editorHistoryHtml(editor);
+    const afterSelection = serializeEditorSelection(editor);
+
+    if (beforeHtml !== afterHtml) {
+      undoStackRef.current.push({
+        postId: targetPostId,
+        beforeHtml,
+        beforeSelection,
+        afterHtml,
+        afterSelection
+      });
+      redoStackRef.current = [];
+    }
+    editorSnapshotRef.current = {
+      postId: targetPostId,
+      html: afterHtml,
+      selection: afterSelection
+    };
+  }
+
+  function performEditorUndo(): boolean {
+    const targetPostId = activePostIdRef.current;
+    const editor = editorRef.current;
+    if (!targetPostId || !editor) return false;
+
+    commitNativeEditorMutation();
+
+    while (undoStackRef.current.length > 0) {
+      const entry = undoStackRef.current.pop()!;
+      if (entry.postId !== targetPostId) continue;
+
+      redoStackRef.current.push({
+        postId: targetPostId,
+        beforeHtml: entry.beforeHtml,
+        beforeSelection: entry.beforeSelection,
+        afterHtml: editorHistoryHtml(editor),
+        afterSelection: serializeEditorSelection(editor) ?? entry.afterSelection
+      });
+      editor.innerHTML = entry.beforeHtml;
+      ensureEditorImageIDs(editor);
+      refreshImageImportPresentation();
+      restoreSerializedEditorSelection(editor, entry.beforeSelection);
+      editorSnapshotRef.current = {
+        postId: targetPostId,
+        html: entry.beforeHtml,
+        selection: entry.beforeSelection
+      };
+      syncEditorMarkdown(targetPostId);
+      return true;
+    }
+    return false;
+  }
+
+  function performEditorRedo(): boolean {
+    const targetPostId = activePostIdRef.current;
+    const editor = editorRef.current;
+    if (!targetPostId || !editor) return false;
+
+    while (redoStackRef.current.length > 0) {
+      const entry = redoStackRef.current.pop()!;
+      if (entry.postId !== targetPostId) continue;
+
+      undoStackRef.current.push({
+        postId: targetPostId,
+        beforeHtml: editorHistoryHtml(editor),
+        beforeSelection: serializeEditorSelection(editor) ?? entry.beforeSelection,
+        afterHtml: entry.afterHtml,
+        afterSelection: entry.afterSelection
+      });
+      editor.innerHTML = entry.afterHtml;
+      ensureEditorImageIDs(editor);
+      refreshImageImportPresentation();
+      restoreSerializedEditorSelection(editor, entry.afterSelection);
+      editorSnapshotRef.current = {
+        postId: targetPostId,
+        html: entry.afterHtml,
+        selection: entry.afterSelection
+      };
+      syncEditorMarkdown(targetPostId);
+      return true;
+    }
+    return false;
   }
 
   function insertHtmlAtCaret(html: string) {
@@ -707,34 +1066,47 @@ export function App() {
     if (!editor) return;
 
     editor.focus();
-    const selection = window.getSelection();
-    const template = document.createElement("template");
-    template.innerHTML = html;
-    const fragment = template.content;
-    const lastNode = fragment.lastChild;
-    const insertsRichBlock = Boolean(
-      fragment.querySelector("figure.editor-image,figure.editor-youtube,.editor-attachment")
-    );
+    recordEditorTransaction(() => {
+      const selection = window.getSelection();
+      const template = document.createElement("template");
+      template.innerHTML = html;
+      ensureEditorImageIDs(template.content);
+      const fragment = template.content;
+      const lastNode = fragment.lastChild;
+      const insertsBlockElements = Boolean(
+        fragment.querySelector(
+          "p,h1,h2,h3,h4,h5,h6,ul,ol,pre,blockquote,div,figure.editor-image,figure.editor-youtube,.editor-attachment,[data-fp-type=\"callout\"]"
+        )
+      );
 
-    if (selection?.rangeCount && editor.contains(selection.anchorNode)) {
-      const range = selection.getRangeAt(0);
-      const container = closestCalloutContent(selection.anchorNode, editor) ?? editor;
-      const topLevelNode = closestEditorChild(selection.anchorNode, container);
-      if (insertsRichBlock && topLevelNode) {
-        topLevelNode.after(fragment);
+      if (selection?.rangeCount && editor.contains(selection.anchorNode)) {
+        if (insertsBlockElements) {
+          const placeholder = document.createElement("div");
+          insertBlockPlaceholderAtSelection(editor, placeholder, selection);
+          placeholder.replaceWith(fragment);
+        } else {
+          const range = selection.getRangeAt(0);
+          range.deleteContents();
+          range.insertNode(fragment);
+        }
       } else {
-        range.deleteContents();
-        range.insertNode(fragment);
+        editor.append(fragment);
       }
-      if (lastNode) {
-        range.setStartAfter(lastNode);
-        range.collapse(true);
+
+      if (selection && lastNode && editor.contains(lastNode)) {
+        const nextRange = document.createRange();
+        if (lastNode instanceof HTMLElement && /^(P|H[1-6]|LI)$/.test(lastNode.tagName)) {
+          nextRange.selectNodeContents(lastNode);
+          nextRange.collapse(!lastNode.textContent?.trim());
+        } else {
+          nextRange.setStartAfter(lastNode);
+          nextRange.collapse(true);
+        }
         selection.removeAllRanges();
-        selection.addRange(range);
+        selection.addRange(nextRange);
+        savedRangeRef.current = nextRange.cloneRange();
       }
-    } else {
-      editor.append(fragment);
-    }
+    });
 
     syncEditorMarkdown();
   }
@@ -744,6 +1116,10 @@ export function App() {
     if (!activePost || !editor) return;
 
     editor.focus();
+    if (/<(?:p|h[1-6]|ul|ol|pre|blockquote|div|figure)\b/i.test(html)) {
+      insertHtmlAtCaret(html);
+      return;
+    }
     if (!document.execCommand("insertHTML", false, html)) {
       insertHtmlAtCaret(html);
       return;
@@ -786,22 +1162,24 @@ export function App() {
       return;
     }
 
-    const range = selection.getRangeAt(0);
-    const span = document.createElement("span");
-    span.className = className;
+    recordEditorTransaction(() => {
+      const range = selection.getRangeAt(0);
+      const span = document.createElement("span");
+      span.className = className;
 
-    try {
-      range.surroundContents(span);
-    } catch {
-      span.append(range.extractContents());
-      range.insertNode(span);
-    }
+      try {
+        range.surroundContents(span);
+      } catch {
+        span.append(range.extractContents());
+        range.insertNode(span);
+      }
 
-    const nextRange = document.createRange();
-    nextRange.selectNodeContents(span);
-    selection.removeAllRanges();
-    selection.addRange(nextRange);
-    savedRangeRef.current = nextRange.cloneRange();
+      const nextRange = document.createRange();
+      nextRange.selectNodeContents(span);
+      selection.removeAllRanges();
+      selection.addRange(nextRange);
+      savedRangeRef.current = nextRange.cloneRange();
+    });
     syncEditorMarkdown();
   }
 
@@ -837,7 +1215,11 @@ export function App() {
     const selection = window.getSelection();
     if (!editor) return;
 
-    if (selection?.anchorNode && closestCalloutContent(selection.anchorNode, editor)) {
+    if (
+      (selection?.anchorNode && closestCalloutElement(selection.anchorNode, editor)) ||
+      (selection?.focusNode && closestCalloutElement(selection.focusNode, editor)) ||
+      (selection?.rangeCount && selection.getRangeAt(0).cloneContents().querySelector('[data-fp-type="callout"]'))
+    ) {
       showToast("高亮块不能嵌套");
       return;
     }
@@ -848,57 +1230,31 @@ export function App() {
     const content = callout?.querySelector<HTMLElement>(".editor-callout-content");
     if (!(callout instanceof HTMLElement) || !content) return;
 
-    let selectedNodes: ChildNode[] = [];
-    let collapsedInsertBefore: ChildNode | null = null;
-    if (selection?.rangeCount && editor.contains(selection.anchorNode)) {
-      const range = selection.getRangeAt(0);
-      if (range.collapsed && range.startContainer === editor) {
-        collapsedInsertBefore = editor.childNodes[range.startOffset] ?? null;
+    recordEditorTransaction(() => {
+      const { selectedNodes, collapsedInsertBefore } = resolveCalloutTargetBlocks(editor, selection);
+      if (selectedNodes.length) {
+        selectedNodes[0]?.before(callout);
+        content.replaceChildren(...selectedNodes);
+      } else if (collapsedInsertBefore) {
+        collapsedInsertBefore.before(callout);
       } else {
-        const startAnchor = range.startContainer === editor ? (editor.childNodes[range.startOffset] ?? range.startContainer) : range.startContainer;
-        const endAnchor = range.collapsed
-          ? startAnchor
-          : range.endContainer === editor
-            ? (editor.childNodes[Math.max(0, range.endOffset - 1)] ?? startAnchor)
-            : range.endContainer;
-        const startNode = closestEditorChild(startAnchor, editor);
-        const endNode = closestEditorChild(endAnchor, editor) ?? startNode;
-        const children = [...editor.childNodes];
-        const startIndex = startNode ? children.indexOf(startNode) : -1;
-        const endIndex = endNode ? children.indexOf(endNode) : startIndex;
-        if (startIndex >= 0 && endIndex >= startIndex) {
-          selectedNodes = children.slice(startIndex, endIndex + 1);
-        }
+        editor.append(callout);
       }
-    }
 
-    if (selectedNodes.some((node) => node instanceof Element && (node.matches('[data-fp-type="callout"]') || node.querySelector('[data-fp-type="callout"]')))) {
-      showToast("高亮块不能嵌套");
-      return;
-    }
+      if (!callout.nextSibling) {
+        const trailingParagraph = document.createElement("p");
+        trailingParagraph.append(document.createElement("br"));
+        callout.after(trailingParagraph);
+      }
 
-    if (selectedNodes.length) {
-      selectedNodes[0]?.before(callout);
-      content.replaceChildren(...selectedNodes);
-    } else if (collapsedInsertBefore) {
-      collapsedInsertBefore.before(callout);
-    } else {
-      editor.append(callout);
-    }
-
-    if (!callout.nextSibling) {
-      const trailingParagraph = document.createElement("p");
-      trailingParagraph.append(document.createElement("br"));
-      callout.after(trailingParagraph);
-    }
-
-    const focusTarget = content.querySelector<HTMLElement>("p,h1,h2,h3,h4,h5,h6,li,pre") ?? content;
-    const nextRange = document.createRange();
-    nextRange.selectNodeContents(focusTarget);
-    nextRange.collapse(false);
-    selection?.removeAllRanges();
-    selection?.addRange(nextRange);
-    savedRangeRef.current = nextRange.cloneRange();
+      const focusTarget = content.querySelector<HTMLElement>("p,h1,h2,h3,h4,h5,h6,li,pre") ?? content;
+      const nextRange = document.createRange();
+      nextRange.selectNodeContents(focusTarget);
+      nextRange.collapse(false);
+      selection?.removeAllRanges();
+      selection?.addRange(nextRange);
+      savedRangeRef.current = nextRange.cloneRange();
+    });
     syncEditorMarkdown();
     showToast("高亮块已插入");
   }
@@ -911,9 +1267,10 @@ export function App() {
       const card = imageImportAction.closest<HTMLElement>('[data-fp-type="image-import-error"]');
       const importID = card?.dataset.importId;
       if (!card || !importID) return;
+      if (busyImageImportsRef.current.has(`${activePostIdRef.current}:${importID}`)) return;
       if (imageImportAction.dataset.imageImportAction === "remove") {
-        card.remove();
-        failedImageImportsRef.current.delete(importID);
+        recordEditorTransaction(() => card.remove());
+        // Retain the source for undo; the map is cleared when leaving this post.
         syncEditorMarkdown();
         return;
       }
@@ -941,12 +1298,14 @@ export function App() {
       const picker = callout?.querySelector<HTMLElement>("[data-callout-emoji-picker]");
       if (!callout || !trigger || !picker) return;
 
-      callout.dataset.emoji = emoji;
-      trigger.textContent = emoji;
-      trigger.setAttribute("aria-expanded", "false");
-      picker.hidden = true;
-      picker.querySelectorAll<HTMLElement>("[data-callout-emoji-option]").forEach((item) => {
-        item.setAttribute("aria-selected", String(item.dataset.calloutEmojiOption === emoji));
+      recordEditorTransaction(() => {
+        callout.dataset.emoji = emoji;
+        trigger.textContent = emoji;
+        trigger.setAttribute("aria-expanded", "false");
+        picker.hidden = true;
+        picker.querySelectorAll<HTMLElement>("[data-callout-emoji-option]").forEach((item) => {
+          item.setAttribute("aria-selected", String(item.dataset.calloutEmojiOption === emoji));
+        });
       });
       syncEditorMarkdown();
       return;
@@ -959,7 +1318,44 @@ export function App() {
     }
   }
 
+  function handleEditorBeforeInput(event: FormEvent<HTMLDivElement>) {
+    const nativeEvent = event.nativeEvent as InputEvent;
+    if (nativeEvent.inputType === "historyUndo") {
+      if (performEditorUndo()) {
+        event.preventDefault();
+      }
+      return;
+    }
+    if (nativeEvent.inputType === "historyRedo") {
+      if (performEditorRedo()) {
+        event.preventDefault();
+      }
+      return;
+    }
+    snapshotEditorBeforeNativeEdit();
+  }
+
+  function handleEditorInput() {
+    commitNativeEditorMutation();
+    syncEditorMarkdown();
+  }
+
   function handleEditorKeyDown(event: ReactKeyboardEvent<HTMLDivElement>) {
+    if ((event.ctrlKey || event.metaKey) && !event.altKey) {
+      const key = event.key.toLowerCase();
+      if (key === "z" && !event.shiftKey) {
+        if (performEditorUndo()) {
+          event.preventDefault();
+          return;
+        }
+      } else if ((key === "z" && event.shiftKey) || (key === "y" && !event.metaKey && !event.shiftKey)) {
+        if (performEditorRedo()) {
+          event.preventDefault();
+          return;
+        }
+      }
+    }
+
     const target = event.target instanceof Element ? event.target : null;
     const trigger = target?.closest<HTMLElement>("[data-callout-emoji-trigger]");
     if (trigger && (event.key === "Enter" || event.key === " ")) {
@@ -1013,18 +1409,16 @@ export function App() {
     showToast("YouTube 视频已插入");
   }
 
-  function closestEditorChild(node: Node | null, container: HTMLElement): ChildNode | null {
-    let current = node;
-    while (current?.parentNode && current.parentNode !== container) {
-      current = current.parentNode;
-    }
-    return current?.parentNode === container ? (current as ChildNode) : null;
+  function closestCalloutElement(node: Node | null, editor: HTMLElement): HTMLElement | null {
+    const element = node instanceof Element ? node : node?.parentElement;
+    const callout = element?.closest<HTMLElement>('[data-fp-type="callout"]') ?? null;
+    return callout && editor.contains(callout) ? callout : null;
   }
 
-  function closestCalloutContent(node: Node | null, editor: HTMLElement): HTMLElement | null {
+  function closestPreElement(node: Node | null, editor: HTMLElement): HTMLElement | null {
     const element = node instanceof Element ? node : node?.parentElement;
-    const content = element?.closest<HTMLElement>(".editor-callout-content") ?? null;
-    return content && editor.contains(content) ? content : null;
+    const pre = element?.closest<HTMLElement>("pre") ?? null;
+    return pre && editor.contains(pre) ? pre : null;
   }
 
   function syncEditorMarkdown(targetPostId?: string | null | unknown) {
@@ -1035,7 +1429,7 @@ export function App() {
 
   async function retryFailedImageImport(card: HTMLElement, pending: PendingImageImport) {
     const targetPostId = activePostIdRef.current ?? "";
-    card.classList.add("is-retrying");
+    if (!beginImageImportOperation(targetPostId, pending.id)) return;
     try {
       const results = await importRemoteImages(targetPostId, [{ clientId: pending.id, url: pending.source, name: pending.name }]);
       if (activePostIdRef.current !== targetPostId) return;
@@ -1048,10 +1442,31 @@ export function App() {
       failedImageImportsRef.current.set(pending.id, { ...pending, failure });
       replaceFailedImageCardWithHtml(card, imageImportFailureHtml(pending.id, failure));
     } catch {
+      if (activePostIdRef.current !== targetPostId) return;
       const failure = { code: "IMPORT_UNAVAILABLE", message: "图片转存服务暂时不可用", resolution: "请稍后重试，或上传本地图片" };
       failedImageImportsRef.current.set(pending.id, { ...pending, failure });
       replaceFailedImageCardWithHtml(card, imageImportFailureHtml(pending.id, failure));
+    } finally {
+      busyImageImportsRef.current.delete(`${targetPostId}:${pending.id}`);
+      refreshImageImportPresentation();
     }
+  }
+
+  function beginImageImportOperation(postID: string, importID: string): boolean {
+    const key = `${postID}:${importID}`;
+    if (busyImageImportsRef.current.has(key)) return false;
+    commitNativeEditorMutation();
+    busyImageImportsRef.current.add(key);
+    refreshImageImportPresentation();
+    return true;
+  }
+
+  function refreshImageImportPresentation() {
+    editorRef.current?.querySelectorAll<HTMLElement>('[data-fp-type="image-import-error"]').forEach((card) => {
+      const busy = busyImageImportsRef.current.has(`${activePostIdRef.current}:${card.dataset.importId}`);
+      card.classList.toggle("is-retrying", busy);
+      card.querySelectorAll<HTMLButtonElement>("[data-image-import-action]").forEach((button) => { button.disabled = busy; });
+    });
   }
 
   // Scans the editor DOM for figure.editor-image elements whose <img> has an
@@ -1062,8 +1477,9 @@ export function App() {
   async function autoImportEditorImages(postID: string, editor: HTMLElement): Promise<number> {
     if (!postID) return 0;
 
+    commitNativeEditorMutation();
     const figures = [...editor.querySelectorAll<HTMLElement>("figure.editor-image")];
-    const toImport: Array<{ figure: HTMLElement; clientId: string; src: string; alt: string }> = [];
+    const toImport: Array<{ figure: HTMLElement; selector: string; clientId: string; src: string; alt: string }> = [];
 
     for (const figure of figures) {
       const img = figure.querySelector("img");
@@ -1072,7 +1488,7 @@ export function App() {
       if (!src.startsWith("http://") && !src.startsWith("https://")) continue;
       // Skip images that were already successfully imported for this article in this session
       if ([...importedImageClaimsRef.current.entries()].some(([key, c]) => key.startsWith(`${postID}:`) && c.url === src)) continue;
-      toImport.push({ figure, clientId: createClientID(), src, alt: img.getAttribute("alt") ?? "图片" });
+      toImport.push({ figure, selector: `[data-editor-media-id="${CSS.escape(figure.dataset.editorMediaId!)}"]`, clientId: createClientID(), src, alt: img.getAttribute("alt") ?? "图片" });
     }
 
     if (toImport.length === 0) return 0;
@@ -1086,19 +1502,18 @@ export function App() {
       for (const item of toImport) {
         const result = results.get(item.clientId);
         if (result && "url" in result) {
-          // Success: update the img and anchor in-place, record the claim token
-          item.figure.querySelector("img")?.setAttribute("src", result.url);
-          item.figure.querySelector("a")?.setAttribute("href", result.url);
+          const updated = item.figure.cloneNode(true) as HTMLElement;
+          updated.querySelector("img")?.setAttribute("src", result.url);
+          updated.querySelector("a")?.setAttribute("href", result.url);
           if (result.claimToken) {
             importedImageClaimsRef.current.set(`${postID}:${result.id}`, { id: result.id, claimToken: result.claimToken, url: result.url });
           }
+          settleEditorMediaNode(item.selector, updated.outerHTML, postID);
         } else {
           // Failure: replace the figure with an actionable error card
           const failure: ImageImportFailure = result ?? { code: "IMPORT_UNAVAILABLE", message: "图片转存失败", resolution: "请上传本地图片" };
           failedImageImportsRef.current.set(item.clientId, { id: item.clientId, source: item.src, name: item.alt, failure });
-          const tpl = document.createElement("template");
-          tpl.innerHTML = imageImportFailureHtml(item.clientId, failure);
-          item.figure.replaceWith(tpl.content);
+          settleEditorMediaNode(item.selector, imageImportFailureHtml(item.clientId, failure), postID);
         }
       }
     } catch {
@@ -1107,9 +1522,7 @@ export function App() {
       for (const item of toImport) {
         const failure: ImageImportFailure = { code: "IMPORT_UNAVAILABLE", message: "图片转存服务暂时不可用", resolution: "请稍后重试，或上传本地图片" };
         failedImageImportsRef.current.set(item.clientId, { id: item.clientId, source: item.src, name: item.alt, failure });
-        const tpl = document.createElement("template");
-        tpl.innerHTML = imageImportFailureHtml(item.clientId, failure);
-        item.figure.replaceWith(tpl.content);
+        settleEditorMediaNode(item.selector, imageImportFailureHtml(item.clientId, failure), postID);
       }
     }
 
@@ -1118,13 +1531,16 @@ export function App() {
   }
 
   async function replaceFailedImageWithLocalFile(file: File) {
+    const targetPostId = activePostIdRef.current;
     const targetID = imageReplacementTargetRef.current;
     imageReplacementTargetRef.current = null;
-    if (!targetID || !editorRef.current) return;
+    if (!targetID || !editorRef.current || !targetPostId) return;
     const card = editorRef.current.querySelector<HTMLElement>(`[data-fp-type="image-import-error"][data-import-id="${CSS.escape(targetID)}"]`);
     if (!card) return;
+    if (!beginImageImportOperation(targetPostId, targetID)) return;
     try {
-      const uploaded = await uploadFile(file);
+      const uploaded = await uploadEditorFile(file, targetPostId);
+      if (activePostIdRef.current !== targetPostId) return;
       if (!uploaded.mimeType.startsWith("image/")) {
         showToast("请选择图片文件");
         return;
@@ -1132,7 +1548,10 @@ export function App() {
       replaceFailedImageCard(card, uploaded, targetID);
       showToast("本地图片已上传并替换");
     } catch {
-      showToast("本地图片上传失败，请重试");
+      if (activePostIdRef.current === targetPostId) showToast("本地图片上传失败，请重试");
+    } finally {
+      busyImageImportsRef.current.delete(`${targetPostId}:${targetID}`);
+      refreshImageImportPresentation();
     }
   }
 
@@ -1144,12 +1563,18 @@ export function App() {
     replaceFailedImageCardWithHtml(card, `${editorImageHtml(uploaded.url, uploaded.name)}<p><br></p>`);
   }
 
+  async function uploadEditorFile(file: File, postID: string): Promise<UploadedFile> {
+    const uploaded = await uploadFile(file, postID);
+    if (uploaded.claimToken) {
+      importedImageClaimsRef.current.set(`${postID}:${uploaded.id}`, { id: uploaded.id, claimToken: uploaded.claimToken, url: uploaded.url });
+    }
+    return uploaded;
+  }
+
   function replaceFailedImageCardWithHtml(card: HTMLElement, html: string) {
-    if (!editorRef.current?.contains(card)) return;
-    const template = document.createElement("template");
-    template.innerHTML = html;
-    card.replaceWith(template.content);
-    syncEditorMarkdown();
+    const importID = card.dataset.importId;
+    if (!importID) return;
+    settleEditorMediaNode(`[data-fp-type="image-import-error"][data-import-id="${CSS.escape(importID)}"]`, html);
   }
 
   function showToast(text: string) {
@@ -1466,7 +1891,8 @@ export function App() {
                 suppressContentEditableWarning
                 role="textbox"
                 aria-label="文章正文"
-                onInput={syncEditorMarkdown}
+                onBeforeInput={handleEditorBeforeInput}
+                onInput={handleEditorInput}
                 onPaste={handleEditorPaste}
                 onClick={handleEditorClick}
                 onKeyDown={handleEditorKeyDown}
@@ -2243,8 +2669,7 @@ function formatMoney(cents: number, currency: string): string {
   }
 }
 
-async function fileToEditorHtml(file: File): Promise<string> {
-  const uploaded = await uploadFile(file);
+function fileToEditorHtml(uploaded: UploadedFile): string {
   if (uploaded.mimeType.startsWith("image/")) {
     return `${editorImageHtml(uploaded.url, uploaded.name)}<p><br></p>`;
   }
@@ -2253,18 +2678,19 @@ async function fileToEditorHtml(file: File): Promise<string> {
   return `<div class="editor-attachment" data-fp-type="attachment" data-name="${escapeAttribute(uploaded.name)}" data-href="${escapeAttribute(safeHref)}" contenteditable="false"><span>${escapeHtml(uploaded.name)}</span><a href="${escapeAttribute(safeHref)}" download="${escapeAttribute(uploaded.name)}">下载 / 查看</a></div><p><br></p>`;
 }
 
-async function uploadEmbeddedImage(src: string, name: string): Promise<UploadedFile> {
+async function uploadEmbeddedImage(src: string, name: string, postID: string): Promise<UploadedFile> {
   const response = await fetch(src);
   const blob = await response.blob();
   const file = new File([blob], filenameWithImageExtension(name, blob.type), { type: blob.type || "image/png" });
-  return uploadFile(file);
+  if (!postID) throw new Error("No active article");
+  return uploadFile(file, postID);
 }
 
-async function uploadFile(file: File): Promise<UploadedFile> {
+async function uploadFile(file: File, postID?: string): Promise<UploadedFile> {
   const formData = new FormData();
   formData.set("file", file);
 
-  const response = await fetch("/api/admin/attachments", {
+  const response = await fetch(postID ? `/api/admin/posts/${encodeURIComponent(postID)}/attachments` : "/api/admin/attachments", {
     method: "POST",
     credentials: "include",
     body: formData
@@ -2561,20 +2987,6 @@ function nodeToMarkdown(node: Node): string {
     return parts.join("\n\n");
   }
 
-  if (
-    !node.querySelector("figure.editor-image,figure.editor-youtube,.editor-attachment") &&
-    /^(STRONG|B|EM|I|DEL|S|STRIKE|U|CODE|SPAN|A)$/.test(node.tagName)
-  ) {
-    return inlineNodeToMarkdown(node).trim();
-  }
-
-  if (node.querySelector("figure.editor-image,figure.editor-youtube,.editor-attachment")) {
-    const childMarkdown = [...node.childNodes].map(nodeToMarkdown).filter((value) => value.trim());
-    if (childMarkdown.length) {
-      return childMarkdown.join("\n\n");
-    }
-  }
-
   if (node.tagName === "PRE") {
     // BUG-L12: sanitize lang tag — only allow identifier-safe characters to
     // prevent code-fence injection (e.g. data-lang="ts\nalert(1)").
@@ -2587,6 +2999,45 @@ function nodeToMarkdown(node: Node): string {
     return [...node.querySelectorAll<HTMLElement>(":scope > li")]
       .map((li, index) => `${node.tagName === "OL" ? `${index + 1}.` : "-"} ${inlineChildrenToMarkdown(li).trim()}`)
       .join("\n");
+  }
+
+  const nestedBlockSelector =
+    'p,h1,h2,h3,h4,h5,h6,ul,ol,pre,blockquote,div,figure.editor-image,figure.editor-youtube,.editor-attachment,[data-fp-type="callout"],[data-fp-type="image-import-error"],[data-fp-type="pending-media"]';
+
+  if (
+    !node.querySelector(nestedBlockSelector) &&
+    /^(STRONG|B|EM|I|DEL|S|STRIKE|U|CODE|SPAN|A)$/.test(node.tagName)
+  ) {
+    return inlineNodeToMarkdown(node).trim();
+  }
+
+  if (node.querySelector(nestedBlockSelector)) {
+    const blocks: string[] = [];
+    let inlineRun: ChildNode[] = [];
+    const flushInlineRun = () => {
+      if (inlineRun.length === 0) return;
+      const inlineMd = inlineRun.map(inlineNodeToMarkdown).join("").trim();
+      if (inlineMd) blocks.push(inlineMd);
+      inlineRun = [];
+    };
+
+    for (const child of [...node.childNodes]) {
+      if (
+        child instanceof HTMLElement &&
+        (child.matches(nestedBlockSelector) || Boolean(child.querySelector(nestedBlockSelector)))
+      ) {
+        flushInlineRun();
+        const blockMd = nodeToMarkdown(child).trim();
+        if (blockMd) blocks.push(blockMd);
+      } else {
+        inlineRun.push(child);
+      }
+    }
+    flushInlineRun();
+
+    if (blocks.length) {
+      return blocks.join("\n\n");
+    }
   }
 
   return inlineChildrenToMarkdown(node).trim();
@@ -2753,6 +3204,40 @@ function markdownImagesToPasteHtml(text: string): string | null {
     }
   }
   return parts.length > 0 ? parts.join("") : null;
+}
+
+function plainTextToPasteHtml(text: string): string | null {
+  const lines = text
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+  if (lines.length === 0) return null;
+  return lines.map((line) => `<p>${escapeHtml(line)}</p>`).join("");
+}
+
+const knownEditorImageIDs = new WeakMap<HTMLElement, string>();
+
+function ensureEditorImageIDs(root: ParentNode): void {
+  const figures = [...root.querySelectorAll<HTMLElement>("figure.editor-image")];
+  const used = new Set<string>();
+  // Keep the original node's identity even if a native drag-copy precedes it.
+  for (const figure of figures) {
+    const known = knownEditorImageIDs.get(figure);
+    if (known && !used.has(known)) {
+      figure.dataset.editorMediaId = known;
+      used.add(known);
+    } else {
+      knownEditorImageIDs.delete(figure);
+    }
+  }
+  for (const figure of figures) {
+    if (knownEditorImageIDs.has(figure)) continue;
+    let id = figure.dataset.editorMediaId;
+    if (!id || !/^[A-Za-z0-9_-]+$/.test(id) || used.has(id)) id = createClientID();
+    figure.dataset.editorMediaId = id;
+    knownEditorImageIDs.set(figure, id);
+    used.add(id);
+  }
 }
 
 function escapeMarkdown(value: string): string {

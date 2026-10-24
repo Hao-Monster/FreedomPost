@@ -13,6 +13,9 @@
  *   k6 run --env BASE=http://localhost:3001 --vus 50 --duration 30s \
  *     services/api/test/k6-bench.js
  *
+ * TEST_PUBLIC_ORIGIN / PUBLIC_SITE_URL 指定写请求 Origin（默认 BASE 的 origin），
+ * 必须与目标服务的 AllowedOrigins 配置一致。
+ *
  * 目标 SLO（从文档 04-test-plan.md）：
  *   - p95 响应时间 < 80ms（Go API）
  *   - p95 响应时间 < 200ms（TS API，基准）
@@ -26,6 +29,8 @@ import { Rate, Trend } from "k6/metrics";
 // ─── Configuration ────────────────────────────────────────────────────────────
 
 const BASE = __ENV.BASE || "http://localhost:3001";
+const PUBLIC_ORIGIN = (__ENV.TEST_PUBLIC_ORIGIN || __ENV.PUBLIC_SITE_URL || BASE).match(/^https?:\/\/[^/?#]+/i)?.[0];
+if (!PUBLIC_ORIGIN) throw new Error("TEST_PUBLIC_ORIGIN must be an HTTP(S) origin");
 const ADMIN_USER = __ENV.ADMIN_USERNAME || "admin";
 const ADMIN_PASS = __ENV.ADMIN_PASSWORD || "test-password-123";
 
@@ -61,7 +66,7 @@ export function setup() {
   const loginRes = http.post(
     `${BASE}/api/admin/login`,
     JSON.stringify({ username: ADMIN_USER, password: ADMIN_PASS }),
-    { headers: { "Content-Type": "application/json" } }
+    { headers: { "Content-Type": "application/json", Origin: PUBLIC_ORIGIN } }
   );
   check(loginRes, { "admin login 200": (r) => r.status === 200 });
 
@@ -105,7 +110,7 @@ export function setup() {
       content: markdown,
       visibility: "public",
     }),
-    { headers: { "Content-Type": "application/json", Cookie: cookie } }
+    { headers: { "Content-Type": "application/json", Cookie: cookie, Origin: PUBLIC_ORIGIN } }
   );
   check(createRes, { "create post 201": (r) => r.status === 201 });
 
@@ -118,10 +123,10 @@ export function setup() {
 export function teardown(data) {
   if (!data?.postId) return;
   http.del(`${BASE}/api/admin/posts/${data.postId}`, null, {
-    headers: { Cookie: data.cookie },
+    headers: { Cookie: data.cookie, Origin: PUBLIC_ORIGIN },
   });
   http.post(`${BASE}/api/admin/logout`, null, {
-    headers: { Cookie: data.cookie },
+    headers: { Cookie: data.cookie, Origin: PUBLIC_ORIGIN },
   });
 }
 

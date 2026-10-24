@@ -2,7 +2,8 @@ import { renderMarkdownArticle } from "@freedompost/renderer";
 import type { PostListItem, SearchDocument } from "@freedompost/shared";
 import { seedPosts } from "../data/seed-posts";
 
-export const articles = seedPosts
+// Demo content is never emitted by a production build.
+export const articles = (import.meta.env.DEV ? seedPosts : [])
   .map((post) => {
     const rendered = renderMarkdownArticle({
       slug: post.slug,

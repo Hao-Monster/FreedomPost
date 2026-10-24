@@ -2,6 +2,9 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { OrderHandoffController, orderHandoffStoragePrefix, type OrderHandoffInput, type OrderHandoffWidget, type SupportDelivery } from "./order-handoff.js";
+import { requestChallenge } from "./public-challenge.js";
+
+vi.mock("./public-challenge.js", () => ({ requestChallenge: vi.fn(async () => "qa-fresh-token") }));
 
 const input: OrderHandoffInput = { productSlug: "qa-digital-service", recommenderWechatId: "QA_Recommender" };
 // Deliberately synthetic valid UUIDs: request identifiers, not credentials.
@@ -43,7 +46,7 @@ async function finish<T>(promise: Promise<T>): Promise<T> {
 }
 
 describe("durable automatic order handoff", () => {
-  beforeEach(() => { localStorage.clear(); vi.useFakeTimers(); });
+  beforeEach(() => { localStorage.clear(); vi.useFakeTimers(); vi.mocked(requestChallenge).mockReset().mockResolvedValue("qa-fresh-token"); });
   afterEach(() => { vi.useRealTimers(); vi.restoreAllMocks(); });
 
   it("persists the original input before any request, then opens, sends and confirms the same conversation", async () => {
@@ -55,10 +58,11 @@ describe("durable automatic order handoff", () => {
 
     expect(result.phase).toBe("delivered");
     expect(events).toEqual(["GET /api/orders/session", "POST /api/orders", "ensureConversation", `GET /api/orders/${order.id}/support-delivery`, `POST /api/orders/${order.id}/support-delivery`, "confirmMessage"]);
-    expect(fetcher.mock.calls.find(([path]) => path === "/api/orders")?.[1]).toMatchObject({ credentials: "same-origin", cache: "no-store", headers: { "Idempotency-Key": requestKey, "X-Order-CSRF": "qa-memory-only-csrf" }, body: JSON.stringify(input) });
+    expect(fetcher.mock.calls.find(([path]) => path === "/api/orders")?.[1]).toMatchObject({ credentials: "same-origin", cache: "no-store", headers: { "Idempotency-Key": requestKey, "X-Order-CSRF": "qa-memory-only-csrf" }, body: JSON.stringify({ ...input, turnstileToken: "qa-fresh-token" }) });
     expect(fetcher.mock.calls.find(([path, init]) => String(path).endsWith("support-delivery") && init?.method === "POST")?.[1]?.body).toBe(JSON.stringify({ expectedBindingId: "qa-binding" }));
     expect(widget.confirmMessage).toHaveBeenCalledWith(expect.objectContaining({ messageId: 117, conversationId: 11, bindingId: "qa-binding", generation: "qa-generation" }));
     expect(localStorage.getItem(orderHandoffStoragePrefix + requestKey)).not.toContain("qa-memory-only-csrf");
+    expect(localStorage.getItem(orderHandoffStoragePrefix + requestKey)).not.toContain("qa-fresh-token");
   });
 
   it("requires the owner's new cookie to be acknowledged before order creation", async () => {
@@ -67,6 +71,42 @@ describe("durable automatic order handoff", () => {
     controller.createRequest(input);
     await finish(controller.run(requestKey));
     expect(fetcher.mock.calls.slice(0, 3).map(([path]) => path)).toEqual(["/api/orders/session", "/api/orders/session", "/api/orders"]);
+  });
+
+  it("does not mark creation attempted when browser verification fails", async () => {
+    const { controller, fetcher } = fixture();
+    vi.mocked(requestChallenge).mockRejectedValue(new Error("verification cancelled"));
+    controller.createRequest(input);
+    const result = await finish(controller.run(requestKey));
+    expect(result.creationAttempted).toBe(false);
+    expect(result.errorCode).toBe("CHALLENGE_NOT_COMPLETED");
+    expect(requestChallenge).toHaveBeenCalledOnce();
+    expect(fetcher.mock.calls.filter(([path]) => path === "/api/orders")).toHaveLength(0);
+  });
+
+  it("can retry a definitively rejected first token after refresh with the same request key", async () => {
+    const { controller, fetcher, waitForWidget } = fixture();
+    const normal = fetcher.getMockImplementation()!;
+    fetcher.mockImplementation((path, init) => path === "/api/orders" ? Promise.resolve(apiError("CHALLENGE_REJECTED", 403)) : normal(path, init));
+    controller.createRequest(input);
+    expect((await finish(controller.run(requestKey))).creationAttempted).toBe(false);
+    fetcher.mockImplementation(normal);
+    const restored = new OrderHandoffController({ storage: localStorage, fetch: fetcher, waitForWidget });
+    expect((await finish(restored.run(requestKey))).phase).toBe("delivered");
+    expect(fetcher.mock.calls.filter(([path]) => path === "/api/orders").map(([, init]) => (init?.headers as Record<string, string>)["Idempotency-Key"])).toEqual([requestKey, requestKey]);
+  });
+
+  it("retains owner-recovery protection after a lost response followed by token rejection", async () => {
+    const { controller, fetcher } = fixture();
+    const normal = fetcher.getMockImplementation()!;
+    let creates = 0;
+    fetcher.mockImplementation((path, init) => {
+      if (path === "/api/orders") return ++creates === 1 ? Promise.reject(new TypeError("response lost")) : Promise.resolve(apiError("CHALLENGE_REJECTED", 403));
+      if (path === "/api/orders/recover") return Promise.resolve(apiError("ORDER_NOT_FOUND", 404));
+      return normal(path, init);
+    });
+    controller.createRequest(input);
+    expect((await finish(controller.run(requestKey))).creationAttempted).toBe(true);
   });
 
   it("does not create an order when the browser cannot return the owner cookie", async () => {
@@ -103,12 +143,14 @@ describe("durable automatic order handoff", () => {
     expect(result.phase).toBe("delivered");
     expect(fetcher.mock.calls.filter(([path]) => path === "/api/orders")).toHaveLength(1);
     expect(fetcher.mock.calls.filter(([path]) => path === "/api/orders/recover")).toHaveLength(1);
+    expect(requestChallenge).toHaveBeenCalledOnce();
   });
 
   it("may repeat the same create only after a same-run authoritative recovery miss", async () => {
     const { controller, fetcher } = fixture();
     const normal = fetcher.getMockImplementation()!;
     let creates = 0;
+    vi.mocked(requestChallenge).mockResolvedValueOnce("qa-first-token").mockResolvedValueOnce("qa-second-token");
     fetcher.mockImplementation((path, init) => {
       if (path === "/api/orders" && creates++ === 0) return Promise.reject(new TypeError("never reached server"));
       if (path === "/api/orders/recover") return Promise.resolve(apiError("ORDER_NOT_FOUND", 404));
@@ -117,6 +159,7 @@ describe("durable automatic order handoff", () => {
     controller.createRequest(input);
     expect((await finish(controller.run(requestKey))).phase).toBe("delivered");
     expect(fetcher.mock.calls.filter(([path]) => path === "/api/orders").map(([, init]) => (init?.headers as Record<string, string>)["Idempotency-Key"])).toEqual([requestKey, requestKey]);
+    expect(fetcher.mock.calls.filter(([path]) => path === "/api/orders").map(([, init]) => JSON.parse(String(init?.body)).turnstileToken)).toEqual(["qa-first-token", "qa-second-token"]);
   });
 
   it("restores a request with unknown order ID after refresh and never uses new input", async () => {
@@ -129,6 +172,7 @@ describe("durable automatic order handoff", () => {
     expect(restored.get(requestKey)?.phase).toBe("delivered");
     expect(fetcher.mock.calls.filter(([path]) => path === "/api/orders")).toHaveLength(0);
     expect(fetcher.mock.calls.find(([path]) => path === "/api/orders/recover")?.[1]?.body).toBe(JSON.stringify({ requestKey }));
+    expect(requestChallenge).not.toHaveBeenCalled();
   });
 
   it("does not recreate a missing recovered order under a possibly replaced owner", async () => {

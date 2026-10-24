@@ -107,6 +107,7 @@ func newHandoffHTTPFixture(t *testing.T) *handoffHTTPFixture {
 	})
 	f := &handoffHTTPFixture{s: handoffTestServer(repo), product: p, affiliate: a, key: uuid.NewString(), receiver: &orderReceiverStub{binding: "verified-current-visitor"}}
 	f.s.chatwoot = f.receiver
+	f.s.publicChallenge = affiliateChallengeFunc(func(context.Context, string, string, string) error { return nil })
 	first := httptest.NewRecorder()
 	f.s.Handler().ServeHTTP(first, httptest.NewRequest(http.MethodGet, "https://shop.example/api/orders/session", nil))
 	f.owner = first.Result().Cookies()[0]
@@ -126,6 +127,7 @@ func (f *handoffHTTPFixture) request(method, path, body string, withWidget bool)
 	r := httptest.NewRequest(method, "https://shop.example"+path, strings.NewReader(body))
 	r.AddCookie(f.owner)
 	r.Header.Set("Origin", "https://shop.example")
+	r.Header.Set("Content-Type", "application/json")
 	r.Header.Set("X-Order-CSRF", f.csrf)
 	if method == http.MethodPost && path == "/api/orders" {
 		r.Header.Set("Idempotency-Key", f.key)
@@ -140,7 +142,7 @@ func (f *handoffHTTPFixture) request(method, path, body string, withWidget bool)
 
 func (f *handoffHTTPFixture) create(t *testing.T) *domain.OrderHandoff {
 	t.Helper()
-	w := f.request(http.MethodPost, "/api/orders", fmt.Sprintf(`{"productSlug":%q,"recommenderWechatId":%q}`, f.product.Slug, f.affiliate.WechatID), false)
+	w := f.request(http.MethodPost, "/api/orders", fmt.Sprintf(`{"productSlug":%q,"recommenderWechatId":%q,"turnstileToken":"qa-token"}`, f.product.Slug, f.affiliate.WechatID), false)
 	if w.Code != http.StatusCreated {
 		t.Fatalf("create HTTP order: %d %s", w.Code, w.Body.String())
 	}
@@ -298,7 +300,7 @@ func TestOrderHandoffHTTPDistinctOrdersShareVisitorWithoutDedupingEachOther(t *t
 	firstReceipt := deliveryFromResponse(t, f.request(http.MethodPost, "/api/orders/"+first.Order.ID+"/support-delivery", body, true))
 	f.key = uuid.NewString()
 	// A new explicit operation does not reset the receiver's prior conversation.
-	w := f.request(http.MethodPost, "/api/orders", fmt.Sprintf(`{"productSlug":%q,"recommenderWechatId":%q}`, f.product.Slug, f.affiliate.WechatID), false)
+	w := f.request(http.MethodPost, "/api/orders", fmt.Sprintf(`{"productSlug":%q,"recommenderWechatId":%q,"turnstileToken":"qa-token"}`, f.product.Slug, f.affiliate.WechatID), false)
 	if w.Code != http.StatusCreated {
 		t.Fatalf("second operation: %d %s", w.Code, w.Body.String())
 	}

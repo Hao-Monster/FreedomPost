@@ -43,6 +43,9 @@ jobs:
       - name: Install dependencies
         run: npm ci --no-audit --no-fund
 
+      - name: Install pinned Caddy for origin TLS tests
+        run: bash deploy/install-test-caddy.sh
+
       - name: Check
         run: npm run check
 
@@ -118,10 +121,15 @@ jobs:
           path: services/api/coverage.out
           retention-days: 7
 
-      - name: Build binary
+      - name: Build API and media migration binaries
         working-directory: services/api
         run: |
           go build -v \
             -ldflags "-X main.version=${{ github.sha }}" \
             -o /tmp/fp-api \
             ./cmd/server
+          CGO_ENABLED=0 go build -trimpath \
+            -ldflags "-X main.version=${{ github.sha }}" \
+            -o /tmp/media-migrate \
+            ./cmd/media-migrate
+          test "$(/tmp/media-migrate -version)" = "${{ github.sha }}"

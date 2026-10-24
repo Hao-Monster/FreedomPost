@@ -5,6 +5,7 @@ import { referralStorageKey } from "./article-links.js";
 import market from "../pages/market.astro?raw";
 
 vi.mock("lucide", () => ({ createIcons: vi.fn(), icons: {} }));
+vi.mock("./public-challenge.js", () => ({ requestChallenge: vi.fn(async () => "qa-form-token") }));
 
 describe("market form to acknowledged support handoff", () => {
   afterEach(() => { vi.useRealTimers(); vi.unstubAllGlobals(); vi.restoreAllMocks(); window.dispatchEvent(new Event("pagehide")); delete window.$chatwoot; });

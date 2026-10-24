@@ -3,6 +3,7 @@ import { type OrderHandoffController, type OrderHandoffRecord } from "./order-ha
 export function orderHandoffDescription(record: OrderHandoffRecord): string {
   if (record.phase === "delivered") return "订单已发送给客服，并已在当前会话中显示。请等待客服确认后再完成后续交易。";
   if (record.phase === "action_required") {
+    if (["CHALLENGE_NOT_COMPLETED", "CHALLENGE_REJECTED", "CHALLENGE_UNAVAILABLE"].includes(record.errorCode ?? "")) return record.creationAttempted ? "人机验证未完成，原请求已保留。请恢复此请求，先核对订单结果再继续。" : "人机验证未完成，尚未创建订单。请点击下方按钮重新验证并继续。";
     if (record.errorCode === "HANDOFF_CLOSED" || record.errorCode === "HANDOFF_CANCELLED") return record.order ? "客服交接已暂停，已生成的订单保留。点击下方按钮继续，不会重新下单。" : "下单请求已暂停。点击下方按钮核对原请求，不会另建订单。";
     if (["ORDER_SESSION_LOST", "ORDER_OWNER_REQUIRED", "ORDER_CSRF_INVALID"].includes(record.errorCode ?? "")) return record.creationAttempted ? "原下单会话已失效或无法验证。订单记录已保留，请恢复原浏览器会话后重试；不会自动另建订单。" : "浏览器未能确认安全下单会话。请允许本站 Cookie 后重试，目前尚未创建订单。";
     if (record.errorCode === "ORDER_RECOVERY_NOT_FOUND") return "暂时无法在当前浏览器会话找回原下单请求。为避免重复下单，已停止自动创建；请先联系人工客服核对。";

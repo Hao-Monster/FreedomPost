@@ -7,7 +7,7 @@ USER paidaccess:paidaccess
 EXPOSE 8080
 ENTRYPOINT ["/usr/local/bin/paid-access"]
 
-FROM caddy:2-alpine AS nginx
+FROM caddy:2.11.7-alpine AS nginx
 COPY deploy/caddy/Caddyfile /etc/caddy/Caddyfile
 COPY apps/public-reader/dist /var/www/freedompost/public
 COPY apps/admin/dist /var/www/freedompost/admin

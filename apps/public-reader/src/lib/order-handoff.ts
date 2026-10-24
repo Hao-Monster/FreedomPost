@@ -1,3 +1,5 @@
+import { requestChallenge } from "./public-challenge.js";
+
 export type OrderHandoffInput = {
   productSlug: string;
   recommenderWechatId: string;
@@ -171,12 +173,40 @@ export class OrderHandoffController {
           mustRecover = false;
         }
         if (!record.order) {
+          // Recovery runs first: a single-use token is only obtained for a real
+          // creation attempt, never for resuming an already persisted order.
+          const challengeStarted = Date.now();
+          let turnstileToken: string;
+          try {
+            turnstileToken = await requestChallenge("order_create", { signal });
+          } catch {
+            // A dismissed or unavailable challenge needs user action, not three
+            // automatic dialogs from the support network retry loop.
+            throw new HandoffError("CHALLENGE_NOT_COMPLETED");
+          } finally {
+            // Human verification has its own timeout; retain the existing budget
+            // for the order request and support handoff after it completes.
+            deadline += Date.now() - challengeStarted;
+          }
+          const previouslyAttempted = record.creationAttempted;
           this.change(record, { creationAttempted: true, phase: "creating" });
           mayRepeatCreate = true;
           mustRecover = true;
-          const result = await this.request("/api/orders", {
-            method: "POST", headers: { ...this.headers(csrfToken), "Idempotency-Key": record.requestKey }, body: JSON.stringify(record.input)
-          }, deadline, signal);
+          let result: Record<string, unknown>;
+          try {
+            result = await this.request("/api/orders", {
+              method: "POST", headers: { ...this.headers(csrfToken), "Idempotency-Key": record.requestKey }, body: JSON.stringify({ ...record.input, turnstileToken })
+            }, deadline, signal);
+          } catch (reason) {
+            // These responses are emitted before creation. A first rejected
+            // attempt remains retryable with a fresh token after a page reload.
+            // Never clear uncertainty left by an earlier lost response.
+            if (!previouslyAttempted && reason instanceof HandoffError && ["CHALLENGE_REJECTED", "CHALLENGE_UNAVAILABLE", "RATE_LIMITED"].includes(reason.code)) {
+              this.change(record, { creationAttempted: false });
+              mustRecover = false;
+            }
+            throw reason;
+          }
           this.adoptOrder(record, result);
           mustRecover = false;
         }

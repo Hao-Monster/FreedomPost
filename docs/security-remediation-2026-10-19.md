@@ -1,0 +1,129 @@
+# 安全修复计划与验收矩阵（2026-10-19）
+
+## 范围和基线
+
+- 基线：`codex/development` 6d40a3ab9aabf7170ecc0a23cecaeff9546dea7b，与 `origin/main` ead9988fba09052704313fae87cc2bbf5e789962 的文件树一致。
+- 本次仅本地实现、验证和交付第三方 review；不部署、不修改生产数据、账号、Secret、Cloudflare 或防火墙。已有管理员密码保留机制必须继续生效。
+- 保留未跟踪的 `-w`、`.gomodcache/`、`InstallationLog.txt`、`services/gateway/`。
+- 先按以下契约实施，修复引起的兼容调整及验证结果追加在本文末尾。
+
+## 六项报告的代码层结论
+
+| 项目 | 判断和修复边界 |
+|---|---|
+| 源站绕过 | 原代码未验证本站专用源站客户端身份；端口映射本身不能证明真实安全组允许直连。本次补 mTLS 与发布门禁，真实网络暴露需发布前核验 |
+| 下单及推广入口 | 原公开路径缺少挑战、待联系订单占库存、登录可隐式注册均存在。本次按用户选择改成交扣库存，并增加挑战、显式意图及资源限额 |
+| 文章附件直链 | 原文件读取未随文章权限鉴权，代码缺口存在。新媒体使用私有源站和文章授权；旧公开对象必须独立迁移及退役 |
+| Origin | 缺 Origin 原本放行属防御缺口，但仅凭这一点不能断言已绕过 SameSite 完成 CSRF。本次统一浏览器写入边界并保留其他认证措施 |
+| 评论存储消耗 | 原有 IP/单文件限制不足以限制全局未认领对象。本次增加挑战、原子配额和过期清理，保留现有附件类型与大小 |
+| 静态示例 | 属生产构建残留，未发现它本身泄露真实私有正文。本次去除生产 seed 路由和索引，并添加构建后断言 |
+
+## 冻结修复契约
+
+### S1 源站
+
+所有 HTTPS 站点强制本站独有 CA 的客户端证书验证，显式校验 SNI/Host。保留服务端 TLS、Cloudflare Access、管理员认证和公开域名的管理接口隔离。健康检查使用独立 clientAuth 证书，没有 localhost/请求头绕过。证书材料必须在发布修改 `.env` 或容器前验证；缺失、过期、用途错误、密钥不匹配均阻止发布。同步活动工作流中的 loopback 检查，避免先写业务状态后发现证书不可用。删除部署脚本全网放行 80/443 的动作。
+
+未来部署前必须另行配置本站专用 AOP 与云安全组 Cloudflare IPv4/IPv6 来源白名单，并确认历史宽松规则已撤销。代码不会代替这些外部操作。首次加固之后的回滚必须保留源站认证边界。
+
+### S2 公开下单、推广账户
+
+用户已确认：新 `pending`（待联系）不占库存，管理员确认 `completed` 才在事务中锁商品并扣减；取消只返还确实扣过的库存且只返还一次。历史 `stock_reserved=true` 不批量释放、不重复扣减；历史 completed/false 重复保存不追溯扣减。不限量 `-1` 保持不变。已分配订单改回 pending 保留原分配，取消才释放。
+
+订单两条入口均验证固定 action `order_create` 和新建额度。已存在的 owner/request key 先核对输入摘要，一致则返回原单，不消费新 token/新建额度；冲突返回 409；丢响应后先 recover 再考虑新建。前端不持久化 Turnstile token。
+
+推广入口必填 `intent=register|login`：登录不创建账号，统一登录错误；注册保留一次性生成密码体验，已有/停用统一注册不可用。固定 action `affiliate_register` / `affiliate_login`。保留入口 12/IP/分钟，注册 3/IP/小时、登录 12/账号/分钟；bcrypt 每实例最多 2 个并发，满额快速拒绝，无等待队列。注册成功与失败仍有差异，不能宣称完全隐藏账号存在性；微信所有权认证不在本次范围内。
+
+共享验证独立于福利活动/Opus8，服务器验证 action、hostname、时效，缺配置/服务故障关闭写入并返回 503，无效 token 返回 403。公开配置仅暴露 site key；不同操作、不同文件使用新 token。
+
+### S3 文章媒体
+
+新增文章/评论媒体保存到独立私有存储，通过 `/api/post-media/{postID}/{attachmentID}` 授权读取；公开文章可以匿名读，private 仅管理员读，paid 依赖现有读者购文凭据。先授权后处理 HEAD/Range，响应不允许共享缓存。文章从公开改受限时，媒体权限同步随文章变化。商品/工具公开上传保持现有方式。
+
+附件记录保留上传文章 context，正文使用独立文章引用关系；评论认领必须属于同一文章、有效 token、未超时、已上传完成。同一媒体多文引用按请求文章授权，不把某个公开引用变成其他私有文章的授权。新正文上传使用稳定草稿 ID；图片导入纳入同一规则。远端私有桶与旧公开桶分离，配置缺失不得退回公开 URL。
+
+为旧媒体提供默认 dry-run 的审计/迁移工具，明确处理正文、评论和公开共享引用。转换必须先验证私有副本和引用更新，再移除旧公开对象；失败可恢复。工具不在生产执行。已被合法公开或下载的字节不能追溯收回；未知外部链接必须报告，不能声称已保护。
+
+### S4 浏览器写入来源
+
+admin、公开评论/上传、affiliate、订单等浏览器写路由要求非空允许 Origin，并拒绝 cross-site Fetch Metadata。JSON 写入必须是 JSON Content-Type。签名 webhook、健康检查和服务间 API 不加入浏览器来源校验。保留已有 CSRF、Cookie SameSite 与订单 owner 校验。
+
+### S5 评论上传资源
+
+保留现有文件类型、25 MiB 单文件和 10/IP/小时上限，增加 `comment_upload` 验证。未认领期限 24 小时；每 IP 未认领上限 100 MiB、全局 1 GiB。持久化字节前用数据库锁原子预留配额，上传失败释放，上传中和清理中不可认领。后台清理先锁定过期记录，删除成功才移除元数据，失败保留重试依据；和评论认领并发时不能删除已认领对象。限制每实例同时处理公开上传数为 4。
+
+### S6 示例构建数据
+
+生产构建不生成示例文章路由、元数据或搜索快照；开发演示数据只用于开发。无静态文章时 reader 保留可由 API 加载的空壳，不能因 seed 为空构建失败。主页、搜索、文章读取继续由真实 API 驱动。
+
+## 执行测试矩阵
+
+| ID | 验证 | 通过标准 |
+|---|---|---|
+| S1.1 | 真实本地 Caddy + 隔离证书 | admin/public/origin-test 无证书、错误 CA、过期、serverAuth-only 均拒绝；两种合法 clientAuth 成功 |
+| S1.2 | SNI/Host 和应用边界 | 错配拒绝；合法客户端下 admin 200/session 401、公开 admin 404 |
+| S1.3 | 部署预检与工作流 | 材料异常在写 env/容器/活动前退出；所有 origin HTTPS 检查验证服务端并携带客户端证书；密码保留回归通过 |
+| S2.1 | 隔离 PostgreSQL 库存事务 | 新待联系不扣；争抢最后库存只有一个成交；历史预留/重复保存/取消恢复/不限量正确 |
+| S2.2 | HTTP + 前端订单状态机 | 两入口缺挑战零写入；同 key 恢复不二次验证、不同 payload 冲突；响应丢失不重复创建 |
+| S2.3 | Affiliate | login 不注册；错误统一；意图/挑战/额度先于 bcrypt；并发门禁正确释放；注册密码 UX 保留 |
+| S3.1 | 真实存储 + handler | public/private/paid × admin/匿名/已购/未购；HEAD/Range 均先鉴权，不返回私有桶直链 |
+| S3.2 | PostgreSQL + 编辑器 | 跨文章认领拒绝、过期拒绝、重复认领拒绝；导入、保存、重载、多文引用和可见性变更一致 |
+| S3.3 | 旧媒体迁移 | dry-run 零写入；隔离对象复制/摘要验证/引用更新/旧对象删除；共享/未知链接和失败恢复有明确结果 |
+| S4.1 | middleware/handler | 缺失/null/恶意 Origin、cross-site 拒绝；合法 Origin 正常；text/plain JSON 拒绝；webhook 不误伤 |
+| S5.1 | PostgreSQL 并发配额 | 并发预留不超过 IP/全局上限；失败回收；配额在对象写入前执行 |
+| S5.2 | 清理与认领并发 | 未认领过期可清理，已认领不删除；对象删除失败可重试；上传中不可认领 |
+| S5.3 | 浏览器上传流程 | 每文件新 token；取消/错误可恢复；类型、大小与文章上下文保留 |
+| S6.1 | 生产构建输出 | 无 welcome/architecture-notes/comment-safety 静态页面/快照；reader 空壳构建成功 |
+| R1 | 集成回归与独立 review | 定向测试先通过，最后一次必要的完整检查；审查与第三方交接包含未验证项 |
+
+## 验证记录
+
+本地实现完成。全部数据库验证只使用隔离的合成数据；没有推送、PR、生产部署、生产迁移或外部配置变更。
+
+### 已执行
+
+| 检查 | 结果与证据边界 |
+|---|---|
+| 原始数据库迁移 | 本机 PostgreSQL 16.15 + pgcrypto，完整执行 0001–0017；没有跳过或修改原迁移。媒体/配额用例每例使用独立 QA schema |
+| Go API | `go test -race ./...` 全部通过；冻结后的媒体、存储、URL 引用及数据库并发用例再次定向 race 通过；`go vet ./...`、gofmt 检查通过 |
+| paid-access | `go vet ./...` 与 `go test -race ./...` 通过；未修改该服务源码 |
+| 前端和共享包 | `npm run check` 通过：typecheck、232 个 workspace 用例、生产构建；随后新增 Beacon 回归通过，reader 最终 typecheck 72 文件零错误/警告/提示，最终生产构建和 seed 产物扫描通过 |
+| 部署边界 | 最终完整预检 73 项通过、零跳过，其中 18 个真实 Caddy TLS 子用例；含实际生效存储配置与原管理员密码保留回归 |
+| 漏洞数据库扫描 | 两服务 `govulncheck@v1.7.0` 均未发现被代码调用的漏洞；API/paid-access 依赖模块仍分别报告 1/21 个未到达的漏洞，不能表述为所有依赖零漏洞 |
+| 差异检查 | `git diff --cached --check` 及暂存差异 Gitleaks 扫描通过，未发现泄漏；原有四项未跟踪文件/目录未纳入提交 |
+| 旧工具入口 | 原无 challenge 的 `integration.mjs` 明确非零退出；新 Makefile 入口要求隔离 `TEST_DATABASE_URL`，运行真实 Go HTTP/PG 测试；不后台启动服务。渲染对比/压力脚本补 Origin，仅语法验证，没有发起压力测试 |
+
+本机完整日志保留在 `C:\Temp\freedompost-security-fix-20261019\`：`npm-check.log`、`go-api-race.log`、`go-media-final-race.log`、`go-paid-access-race.log`、`reader-final-build.log`、`deploy-final.log`、`go-api-vuln.log`、`go-paid-vuln.log`、`gitleaks-staged.json`。日志是本次执行证据，不是仓库依赖或生产验收凭据。此次启动的 PostgreSQL 测试实例已停止，合成数据及日志保留。
+
+### 独立审查发现并关闭的问题
+
+1. 无效挑战请求可耗尽受害账号额度：账号额度移至挑战成功、密码格式有效之后，IP 限制仍提前执行。
+2. 评论新建响应遗漏 managed URL：创建和读取均返回文章范围的授权 URL，真实数据库回归通过。
+3. 过期清理被前 100 个持续失败对象阻塞：认领后加五分钟重试租期，101 对象回归验证后续对象可清理；删除失败仍计入配额。
+4. 严格 JSON Content-Type 误伤阅读计数：Beacon 改用 `application/json` Blob，保留原有每日计数规则。
+5. 旧媒体 URL 的 query/fragment 等别名绕过迁移保存门禁：统一旧对象识别；原真实存储/PG 复现已由独立审查者重跑，均拒绝。
+6. 数据库提交结果不明时误删已验证私有副本：失败时保留副本和公开原件供核对；测试模拟提交阶段失败，未注入真实网络断连。
+7. 多篇文章反序保存共享附件可能死锁：统一附件加锁顺序，16 并发反序保存回归通过。
+8. 同源绝对或协议相对 managed URL 未进入引用事务：规范化为相对 URL，HTML/Markdown 与跨文章复用回归通过，外部 host 不误改。
+9. 本地存储的 `MANAGED_MEDIA_PRIVATE_ORIGIN_CONFIRMED=false` 被预检误拒：布尔值允许空/true/false，仅远程私有存储要求 true。
+10. 仅验证传入配置而忽略服务器保留的历史私有桶：发布前只读合并实际生效值，再比较公私桶和确认标志；配置冲突在写 `.env` 前拒绝，原管理员密码门禁回归通过。
+11. `0016_managed_media.sql` 回填缺失与 `DeletePost` 跨文章共享附件归属/孤儿残留：迁移回填 `attachment_post_refs` 初始引用；`DeletePost` 在事务中将其他文章仍引用的 `managed` 附件转移 `owner_id`，仅对属于被删文章且无剩余引用的 `managed` 正文/评论附件设置 24 小时宽限期（`pending_until`），不误扫其他文章草稿或 `legacy_public` 附件。
+12. 新建文章（`CreatePost`）无法认领预导入/剪贴板上传图片：`CreatePostInput` 与 `adminCreatePost` 增加 `ImportedImages` 透传与 `400 INVALID_IMPORTED_IMAGE` 校验，`syncPostMedia` 补齐 `context_post_id` 绑定与纯 HTML 正文引用提取。
+13. 历史媒体迁移（`media-migrate`）在纯 HTML 文章与含空格/HTML 实体 URL 场景下失效或清空正文：`RewriteMarkdown` 支持带空格的 Markdown 链接、大小写/空格变体 HTML 属性与 `&amp;` 实体还原；`commitCopy` 对 `content_markdown` 为空的历史文章直接改写 `content_html`。
+14. 评论上传 `ParseMultipartForm` 落盘 `/tmp` 写放大与 `api-go` 64m tmpfs 容量瓶颈：`handleUpload` 改为 `r.MultipartReader()` 纯内存流式读取并显式捕获 `http.MaxBytesError` 返回 `413 FILE_TOO_LARGE`；`deploy/docker-compose.yml` 中 `api-go` 的 `/tmp` tmpfs 扩容至 `256m`。
+15. 前后端评论附件限制不一致与重试重复消耗配额：`reader.ts` 对齐后端限制（单条最多 5 个文件、单文件 25 MiB、总计 100 MiB），补齐 `claimToken` 类型声明，并按 `(File, slug)` 缓存已上传未认领附件以支持评论提交失败原地重试。
+
+### 必须留给发布前验收的项目（NOT RUN）
+
+- 真实 Cloudflare 自定义 AOP、证书安装/轮换、安全组 IPv4/IPv6 白名单和旧规则撤销；真实管理员 Access 与应用登录、公共网站浏览器验收。
+- 真实 R2/OSS 私有 ACL、原始 endpoint/自定义域名匿名读取拒绝及 CDN 清缓存；本地 HTTP 源模拟只验证签名和拒绝重定向。
+- 历史媒体审计、复制、旧源删除和缓存确认；本次仅在隔离库和临时对象执行。旧公开 URL 未完成退役前仍可能可读，代码部署本身不代表旧媒体已受保护。
+- 实际 Docker volume copy-up、UID 10001 权限及容器挂载运行验收；本机 Docker daemon 未启动。新增卷不自动迁移历史 Node `runtime` 目录或旧容器中的本地文件，发布前必须先盘点、备份和验证恢复路径。
+- 外部 Redis TTL 与真实 Turnstile 交互；会话测试使用实际 session.Store 连接本地 RESP fixture，挑战测试使用注入 verifier。运行 API 现在要求有效的 Turnstile 配置；不得通过生产旁路补偿缺配置。
+- GitHub Linux CI、镜像构建及生产健康门禁实际运行；本地通过不等于远端 CI/生产通过。
+
+### 第三方审查入口
+
+以本文基线或 `origin/main` 比较本次本地提交。重点检查：库存状态转换及历史 `stock_reserved`、媒体授权先于对象读取、引用/claim/清理锁的竞态、旧 URL 的迁移与退役门禁、部署预检发生在配置或容器变更之前，以及旧密码保留代码是否仍完整。
+
+源站的外部准备与回滚见 [ORIGIN-SECURITY.md](../deploy/ORIGIN-SECURITY.md)；私有存储和历史媒体步骤见 [managed-media.md](managed-media.md)。微信号所有权证明与彻底隐藏注册存在性不属于本次修复：明确注册 + 挑战 + 限额只降低滥用，不能证明申请者拥有该微信号。

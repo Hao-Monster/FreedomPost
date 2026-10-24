@@ -97,6 +97,9 @@ jobs:
       - name: Typecheck
         run: npm run typecheck
 
+      - name: Install pinned Caddy for origin TLS tests
+        run: bash deploy/install-test-caddy.sh
+
       - name: Test
         run: npm test
 
@@ -131,7 +134,9 @@ jobs:
           mkdir -p services/paid-access/bin
           (cd services/paid-access && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o bin/paid-access ./cmd/server)
           mkdir -p services/api/bin
-          (cd services/api && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w -X main.version=${{ github.sha }}" -o bin/fp-api ./cmd/server)
+          (cd services/api && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w -X main.version=${{ inputs.release_sha }}" -o bin/fp-api ./cmd/server)
+          (cd services/api && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w -X main.version=${{ inputs.release_sha }}" -o bin/media-migrate ./cmd/media-migrate)
+          test "$(services/api/bin/media-migrate -version)" = "${{ inputs.release_sha }}"
 
       - name: Prepare deploy bundle
         run: |
@@ -162,6 +167,8 @@ jobs:
             --exclude "package-lock.json" \
             --exclude "tsconfig*.json" \
             ./ /tmp/freedompost-deploy/
+          test -s /tmp/freedompost-deploy/services/api/bin/media-migrate
+          test -s /tmp/freedompost-deploy/services/api/bin/fp-api
           tar -czf freedompost-deploy.tar.gz -C /tmp/freedompost-deploy .
           # Log bundle size for monitoring
           du -sh freedompost-deploy.tar.gz
@@ -213,6 +220,12 @@ jobs:
           R2_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
           R2_PUBLIC_BASE_URL: ${{ secrets.R2_PUBLIC_BASE_URL }}
           R2_PREFIX: ${{ secrets.R2_PREFIX }}
+          MANAGED_R2_BUCKET: ${{ secrets.MANAGED_R2_BUCKET }}
+          MANAGED_R2_PREFIX: ${{ secrets.MANAGED_R2_PREFIX }}
+          MANAGED_OSS_BUCKET: ${{ secrets.MANAGED_OSS_BUCKET }}
+          MANAGED_OSS_ENDPOINT: ${{ secrets.MANAGED_OSS_ENDPOINT }}
+          MANAGED_OSS_PREFIX: ${{ secrets.MANAGED_OSS_PREFIX }}
+          MANAGED_MEDIA_PRIVATE_ORIGIN_CONFIRMED: ${{ secrets.MANAGED_MEDIA_PRIVATE_ORIGIN_CONFIRMED }}
           TRUST_PROXY: "true"
           REDIS_URL: redis://:${{ secrets.REDIS_PASSWORD }}@redis:6379
           REDIS_PASSWORD: ${{ secrets.REDIS_PASSWORD }}
@@ -305,6 +318,12 @@ jobs:
           R2_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
           R2_PUBLIC_BASE_URL: ${{ secrets.R2_PUBLIC_BASE_URL }}
           R2_PREFIX: ${{ secrets.R2_PREFIX }}
+          MANAGED_R2_BUCKET: ${{ secrets.MANAGED_R2_BUCKET }}
+          MANAGED_R2_PREFIX: ${{ secrets.MANAGED_R2_PREFIX }}
+          MANAGED_OSS_BUCKET: ${{ secrets.MANAGED_OSS_BUCKET }}
+          MANAGED_OSS_ENDPOINT: ${{ secrets.MANAGED_OSS_ENDPOINT }}
+          MANAGED_OSS_PREFIX: ${{ secrets.MANAGED_OSS_PREFIX }}
+          MANAGED_MEDIA_PRIVATE_ORIGIN_CONFIRMED: ${{ secrets.MANAGED_MEDIA_PRIVATE_ORIGIN_CONFIRMED }}
           TURNSTILE_SITE_KEY: ${{ secrets.TURNSTILE_SITE_KEY }}
           TURNSTILE_SECRET_KEY: ${{ secrets.TURNSTILE_SECRET_KEY }}
           OPUS8_INTEGRATION_BASE_URL: ${{ secrets.OPUS8_INTEGRATION_BASE_URL }}
@@ -321,6 +340,6 @@ jobs:
           password: ${{ secrets.DEPLOY_KEY == '' && secrets.DEPLOY_PASSWORD || '' }}
           key: ${{ secrets.DEPLOY_KEY }}
           port: ${{ secrets.DEPLOY_PORT || 22 }}
-          envs: RELEASE_SHA,ROTATE_ADMIN_PASSWORD,CHATWOOT_BASE_URL,CHATWOOT_WEBSITE_TOKEN,CHATWOOT_API_TOKEN,CHATWOOT_ACCOUNT_ID,CHATWOOT_INBOX_ID,CHATWOOT_TIMEOUT_MS,CHANNEL_BRIDGE_ENABLED,CHANNEL_BRIDGE_PROVIDER,CHANNEL_BRIDGE_ALLOW_UNPREFIXED_REPLIES,CHATWOOT_WEBHOOK_SECRET,WECOM_BASE_URL,WECOM_CORP_ID,WECOM_CORP_SECRET,WECOM_AGENT_ID,WECOM_CALLBACK_TOKEN,WECOM_ENCODING_AES_KEY,WECOM_RECEIVE_ID,WECOM_OPERATOR_USER_ID,DEPLOY_PATH,COOKIE_SECRET,VISITOR_HASH_SALT,ADMIN_PASSWORD_HASH,ADMIN_ORIGIN,ADMIN_DOMAIN,POSTGRES_PASSWORD,PAID_ACCESS_INTERNAL_SECRET,PREVIEW_DOMAIN,DEPLOY_HOST,STORAGE_DRIVER,ALIYUN_OSS_REGION,ALIYUN_OSS_BUCKET,ALIYUN_OSS_ENDPOINT,ALIYUN_OSS_PUBLIC_BASE_URL,ALIYUN_OSS_PREFIX,ALIYUN_OSS_ACCESS_KEY_ID,ALIYUN_OSS_ACCESS_KEY_SECRET,R2_ACCOUNT_ID,R2_BUCKET,R2_ACCESS_KEY_ID,R2_SECRET_ACCESS_KEY,R2_ENDPOINT,R2_PUBLIC_BASE_URL,R2_PREFIX,TURNSTILE_SITE_KEY,TURNSTILE_SECRET_KEY,OPUS8_INTEGRATION_BASE_URL,OPUS8_INTEGRATION_KEY_ID,OPUS8_INTEGRATION_SECRET,BENEFIT_CLAIM_HMAC_SECRET,BENEFIT_LINK_ENCRYPTION_KEY,REDIS_PASSWORD,GO_API_WEIGHT,TS_API_WEIGHT
+          envs: RELEASE_SHA,ROTATE_ADMIN_PASSWORD,CHATWOOT_BASE_URL,CHATWOOT_WEBSITE_TOKEN,CHATWOOT_API_TOKEN,CHATWOOT_ACCOUNT_ID,CHATWOOT_INBOX_ID,CHATWOOT_TIMEOUT_MS,CHANNEL_BRIDGE_ENABLED,CHANNEL_BRIDGE_PROVIDER,CHANNEL_BRIDGE_ALLOW_UNPREFIXED_REPLIES,CHATWOOT_WEBHOOK_SECRET,WECOM_BASE_URL,WECOM_CORP_ID,WECOM_CORP_SECRET,WECOM_AGENT_ID,WECOM_CALLBACK_TOKEN,WECOM_ENCODING_AES_KEY,WECOM_RECEIVE_ID,WECOM_OPERATOR_USER_ID,DEPLOY_PATH,COOKIE_SECRET,VISITOR_HASH_SALT,ADMIN_PASSWORD_HASH,ADMIN_ORIGIN,ADMIN_DOMAIN,POSTGRES_PASSWORD,PAID_ACCESS_INTERNAL_SECRET,PREVIEW_DOMAIN,DEPLOY_HOST,STORAGE_DRIVER,ALIYUN_OSS_REGION,ALIYUN_OSS_BUCKET,ALIYUN_OSS_ENDPOINT,ALIYUN_OSS_PUBLIC_BASE_URL,ALIYUN_OSS_PREFIX,ALIYUN_OSS_ACCESS_KEY_ID,ALIYUN_OSS_ACCESS_KEY_SECRET,R2_ACCOUNT_ID,R2_BUCKET,R2_ACCESS_KEY_ID,R2_SECRET_ACCESS_KEY,R2_ENDPOINT,R2_PUBLIC_BASE_URL,R2_PREFIX,MANAGED_R2_BUCKET,MANAGED_R2_PREFIX,MANAGED_OSS_BUCKET,MANAGED_OSS_ENDPOINT,MANAGED_OSS_PREFIX,MANAGED_MEDIA_PRIVATE_ORIGIN_CONFIRMED,TURNSTILE_SITE_KEY,TURNSTILE_SECRET_KEY,OPUS8_INTEGRATION_BASE_URL,OPUS8_INTEGRATION_KEY_ID,OPUS8_INTEGRATION_SECRET,BENEFIT_CLAIM_HMAC_SECRET,BENEFIT_LINK_ENCRYPTION_KEY,REDIS_PASSWORD,GO_API_WEIGHT,TS_API_WEIGHT
           command_timeout: 10m
           script_path: deploy/remote-deploy.sh

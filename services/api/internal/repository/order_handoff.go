@@ -14,6 +14,23 @@ type handoffQuerier interface {
 	QueryRow(context.Context, string, ...any) pgx.Row
 }
 
+// LookupOwnedAffiliateOrder allows an acknowledged request to be replayed without
+// consuming a new challenge token. Creation still rechecks under its transaction lock.
+func (p *Postgres) LookupOwnedAffiliateOrder(ctx context.Context, input domain.CreateOwnedOrderInput) (*domain.OrderHandoff, error) {
+	var orderID, storedHash string
+	err := p.pool.QueryRow(ctx, `SELECT order_id::text, input_hash FROM affiliate_order_requests WHERE owner_hash=$1 AND request_key=$2`, input.OwnerHash, input.RequestKey).Scan(&orderID, &storedHash)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, domain.ErrNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	if storedHash != security.HashText(input.ProductSlug+"\n"+input.AffiliateWechatID) {
+		return nil, domain.ErrIdempotencyConflict
+	}
+	return readOwnedOrderHandoff(ctx, p.pool, input.OwnerHash, orderID)
+}
+
 func (p *Postgres) CreateOwnedAffiliateOrder(ctx context.Context, input domain.CreateOwnedOrderInput) (*domain.OrderHandoff, bool, error) {
 	tx, err := p.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
 	if err != nil {

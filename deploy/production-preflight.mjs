@@ -16,8 +16,14 @@ export function validateProductionEnvironment(environment = process.env) {
   const add = (name, message) => errors.push({ name, message });
   const value = (name) => String(environment[name] ?? "");
 
-  for (const name of ["DEPLOY_HOST", "DEPLOY_USER", "DEPLOY_PATH"]) {
+  for (const name of ["DEPLOY_HOST", "DEPLOY_USER"]) {
     if (!value(name).trim()) add(name, "is required");
+  }
+  // Keep this lexical contract in sync with the remote script's entry guard.
+  const deployPath = value("DEPLOY_PATH");
+  if (!/^\/[A-Za-z0-9_.-]+(?:\/[A-Za-z0-9_.-]+)*$/.test(deployPath)
+      || deployPath.split("/").some((segment) => segment === "." || segment === "..")) {
+    add("DEPLOY_PATH", "must be a non-root canonical absolute path using only letters, digits, dot, underscore and hyphen in each segment (no trailing slash or dot segments)");
   }
   if (!value("DEPLOY_PASSWORD") && !value("DEPLOY_KEY")) {
     add("DEPLOY_PASSWORD|DEPLOY_KEY", "one SSH credential is required");
@@ -142,6 +148,7 @@ export function validateRuntimeEnvironment(environment = process.env) {
   }
 
   const storageDriver = value("STORAGE_DRIVER");
+  errors.push(...validateManagedStorageEnvironment(environment));
   if (!["local", "oss", "r2"].includes(storageDriver)) {
     add("STORAGE_DRIVER", "must be local, oss, or r2");
   }
@@ -186,6 +193,31 @@ export function validateRuntimeEnvironment(environment = process.env) {
   validateInteger(environment, errors, "BENEFIT_NETWORK_DAILY_LIMIT", 1, 50);
   validateInteger(environment, errors, "BENEFIT_CLAIM_MINUTE_LIMIT", 1, 100);
 
+  return errors;
+}
+
+export function validateManagedStorageEnvironment(environment = process.env) {
+  const errors = [];
+  const add = (name, message) => errors.push({ name, message });
+  const value = (name) => String(environment[name] ?? "");
+  const confirmed = value("MANAGED_MEDIA_PRIVATE_ORIGIN_CONFIRMED");
+  for (const name of ["MANAGED_R2_BUCKET", "MANAGED_R2_PREFIX", "MANAGED_OSS_BUCKET", "MANAGED_OSS_ENDPOINT", "MANAGED_OSS_PREFIX", "MANAGED_MEDIA_PRIVATE_ORIGIN_CONFIRMED"]) {
+    if (/[\r\n]/.test(value(name))) add(name, "must not contain line breaks");
+  }
+  if (confirmed && !["true", "false"].includes(confirmed)) {
+    add("MANAGED_MEDIA_PRIVATE_ORIGIN_CONFIRMED", "must be true or false when supplied");
+  }
+  for (const [driver, name, publicName, defaultPublic] of [
+    ["r2", "MANAGED_R2_BUCKET", "R2_BUCKET", "freedompost"],
+    ["oss", "MANAGED_OSS_BUCKET", "ALIYUN_OSS_BUCKET", ""]
+  ]) {
+    const bucket = value(name);
+    if (value("STORAGE_DRIVER") !== driver && !bucket) continue;
+    if (!/^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$/.test(bucket)) add(name, "requires a valid dedicated private bucket");
+    const publicBucket = value(publicName) || defaultPublic;
+    if (!publicBucket || bucket === publicBucket) add(name, "must be distinct from the public bucket");
+    if (confirmed !== "true") add("MANAGED_MEDIA_PRIVATE_ORIGIN_CONFIRMED", "must confirm private origin access before releasing remote managed storage");
+  }
   return errors;
 }
 

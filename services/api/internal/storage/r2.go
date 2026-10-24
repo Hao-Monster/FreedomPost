@@ -50,7 +50,10 @@ func (a *R2Adapter) Put(ctx context.Context, input PutInput) (*StoredObject, err
 	if err != nil {
 		return nil, err
 	}
-	storedName := GenerateStoredFilename(input.OriginalName, detectedMime)
+	storedName, err := resolveStoredFilename(input, detectedMime)
+	if err != nil {
+		return nil, err
+	}
 	key := storedName
 	if a.prefix != "" {
 		key = strings.TrimRight(a.prefix, "/") + "/" + storedName

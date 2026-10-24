@@ -1,6 +1,6 @@
 module github.com/fenghaoyun-monster/freedompost/services/api
 
-go 1.26.9
+go 1.26.10
 
 require (
 	github.com/gabriel-vasile/mimetype v1.4.9

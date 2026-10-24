@@ -7,7 +7,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"html"
 	"strings"
 	"time"
 
@@ -179,7 +178,12 @@ func (p *Postgres) CreatePost(ctx context.Context, input domain.CreatePostInput)
 		return nil, err
 	}
 	now := time.Now()
-	row := p.pool.QueryRow(ctx,
+	tx, err := p.pool.Begin(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback(ctx)
+	row := tx.QueryRow(ctx,
 		`INSERT INTO posts (id, slug, title, visibility, price_cents, currency,
 		                    content_json, content_markdown, content_html, search_text, excerpt,
 		                    view_count, comment_count, attachment_count, created_at, updated_at)
@@ -191,7 +195,24 @@ func (p *Postgres) CreatePost(ctx context.Context, input domain.CreatePostInput)
 		input.ContentMarkdown, input.ContentHTML, input.SearchText, input.Excerpt,
 		now, now,
 	)
-	return scanPost(row)
+	post, err := scanPost(row)
+	if err != nil {
+		return nil, err
+	}
+	if err := requireProtectedPostMedia(ctx, tx, id, input.Visibility, input.ContentHTML); err != nil {
+		return nil, err
+	}
+	if err := syncPostMedia(ctx, tx, id, &post.ContentMarkdown, &post.ContentHTML, input.ImportedImages); err != nil {
+		return nil, err
+	}
+	if _, err := tx.Exec(ctx, `UPDATE posts SET content_markdown=$2,content_html=$3 WHERE id=$1`, id, post.ContentMarkdown, post.ContentHTML); err != nil {
+		return nil, err
+	}
+	post.Markdown = post.ContentMarkdown
+	if err := tx.Commit(ctx); err != nil {
+		return nil, err
+	}
+	return post, nil
 }
 
 func (p *Postgres) UpdatePost(ctx context.Context, input domain.UpdatePostInput) (*domain.Post, error) {
@@ -214,38 +235,11 @@ func (p *Postgres) UpdatePost(ctx context.Context, input domain.UpdatePostInput)
 		newSlug = existingSlug
 	}
 
-	claimedIDs := make([]string, 0, len(input.ImportedImages))
-	seenClaims := make(map[string]struct{}, len(input.ImportedImages))
-	for _, claim := range input.ImportedImages {
-		if claim.ID == "" || claim.ClaimToken == "" {
-			return nil, domain.ErrInvalidAttachment
-		}
-		if _, duplicate := seenClaims[claim.ID]; duplicate {
-			return nil, domain.ErrInvalidAttachment
-		}
-		seenClaims[claim.ID] = struct{}{}
-
-		var publicURL string
-		err := tx.QueryRow(ctx, `
-			SELECT public_url
-			FROM attachments
-			WHERE id = $1
-			  AND owner_type = 'post'
-			  AND owner_id IS NULL
-			  AND uploader_type = 'admin-image-import'
-			  AND claim_token_hash = $2
-			  AND pending_until > NOW()
-			FOR UPDATE`, claim.ID, security.HashToken(claim.ClaimToken)).Scan(&publicURL)
-		if errors.Is(err, pgx.ErrNoRows) {
-			return nil, domain.ErrInvalidAttachment
-		}
-		if err != nil {
-			return nil, fmt.Errorf("lock imported image: %w", err)
-		}
-		if !strings.Contains(input.ContentHTML, `src="`+html.EscapeString(publicURL)+`"`) {
-			return nil, domain.ErrInvalidAttachment
-		}
-		claimedIDs = append(claimedIDs, claim.ID)
+	if err := requireProtectedPostMedia(ctx, tx, input.ID, input.Visibility, input.ContentHTML); err != nil {
+		return nil, err
+	}
+	if err := syncPostMedia(ctx, tx, input.ID, &input.ContentMarkdown, &input.ContentHTML, input.ImportedImages); err != nil {
+		return nil, err
 	}
 
 	row := tx.QueryRow(ctx,
@@ -276,15 +270,6 @@ func (p *Postgres) UpdatePost(ctx context.Context, input domain.UpdatePostInput)
 		}
 		_, _ = tx.Exec(ctx, `DELETE FROM post_slug_aliases WHERE slug = $1`, newSlug)
 	}
-	for _, attachmentID := range claimedIDs {
-		result, err := tx.Exec(ctx, `
-			UPDATE attachments
-			SET owner_id = $2, claim_token_hash = NULL, pending_until = NULL
-			WHERE id = $1 AND owner_id IS NULL`, attachmentID, input.ID)
-		if err != nil || result.RowsAffected() != 1 {
-			return nil, domain.ErrInvalidAttachment
-		}
-	}
 	if err := tx.Commit(ctx); err != nil {
 		return nil, fmt.Errorf("commit update post: %w", err)
 	}
@@ -292,11 +277,129 @@ func (p *Postgres) UpdatePost(ctx context.Context, input domain.UpdatePostInput)
 }
 
 func (p *Postgres) DeletePost(ctx context.Context, id string) (bool, error) {
-	ct, err := p.pool.Exec(ctx, `DELETE FROM posts WHERE id = $1`, id)
+	tx, err := p.pool.Begin(ctx)
+	if err != nil {
+		return false, fmt.Errorf("begin delete post: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	// Match comment creation's post lock before taking the comment snapshot.
+	// A comment committed before this lock must be included in media cleanup.
+	var lockedPostID string
+	if err := tx.QueryRow(ctx, `SELECT id FROM posts WHERE id=$1 FOR UPDATE`, id).Scan(&lockedPostID); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return false, nil
+		}
+		return false, fmt.Errorf("lock post for delete: %w", err)
+	}
+
+	rows, err := tx.Query(ctx, `SELECT id FROM comments WHERE post_id = $1`, id)
+	if err != nil {
+		return false, fmt.Errorf("list post comments for delete: %w", err)
+	}
+	var commentIDs []string
+	for rows.Next() {
+		var commentID string
+		if err := rows.Scan(&commentID); err != nil {
+			rows.Close()
+			return false, fmt.Errorf("scan post comment for delete: %w", err)
+		}
+		commentIDs = append(commentIDs, commentID)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return false, fmt.Errorf("iterate post comments for delete: %w", err)
+	}
+	rows.Close()
+
+	// A surviving article being deleted concurrently must wait for the same
+	// media before removing its references, even while another post/comment
+	// still owns it. Sort shared locks as in article saves to avoid lock cycles.
+	mediaRows, err := tx.Query(ctx, `SELECT a.id FROM attachments a
+		WHERE (a.owner_type='post' AND a.owner_id=$1::uuid)
+		 OR (a.owner_type='comment' AND a.owner_id=ANY($2::uuid[]))
+		 OR EXISTS(SELECT 1 FROM attachment_post_refs r WHERE r.attachment_id=a.id AND r.post_id=$1::uuid)
+		ORDER BY a.id FOR UPDATE`, id, commentIDs)
+	if err != nil {
+		return false, fmt.Errorf("lock post media for delete: %w", err)
+	}
+	var affectedAttachmentIDs []string
+	for mediaRows.Next() {
+		var attachmentID string
+		if err := mediaRows.Scan(&attachmentID); err != nil {
+			mediaRows.Close()
+			return false, fmt.Errorf("scan post media for delete: %w", err)
+		}
+		affectedAttachmentIDs = append(affectedAttachmentIDs, attachmentID)
+	}
+	if err := mediaRows.Err(); err != nil {
+		mediaRows.Close()
+		return false, fmt.Errorf("iterate post media for delete: %w", err)
+	}
+	mediaRows.Close()
+
+	ct, err := tx.Exec(ctx, `DELETE FROM posts WHERE id = $1`, id)
 	if err != nil {
 		return false, fmt.Errorf("delete post: %w", err)
 	}
-	return ct.RowsAffected() > 0, nil
+	if ct.RowsAffected() == 0 {
+		return false, nil
+	}
+
+	// Surviving body references take ownership after the source post/comment
+	// is deleted. Committed post media is authorized through these references;
+	// its deleted context may stay NULL without locking another post via the FK.
+	if _, err := tx.Exec(ctx, `
+		UPDATE attachments a
+		SET owner_type = 'post', owner_id = (
+			SELECT r.post_id
+			FROM attachment_post_refs r
+			WHERE r.attachment_id = a.id
+			ORDER BY r.post_id
+			LIMIT 1
+		)
+		WHERE a.delivery_mode = 'managed'
+		  AND (
+			(a.owner_type = 'post' AND a.owner_id = $1::uuid)
+			OR (a.owner_type = 'comment' AND a.owner_id = ANY($2::uuid[]))
+		  )
+		  AND EXISTS (
+			SELECT 1
+			FROM attachment_post_refs r
+			WHERE r.attachment_id = a.id
+		  )
+	`, id, commentIDs); err != nil {
+		return false, fmt.Errorf("reassign shared post attachments: %w", err)
+	}
+
+	// Release managed attachments strictly belonging to this deleted post (or its comments)
+	// that have no remaining post references, giving a 24h grace window before cleanup.
+	if _, err := tx.Exec(ctx, `
+		UPDATE attachments a
+		SET owner_id = NULL,
+		    pending_until = COALESCE(a.pending_until, NOW() + INTERVAL '24 hours')
+		WHERE a.delivery_mode = 'managed'
+		  AND (
+			(a.owner_type = 'post' AND a.owner_id = $1::uuid)
+			OR (a.owner_type = 'comment' AND a.owner_id = ANY($2::uuid[]))
+		  )
+		  AND NOT EXISTS (
+			SELECT 1
+			FROM attachment_post_refs r
+			WHERE r.attachment_id = a.id
+		  )
+	`, id, commentIDs); err != nil {
+		return false, fmt.Errorf("release deleted post attachments: %w", err)
+	}
+
+	if err := releaseUnreferencedAttachments(ctx, tx, affectedAttachmentIDs); err != nil {
+		return false, fmt.Errorf("schedule unreferenced post attachments cleanup: %w", err)
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return false, fmt.Errorf("commit delete post: %w", err)
+	}
+	return true, nil
 }
 
 func (p *Postgres) RecordView(ctx context.Context, input domain.RecordViewInput) (*domain.RecordViewResult, error) {
@@ -392,12 +495,16 @@ func (p *Postgres) ListComments(ctx context.Context, postSlug string) ([]domain.
 	attMap := make(map[string][]domain.CommentAttachment)
 	for _, a := range attachments {
 		if a.OwnerID != nil {
+			attachmentURL := a.PublicURL
+			if a.DeliveryMode == "managed" {
+				attachmentURL = domain.ManagedMediaURL(post.ID, a.ID)
+			}
 			attMap[*a.OwnerID] = append(attMap[*a.OwnerID], domain.CommentAttachment{
 				ID:              a.ID,
 				Name:            a.OriginalFilename,
 				MimeType:        a.MimeType,
 				SizeBytes:       a.SizeBytes,
-				URL:             a.PublicURL,
+				URL:             attachmentURL,
 				StorageProvider: a.StorageProvider,
 				StorageKey:      a.StorageKey,
 				StoredFilename:  a.StoredFilename,
@@ -518,7 +625,8 @@ func (p *Postgres) CreateComment(ctx context.Context, input domain.CreateComment
 	for _, claim := range input.Attachments {
 		var attachment domain.CommentAttachment
 		err := tx.QueryRow(ctx, `
-			SELECT id, original_filename, mime_type, size_bytes, public_url,
+			SELECT id, original_filename, mime_type, size_bytes,
+			       CASE WHEN delivery_mode = 'managed' THEN '/api/post-media/' || $3::uuid::text || '/' || id::text ELSE public_url END,
 			       storage_provider, storage_key, stored_filename, COALESCE(sha256, '')
 			FROM attachments
 			WHERE id = $1
@@ -526,7 +634,8 @@ func (p *Postgres) CreateComment(ctx context.Context, input domain.CreateComment
 			  AND owner_id IS NULL
 			  AND uploader_type = 'public-comment'
 			  AND claim_token_hash = $2
-			FOR UPDATE`, claim.ID, security.HashToken(claim.ClaimToken)).Scan(
+			  AND context_post_id = $3 AND upload_state = 'ready' AND pending_until > NOW()
+			FOR UPDATE`, claim.ID, security.HashToken(claim.ClaimToken), post.ID).Scan(
 			&attachment.ID, &attachment.Name, &attachment.MimeType,
 			&attachment.SizeBytes, &attachment.URL, &attachment.StorageProvider,
 			&attachment.StorageKey, &attachment.StoredFilename, &attachment.SHA256,
@@ -567,7 +676,7 @@ func (p *Postgres) CreateComment(ctx context.Context, input domain.CreateComment
 	for _, attachment := range claimedAttachments {
 		result, err := tx.Exec(ctx, `
 			UPDATE attachments
-			SET owner_id = $2, claim_token_hash = NULL
+			SET owner_id = $2, claim_token_hash = NULL, pending_until = NULL
 			WHERE id = $1 AND owner_id IS NULL`, attachment.ID, commentID)
 		if err != nil || result.RowsAffected() != 1 {
 			return nil, domain.ErrInvalidAttachment
@@ -591,25 +700,7 @@ func (p *Postgres) CreateComment(ctx context.Context, input domain.CreateComment
 // ─── Attachments ──────────────────────────────────────────────────────────────
 
 func (p *Postgres) CreateAttachment(ctx context.Context, a domain.Attachment) (*domain.Attachment, error) {
-	id := uuid.NewString()
-	now := time.Now()
-	err := p.pool.QueryRow(ctx,
-		`INSERT INTO attachments (id, owner_type, owner_id, uploader_type,
-		                          original_filename, stored_filename, storage_provider,
-		                          storage_key, public_url, mime_type, detected_mime_type,
-		                          size_bytes, sha256, claim_token_hash, pending_until, source_host, created_at)
-		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)
-		 RETURNING id`,
-		id, a.OwnerType, a.OwnerID, coalesce(a.UploaderType, "admin"), a.OriginalFilename,
-		a.StoredFilename, a.StorageProvider, a.StorageKey, a.PublicURL, a.MimeType,
-		a.DetectedMime, a.SizeBytes, a.SHA256, nullStr(a.ClaimTokenHash), a.PendingUntil, nullStr(a.SourceHost), now,
-	).Scan(&a.ID)
-	if err != nil {
-		return nil, fmt.Errorf("create attachment: %w", err)
-	}
-	a.ID = id
-	a.CreatedAt = now
-	return &a, nil
+	return insertAttachment(ctx, p.pool, a)
 }
 
 func (p *Postgres) ListExpiredPostImageImports(ctx context.Context, limit int) ([]domain.Attachment, error) {
@@ -660,7 +751,9 @@ func (p *Postgres) DeleteAttachmentsByIDs(ctx context.Context, ids []string) err
 		args[i] = id
 	}
 	_, err := p.pool.Exec(ctx,
-		`DELETE FROM attachments WHERE id IN (`+strings.Join(placeholders, ",")+`)`, args...,
+		`DELETE FROM attachments WHERE id IN (`+strings.Join(placeholders, ",")+`)
+		 AND NOT EXISTS (SELECT 1 FROM managed_media_legacy_sources old
+		 WHERE old.attachment_id=attachments.id AND (old.retired_at IS NULL OR old.cache_purged_at IS NULL))`, args...,
 	)
 	return err
 }
@@ -678,7 +771,7 @@ func (p *Postgres) listAttachmentsByOwner(ctx context.Context, ownerType string,
 	rows, err := p.pool.Query(ctx,
 		`SELECT id, owner_type, owner_id, original_filename, stored_filename,
 		        storage_provider, storage_key, public_url, mime_type,
-		        COALESCE(detected_mime_type, mime_type), size_bytes, COALESCE(sha256,''), created_at
+		        COALESCE(detected_mime_type, mime_type), size_bytes, COALESCE(sha256,''), created_at, delivery_mode, context_post_id
 		 FROM attachments WHERE owner_type = $1 AND owner_id IN (`+strings.Join(placeholders, ",")+`)
 		 ORDER BY created_at`,
 		args...,
@@ -693,7 +786,7 @@ func (p *Postgres) listAttachmentsByOwner(ctx context.Context, ownerType string,
 		if err := rows.Scan(
 			&a.ID, &a.OwnerType, &a.OwnerID, &a.OriginalFilename, &a.StoredFilename,
 			&a.StorageProvider, &a.StorageKey, &a.PublicURL, &a.MimeType,
-			&a.DetectedMime, &a.SizeBytes, &a.SHA256, &a.CreatedAt,
+			&a.DetectedMime, &a.SizeBytes, &a.SHA256, &a.CreatedAt, &a.DeliveryMode, &a.ContextPostID,
 		); err != nil {
 			return nil, err
 		}
@@ -1178,12 +1271,8 @@ func (p *Postgres) createAffiliateOrderTx(ctx context.Context, tx pgx.Tx, input 
 	if !domain.ValidAffiliateMarkupPercent(markupPercent) {
 		return nil, domain.ErrInvalidState
 	}
-	stockReserved := product.Stock > 0
-	if stockReserved {
-		if _, err := tx.Exec(ctx, `UPDATE products SET stock = stock - 1, updated_at = NOW() WHERE id = $1 AND stock > 0`, product.ID); err != nil {
-			return nil, fmt.Errorf("decrement product stock: %w", err)
-		}
-	}
+	// A public request is a contact intent, not a confirmed sale. Keep inventory
+	// available until an administrator confirms completion in the status transaction.
 	view := domain.BuildAffiliateProductView(product, markupPercent)
 	now := time.Now()
 	var order domain.AffiliateOrder
@@ -1199,7 +1288,7 @@ func (p *Postgres) createAffiliateOrderTx(ctx context.Context, tx pgx.Tx, input 
 		           COALESCE(commission_status, 'pending'), created_at, updated_at`,
 		orderCode, affiliateID, product.ID, product.Title,
 		view.CustomerPriceCents, view.CommissionCents, view.BaseCommissionCents,
-		view.MarkupCommissionCents, product.Currency, stockReserved, now, now,
+		view.MarkupCommissionCents, product.Currency, false, now, now,
 	).Scan(
 		&order.ID, &order.OrderCode, &order.AffiliateID, &order.ProductID, &order.ProductTitle,
 		&order.PriceCents, &order.CommissionCents,
@@ -1219,6 +1308,8 @@ func (p *Postgres) ListAffiliateOrders(ctx context.Context) ([]domain.AffiliateO
 }
 
 func (p *Postgres) UpdateAffiliateOrderStatus(ctx context.Context, id, orderStatus, commissionStatus, notes string) (*domain.AffiliateOrder, error) {
+	// Preserve prior allocations (including historical pending reservations) until
+	// cancellation. Only a first confirmation without an allocation consumes stock.
 	var order domain.AffiliateOrder
 	err := p.pool.QueryRow(ctx, `
 		WITH order_lock AS (
@@ -1251,8 +1342,8 @@ func (p *Postgres) UpdateAffiliateOrderStatus(ctx context.Context, id, orderStat
 				commission_status = $3,
 				notes = $4,
 				stock_reserved = CASE
-					WHEN prior.prev_status <> 'canceled' AND $2 = 'canceled' THEN FALSE
-					WHEN prior.prev_status = 'canceled' AND $2 <> 'canceled' THEN COALESCE(prior.current_stock > 0, FALSE)
+					WHEN $2 = 'canceled' THEN FALSE
+					WHEN prior.prev_status <> 'completed' AND $2 = 'completed' AND NOT prior.prev_reserved THEN COALESCE(prior.current_stock > 0, FALSE)
 					ELSE prior.prev_reserved
 				END,
 				updated_at = NOW(),
@@ -1261,8 +1352,9 @@ func (p *Postgres) UpdateAffiliateOrderStatus(ctx context.Context, id, orderStat
 			FROM prior
 			WHERE ao.id = prior.id
 			  AND (
-			    prior.prev_status <> 'canceled'
-			    OR $2 = 'canceled'
+			    $2 <> 'completed'
+			    OR prior.prev_status = 'completed'
+			    OR prior.prev_reserved
 			    OR prior.current_stock IS NULL
 			    OR prior.current_stock < 0
 			    OR prior.current_stock > 0
@@ -1278,8 +1370,8 @@ func (p *Postgres) UpdateAffiliateOrderStatus(ctx context.Context, id, orderStat
 				END),
 				stock = CASE
 					WHEN p.stock < 0 THEN p.stock
-					WHEN u.prev_status <> 'canceled' AND u.order_status = 'canceled' AND u.prev_reserved THEN p.stock + 1
-					WHEN u.prev_status = 'canceled' AND u.order_status <> 'canceled' AND u.stock_reserved THEN p.stock - 1
+					WHEN u.prev_reserved AND NOT u.stock_reserved THEN p.stock + 1
+					WHEN NOT u.prev_reserved AND u.stock_reserved THEN p.stock - 1
 					ELSE p.stock
 				END,
 				updated_at = NOW()
@@ -1287,8 +1379,7 @@ func (p *Postgres) UpdateAffiliateOrderStatus(ctx context.Context, id, orderStat
 			WHERE p.id = u.product_id
 			  AND ((u.prev_status <> 'completed' AND u.order_status = 'completed')
 			    OR (u.prev_status = 'completed' AND u.order_status <> 'completed')
-			    OR (u.prev_status <> 'canceled' AND u.order_status = 'canceled' AND u.prev_reserved)
-			    OR (u.prev_status = 'canceled' AND u.order_status <> 'canceled' AND u.stock_reserved))
+			    OR u.prev_reserved <> u.stock_reserved)
 		)
 		SELECT u.id, u.order_code, u.affiliate_id, COALESCE(a.wechat_id, ''),
 		       COALESCE(u.product_id::text, ''), u.product_title,

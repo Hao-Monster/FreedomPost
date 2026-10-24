@@ -17,6 +17,8 @@ var (
 // The interface is designed to be testable with in-memory implementations.
 type Repository interface {
 	OrderHandoffRepository
+	ManagedMediaRepository
+	PendingUploadRepository
 	// ─── Posts ──────────────────────────────────────────────────────────────
 	ListPosts(ctx context.Context) ([]Post, error)
 	ListPostSummaries(ctx context.Context) ([]PostSummary, error)

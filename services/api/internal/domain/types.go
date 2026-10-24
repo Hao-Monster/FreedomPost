@@ -75,6 +75,7 @@ type CreatePostInput struct {
 	ContentHTML     string
 	SearchText      string
 	Excerpt         string
+	ImportedImages  []PendingPostImage
 }
 
 type UpdatePostInput struct {
@@ -176,6 +177,10 @@ type Attachment struct {
 	StorageProvider  string     `json:"storageProvider"`
 	StorageKey       string     `json:"storageKey"`
 	PublicURL        string     `json:"publicUrl"`
+	DeliveryMode     string     `json:"-"`
+	ContextPostID    *string    `json:"-"`
+	UploadState      string     `json:"-"`
+	UploaderIPHash   string     `json:"-"`
 	MimeType         string     `json:"mimeType"`
 	DetectedMime     string     `json:"detectedMimeType,omitempty"`
 	SizeBytes        int64      `json:"sizeBytes"`

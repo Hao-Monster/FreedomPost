@@ -68,7 +68,7 @@ export async function localizePastedImages(html: string, baseUrl: string, locali
   const replacements = new Map<string, string>();
   const importedImages: ImportedImageClaim[] = [];
   const failedImages: PendingImageImport[] = [];
-  const remoteSlots = prepared.slots.filter((slot) => slot.source && !isEmbeddedImageSource(slot.source));
+  const remoteSlots = prepared.slots.filter((slot) => slot.source && !isEmbeddedImageSource(slot.source) && !managedMediaPath(slot.source, baseUrl));
   let remoteResults = new Map<string, ImportedImageFile | ImageImportFailure>();
 
   if (remoteSlots.length > 0) {
@@ -86,6 +86,11 @@ export async function localizePastedImages(html: string, baseUrl: string, locali
   }
 
   for (const slot of prepared.slots) {
+    const managedPath = managedMediaPath(slot.source, baseUrl);
+    if (managedPath) {
+      replacements.set(slot.token, editorImageHtml(managedPath, slot.name));
+      continue;
+    }
     let imported: ImportedImageFile | undefined;
     let failure: ImageImportFailure | undefined;
     if (!slot.source) {
@@ -124,9 +129,24 @@ export async function localizePastedImages(html: string, baseUrl: string, locali
 
   let localizedHTML = prepared.html;
   for (const [token, replacement] of replacements) {
-    localizedHTML = localizedHTML.replaceAll(`<span>${token}</span>`, replacement).replaceAll(token, replacement);
+    localizedHTML = localizedHTML
+      .replaceAll(`<p><span>${token}</span></p>`, replacement)
+      .replaceAll(`<p>${token}</p>`, replacement)
+      .replaceAll(`<span>${token}</span>`, replacement)
+      .replaceAll(token, replacement);
   }
   return { html: localizedHTML, importedImages, failedImages };
+}
+
+function managedMediaPath(source: string, baseUrl: string): string | null {
+  try {
+    const url = new URL(source, baseUrl);
+    const base = new URL(baseUrl);
+    const uuid = "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}";
+    return url.origin === base.origin && !url.search && !url.hash && new RegExp(`^/api/post-media/${uuid}/${uuid}$`).test(url.pathname) ? url.pathname : null;
+  } catch {
+    return null;
+  }
 }
 
 export function imageImportFailureHtml(id: string, failure: ImageImportFailure): string {

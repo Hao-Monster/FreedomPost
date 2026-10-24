@@ -14,6 +14,7 @@ import { renderOrderReferralField } from "../lib/market-order.js";
 import { waitForChatwootReady } from "../lib/chatwoot-ready.js";
 import { OrderHandoffController, type OrderHandoffWidget } from "../lib/order-handoff.js";
 import { mountOrderHandoffView, orderHandoffDescription, orderHandoffErrorMessage } from "../lib/order-handoff-view.js";
+import { requestChallenge } from "../lib/public-challenge.js";
 
 type PostListItem = {
   slug: string;
@@ -888,15 +889,19 @@ async function hydrateAffiliateDashboard() {
 async function accessAffiliateDashboard(event: SubmitEvent, form: HTMLFormElement, dashboard: HTMLElement) {
   event.preventDefault();
   const data = new FormData(form);
+  const intent = event.submitter instanceof HTMLButtonElement && event.submitter.value === "register" ? "register" : "login";
   const error = document.querySelector<HTMLElement>("#affiliateAccessError");
-  const submit = form.querySelector<HTMLButtonElement>("button[type=submit]");
+  const submits = Array.from(form.querySelectorAll<HTMLButtonElement>("button[type=submit]"));
+  if (submits.some((button) => button.disabled)) return;
   if (error) error.hidden = true;
-  if (submit) submit.disabled = true;
+  for (const button of submits) button.disabled = true;
   try {
+    if (intent === "login" && !data.get("password")) throw new Error("请输入查询密码；首次申请请选择申请专属链接");
+    const turnstileToken = await requestChallenge(`affiliate_${intent}`);
     const response = await fetch("/api/affiliate/access", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ wechatId: data.get("wechatId"), password: data.get("password") })
+      body: JSON.stringify({ intent, wechatId: data.get("wechatId"), password: data.get("password"), turnstileToken })
     });
     const result = await response.json() as { shareUrl?: string; dashboard?: AffiliateDashboard; generatedPassword?: string; error?: { message?: string } };
     if (!response.ok || !result.dashboard || !result.shareUrl) throw new Error(result.error?.message || "查询失败");
@@ -908,7 +913,7 @@ async function accessAffiliateDashboard(event: SubmitEvent, form: HTMLFormElemen
       error.hidden = false;
     }
   } finally {
-    if (submit) submit.disabled = false;
+    for (const button of submits) button.disabled = false;
   }
 }
 

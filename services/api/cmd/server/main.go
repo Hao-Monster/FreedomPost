@@ -136,6 +136,10 @@ func run(logger *slog.Logger) error {
 		"storage_driver", cfg.StorageDriver,
 		"version", version,
 	)
+	publicChallenges, err := httpapi.NewPublicChallenges(cfg)
+	if err != nil {
+		return fmt.Errorf("public challenge configuration: %w", err)
+	}
 
 	// ── 2. PostgreSQL connection pool ─────────────────────────────────────────
 	repo, err := repository.New(ctx, cfg.DatabaseURL)
@@ -215,6 +219,10 @@ func run(logger *slog.Logger) error {
 	}
 
 	// ── 7. View count buffer ──────────────────────────────────────────────────
+	managedStorage, managedStores, err := storage.NewManagedAdapters(cfg)
+	if err != nil {
+		return fmt.Errorf("managed media configuration: %w", err)
+	}
 	viewBuf := viewcount.NewBuffer(redisClient, repo, logger)
 
 	// ── 8. Search index cache ─────────────────────────────────────────────────
@@ -341,6 +349,9 @@ func run(logger *slog.Logger) error {
 		viewBuf, searchCache, paidAccessClient, benefitRuntime, chatwootClient, logger,
 	)
 	srv.SetChannelBridge(channelBridgeService)
+	srv.SetPublicChallenges(publicChallenges)
+	srv.SetManagedStorage(managedStorage, managedStores)
+	go srv.RunPendingUploadCleanup(ctx)
 
 	httpSrv := &http.Server{
 		Addr:              cfg.Addr(),

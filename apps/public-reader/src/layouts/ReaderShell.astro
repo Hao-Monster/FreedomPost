@@ -17,15 +17,18 @@ interface ArticleViewModel {
 }
 
 interface Props {
-  article: ArticleViewModel;
+  article?: ArticleViewModel;
 }
 
-const { article } = Astro.props;
-const formattedDate = new Intl.DateTimeFormat("zh-CN", {
+const article = Astro.props.article ?? {
+  slug: "", title: "FreedomPost", createdAt: "", updatedAt: "", viewCount: 0,
+  commentCount: 0, excerpt: "", html: "", toc: []
+};
+const formattedDate = article.createdAt ? new Intl.DateTimeFormat("zh-CN", {
   year: "numeric",
   month: "2-digit",
   day: "2-digit"
-}).format(new Date(article.createdAt));
+}).format(new Date(article.createdAt)) : "";
 const initialPayload = JSON.stringify({
   slug: article.slug,
   meta: {
@@ -42,7 +45,7 @@ const initialPayload = JSON.stringify({
   .replace(/</g, "\\u003c")
   .replace(/>/g, "\\u003e")
   .replace(/&/g, "\\u0026");
-const canonicalUrl = new URL(`/p/${encodeURIComponent(article.slug)}`, Astro.site ?? "https://example.com").toString();
+const canonicalUrl = new URL(article.slug ? `/p/${encodeURIComponent(article.slug)}` : "/articles/", Astro.site ?? "https://example.com").toString();
 ---
 
 <!doctype html>

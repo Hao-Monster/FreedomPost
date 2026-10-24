@@ -1,4 +1,12 @@
 #!/usr/bin/env node
+console.error(
+  "已停用：本脚本使用旧的自动注册、无 challenge 契约，不能作为当前验收。\n" +
+  "请在 services/api 中将 TEST_DATABASE_URL 指向已应用迁移的隔离 PostgreSQL 测试库，然后执行：\n" +
+  "  go test -count=1 ./internal/httpapi ./internal/repository\n" +
+  "以下源码仅保留作历史参考；未发送任何测试请求。"
+);
+process.exit(1);
+
 /**
  * Go API 功能测试 & 系统测试
  * 运行方式：

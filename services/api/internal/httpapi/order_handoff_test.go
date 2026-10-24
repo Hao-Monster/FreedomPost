@@ -3,12 +3,14 @@ package httpapi
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/fenghaoyun-monster/freedompost/services/api/internal/config"
 	"github.com/fenghaoyun-monster/freedompost/services/api/internal/domain"
@@ -18,7 +20,21 @@ import (
 
 type handoffTestRepository struct {
 	domain.Repository
-	created int
+	created   int
+	lookup    *domain.OrderHandoff
+	lookupErr error
+}
+
+func (r *handoffTestRepository) LookupOwnedAffiliateOrder(context.Context, domain.CreateOwnedOrderInput) (*domain.OrderHandoff, error) {
+	if r.lookup != nil || r.lookupErr != nil {
+		return r.lookup, r.lookupErr
+	}
+	return nil, domain.ErrNotFound
+}
+
+func (r *handoffTestRepository) CreateOwnedAffiliateOrder(_ context.Context, input domain.CreateOwnedOrderInput) (*domain.OrderHandoff, bool, error) {
+	order, err := r.CreateAffiliateOrder(context.Background(), input.CreateOrderInput)
+	return &domain.OrderHandoff{Order: order, Delivery: domain.OrderSupportDelivery{Status: "awaiting_session"}}, true, err
 }
 
 func (r *handoffTestRepository) CreateAffiliateOrder(context.Context, domain.CreateOrderInput) (*domain.AffiliateOrder, error) {
@@ -111,11 +127,91 @@ func TestOrderWritesRequireOriginAndCSRF(t *testing.T) {
 				r.Header.Set("Idempotency-Key", "11111111-1111-4111-8111-111111111111")
 				w := httptest.NewRecorder()
 				s.Handler().ServeHTTP(w, r)
-				if w.Code != http.StatusForbidden || !strings.Contains(w.Body.String(), `"ORDER_CSRF_INVALID"`) {
+				if w.Code != http.StatusForbidden || (!strings.Contains(w.Body.String(), `"ORDER_CSRF_INVALID"`) && !strings.Contains(w.Body.String(), `"ORIGIN_FORBIDDEN"`)) {
 					t.Fatalf("%s accepted invalid CSRF: %d %s", path, w.Code, w.Body.String())
 				}
 			}
 		})
+	}
+}
+
+type affiliateChallengeFunc func(context.Context, string, string, string) error
+
+func (f affiliateChallengeFunc) Verify(ctx context.Context, token, ip, action string) error {
+	return f(ctx, token, ip, action)
+}
+
+func orderCreateRequest(t *testing.T, s *Server, owned bool, token string) *http.Request {
+	t.Helper()
+	body, _ := json.Marshal(map[string]string{"productSlug": "qa-product", "recommenderWechatId": "Tester123", "turnstileToken": token})
+	r := httptest.NewRequest(http.MethodPost, "https://shop.example/api/orders", strings.NewReader(string(body)))
+	r.Header.Set("Origin", "https://shop.example")
+	r.Header.Set("Content-Type", "application/json")
+	if owned {
+		w := httptest.NewRecorder()
+		s.Handler().ServeHTTP(w, httptest.NewRequest(http.MethodGet, "https://shop.example/api/orders/session", nil))
+		cookie := w.Result().Cookies()[0]
+		r.AddCookie(cookie)
+		r.Header.Set("X-Order-CSRF", s.orderCSRF(cookie.Value))
+		r.Header.Set("Idempotency-Key", "11111111-1111-4111-8111-111111111111")
+	}
+	return r
+}
+
+func TestOrderChallengeGatesBothCreationRoutes(t *testing.T) {
+	for _, owned := range []bool{false, true} {
+		for _, tc := range []struct {
+			name, token string
+			verifier    bool
+			err         error
+			want        int
+		}{
+			{"unconfigured", "qa-token", false, nil, 503}, {"missing", "", true, nil, 403},
+			{"rejected", "qa-token", true, ErrChallengeRejected, 403}, {"unavailable", "qa-token", true, ErrChallengeUnavailable, 503},
+			{"accepted", "qa-token", true, nil, 201},
+		} {
+			t.Run(fmt.Sprintf("owned=%v/%s", owned, tc.name), func(t *testing.T) {
+				repo := &handoffTestRepository{}
+				s := handoffTestServer(repo)
+				if tc.verifier {
+					s.publicChallenge = affiliateChallengeFunc(func(_ context.Context, token, ip, action string) error {
+						if token != "qa-token" || action != "order_create" || ip == "" {
+							t.Fatalf("challenge arguments: token=%q action=%q ip=%q", token, action, ip)
+						}
+						return tc.err
+					})
+				}
+				w := httptest.NewRecorder()
+				s.Handler().ServeHTTP(w, orderCreateRequest(t, s, owned, tc.token))
+				if w.Code != tc.want || (tc.want != 201 && repo.created != 0) {
+					t.Fatalf("status=%d created=%d body=%s", w.Code, repo.created, w.Body.String())
+				}
+			})
+		}
+	}
+}
+
+func TestOwnedOrderReplayPrecedesChallengeAndCreationQuota(t *testing.T) {
+	for _, conflict := range []bool{false, true} {
+		repo := &handoffTestRepository{lookup: &domain.OrderHandoff{Order: &domain.AffiliateOrder{ID: "original"}, Delivery: domain.OrderSupportDelivery{Status: "awaiting_session"}}}
+		if conflict {
+			repo.lookup = nil
+			repo.lookupErr = domain.ErrIdempotencyConflict
+		}
+		s := handoffTestServer(repo)
+		r := orderCreateRequest(t, s, true, "")
+		for range 20 {
+			_, _ = s.limiter.Allow(r.Context(), "affiliate-order:"+security.HashText(s.remoteIP(r)), 20, time.Hour)
+		}
+		w := httptest.NewRecorder()
+		s.Handler().ServeHTTP(w, r)
+		want := 200
+		if conflict {
+			want = 409
+		}
+		if w.Code != want || repo.created != 0 {
+			t.Fatalf("replay status=%d created=%d body=%s", w.Code, repo.created, w.Body.String())
+		}
 	}
 }
 
