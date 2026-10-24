@@ -129,7 +129,11 @@ export async function localizePastedImages(html: string, baseUrl: string, locali
 
   let localizedHTML = prepared.html;
   for (const [token, replacement] of replacements) {
-    localizedHTML = localizedHTML.replaceAll(`<span>${token}</span>`, replacement).replaceAll(token, replacement);
+    localizedHTML = localizedHTML
+      .replaceAll(`<p><span>${token}</span></p>`, replacement)
+      .replaceAll(`<p>${token}</p>`, replacement)
+      .replaceAll(`<span>${token}</span>`, replacement)
+      .replaceAll(token, replacement);
   }
   return { html: localizedHTML, importedImages, failedImages };
 }

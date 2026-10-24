@@ -60,7 +60,7 @@ printf changed > "$dir/mutated"
 test('origin guard runs before snapshot, extraction, credentials and service changes', () => {
   const call = remote.indexOf('\nverify_origin_client_material "$ORIGIN_CLIENT_CA"');
   assert.ok(call > 0);
-  for (const mutation of ['\nprepare_admin_credentials\n', 'mkdir -p "$ROLLBACK_DIR"', 'tar -xzf /tmp/', 'set_env "ADMIN_PASSWORD_HASH"', 'build paid-access', 'up -d postgres']) {
+  for (const mutation of ['\nprepare_admin_credentials\n', '\nprepare_rollback_directory\n', 'tar -xzf /tmp/', 'set_env "ADMIN_PASSWORD_HASH"', 'build paid-access', 'up -d postgres']) {
     assert.ok(remote.indexOf(mutation) > call, mutation);
   }
   assert.doesNotMatch(remote, /ufw allow|firewall-cmd --permanent|iptables -[IC] INPUT/);

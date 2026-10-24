@@ -107,6 +107,11 @@ admin、公开评论/上传、affiliate、订单等浏览器写路由要求非�
 8. 同源绝对或协议相对 managed URL 未进入引用事务：规范化为相对 URL，HTML/Markdown 与跨文章复用回归通过，外部 host 不误改。
 9. 本地存储的 `MANAGED_MEDIA_PRIVATE_ORIGIN_CONFIRMED=false` 被预检误拒：布尔值允许空/true/false，仅远程私有存储要求 true。
 10. 仅验证传入配置而忽略服务器保留的历史私有桶：发布前只读合并实际生效值，再比较公私桶和确认标志；配置冲突在写 `.env` 前拒绝，原管理员密码门禁回归通过。
+11. `0016_managed_media.sql` 回填缺失与 `DeletePost` 跨文章共享附件归属/孤儿残留：迁移回填 `attachment_post_refs` 初始引用；`DeletePost` 在事务中将其他文章仍引用的 `managed` 附件转移 `owner_id`，仅对属于被删文章且无剩余引用的 `managed` 正文/评论附件设置 24 小时宽限期（`pending_until`），不误扫其他文章草稿或 `legacy_public` 附件。
+12. 新建文章（`CreatePost`）无法认领预导入/剪贴板上传图片：`CreatePostInput` 与 `adminCreatePost` 增加 `ImportedImages` 透传与 `400 INVALID_IMPORTED_IMAGE` 校验，`syncPostMedia` 补齐 `context_post_id` 绑定与纯 HTML 正文引用提取。
+13. 历史媒体迁移（`media-migrate`）在纯 HTML 文章与含空格/HTML 实体 URL 场景下失效或清空正文：`RewriteMarkdown` 支持带空格的 Markdown 链接、大小写/空格变体 HTML 属性与 `&amp;` 实体还原；`commitCopy` 对 `content_markdown` 为空的历史文章直接改写 `content_html`。
+14. 评论上传 `ParseMultipartForm` 落盘 `/tmp` 写放大与 `api-go` 64m tmpfs 容量瓶颈：`handleUpload` 改为 `r.MultipartReader()` 纯内存流式读取并显式捕获 `http.MaxBytesError` 返回 `413 FILE_TOO_LARGE`；`deploy/docker-compose.yml` 中 `api-go` 的 `/tmp` tmpfs 扩容至 `256m`。
+15. 前后端评论附件限制不一致与重试重复消耗配额：`reader.ts` 对齐后端限制（单条最多 5 个文件、单文件 25 MiB、总计 100 MiB），补齐 `claimToken` 类型声明，并按 `(File, slug)` 缓存已上传未认领附件以支持评论提交失败原地重试。
 
 ### 必须留给发布前验收的项目（NOT RUN）
 

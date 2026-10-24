@@ -143,3 +143,19 @@ func TestManagedMediaAdminPreviewUsesRealSessionStore(t *testing.T) {
 		})
 	}
 }
+
+func TestHandleUploadStreamingReturns413WhenExceedingMaxBytes(t *testing.T) {
+	s := &Server{logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	boundary := "fp-test-boundary"
+	body := "--" + boundary + "\r\n" +
+		"Content-Disposition: form-data; name=\"file\"; filename=\"large.bin\"\r\n" +
+		"Content-Type: application/octet-stream\r\n\r\n" +
+		strings.Repeat("A", 128) + "\r\n--" + boundary + "--\r\n"
+	r := httptest.NewRequest(http.MethodPost, "/api/admin/uploads", strings.NewReader(body))
+	r.Header.Set("Content-Type", "multipart/form-data; boundary="+boundary)
+	w := httptest.NewRecorder()
+	s.handleUpload(w, r, "post", "", "admin", 64)
+	if w.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("expected 413, got %d: %s", w.Code, w.Body.String())
+	}
+}

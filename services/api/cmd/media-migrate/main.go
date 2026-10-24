@@ -15,6 +15,8 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
+var version = "dev"
+
 func main() {
 	if err := run(); err != nil {
 		fmt.Fprintln(os.Stderr, "media migration:", err)
@@ -22,11 +24,16 @@ func main() {
 	}
 }
 func run() error {
+	showVersion := flag.Bool("version", false, "print the source release SHA and exit without loading configuration or accessing storage")
 	apply := flag.Bool("apply", false, "copy verified objects to private storage and rewrite DB references; retain public originals")
 	retire := flag.Bool("retire-public-originals", false, "DESTRUCTIVE: remove only previously copied originals; requires approved backup/rollback")
 	purge := flag.Bool("confirm-cache-purge", false, "record operator confirmation that old CDN URLs were purged/disabled after retirement")
 	maintenance := flag.Bool("maintenance-confirmed", false, "confirm article/comment/product/tool writes are stopped for copy or retirement")
 	flag.Parse()
+	if *showVersion {
+		fmt.Println(version)
+		return nil
+	}
 	modes := 0
 	for _, v := range []bool{*apply, *retire, *purge} {
 		if v {

@@ -1,6 +1,22 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Validate before any credential/configuration reads or privileged operations.
+# Require the same canonical spelling as production-preflight.mjs so appending
+# .rollback always selects a sibling of the Docker build context.
+if [[ ! "${DEPLOY_PATH:-}" =~ ^(/[A-Za-z0-9_.-]+)+$ ]] \
+  || [[ "/${DEPLOY_PATH:-}/" == */./* || "/${DEPLOY_PATH:-}/" == */../* ]]; then
+  printf 'DEPLOY_PATH must be a non-root canonical absolute path without trailing slashes, dot segments or unsafe characters\n' >&2
+  exit 1
+fi
+# Missing directories are valid on first install. Reject existing symlink
+# aliases (including parent components) without creating any directories.
+if ! canonical_deploy_path=$(realpath -m -- "$DEPLOY_PATH" 2>/dev/null) \
+  || [ "$canonical_deploy_path" != "$DEPLOY_PATH" ]; then
+  printf 'DEPLOY_PATH must not use a filesystem alias\n' >&2
+  exit 1
+fi
+
 if [ "$(id -u)" -eq 0 ]; then
   SUDO=""
 else
@@ -326,6 +342,19 @@ write_managed_storage_configuration() {
 }
 # END managed storage guard functions
 
+# BEGIN rollback directory guard functions
+prepare_rollback_directory() {
+  local root="${DEPLOY_PATH}.rollback"
+  test ! -L "$root"
+  test ! -e "$root" || test -d "$root"
+  $SUDO mkdir -p "$root"
+  $SUDO chown "$(id -u):$(id -g)" "$root"
+  $SUDO chmod 700 "$root"
+  # Refuse to reuse an existing snapshot, including a symlink at this path.
+  (umask 077; mkdir -m 700 "$ROLLBACK_DIR")
+}
+# END rollback directory guard functions
+
 [[ "${RELEASE_SHA:-}" =~ ^[0-9a-f]{40}$ ]]
 verify_origin_client_material "$ORIGIN_CLIENT_CA" "$ORIGIN_HEALTH_CERT" "$ORIGIN_HEALTH_KEY"
 verify_managed_storage_configuration
@@ -334,10 +363,10 @@ printf 'Admin credential mode: %s\n' "$ADMIN_CREDENTIAL_MODE"
 # Keep the running images tagged before the normal image-prune/build steps.
 # The snapshot contains credentials, stays on this host and is never uploaded.
 ROLLBACK_DIR="${DEPLOY_PATH}.rollback/$(date -u +%Y%m%dT%H%M%SZ)-${RELEASE_SHA:0:12}"
+prepare_rollback_directory
 if [ -f "$DEPLOY_PATH/.env" ]; then
   (
     umask 077
-    mkdir -p "$ROLLBACK_DIR"
     $SUDO tar -czf "$ROLLBACK_DIR/config.tar.gz" -C "$DEPLOY_PATH" .env deploy
     $SUDO chmod 600 "$ROLLBACK_DIR/config.tar.gz"
     printf 'services:\n' > "$ROLLBACK_DIR/images.yml"
@@ -374,7 +403,55 @@ fi
 echo "=== Extracting deploy bundle into $DEPLOY_PATH ==="
 $SUDO mkdir -p "$DEPLOY_PATH"
 $SUDO chown "$(id -u):$(id -g)" "$DEPLOY_PATH"
-tar -xzf /tmp/freedompost-deploy.tar.gz -C "$DEPLOY_PATH"
+# Generated trees must be replaced, not overlaid: removed routes otherwise
+# survive in the next gateway image. Keep prior and failed outputs for recovery.
+install_static_release() (
+  local app target backup="$ROLLBACK_DIR/static"
+  local -a replaced=()
+  restore_static_release() {
+    local result="$1" app target
+    trap - EXIT
+    if [ "$result" -ne 0 ]; then
+      for app in "${replaced[@]}"; do
+        target="$DEPLOY_PATH/apps/$app/dist"
+        if [ -e "$target" ] || [ -L "$target" ]; then
+          if ! mv "$target" "$backup/$app/failed"; then
+            printf 'Static recovery requires manual restore from %s\n' "$backup/$app/previous" >&2
+            continue
+          fi
+        fi
+        if [ -d "$backup/$app/previous" ]; then
+          mv "$backup/$app/previous" "$target" \
+            || printf 'Static recovery requires manual restore from %s\n' "$backup/$app/previous" >&2
+        fi
+      done
+    fi
+    exit "$result"
+  }
+  trap 'restore_static_release "$?"' EXIT
+  # Reject aliases before moving either generated tree; never move user data.
+  if [ -e "$backup" ] || [ -L "$backup" ]; then
+    printf 'Static backup already exists: %s\n' "$backup" >&2
+    exit 1
+  fi
+  test ! -L "$DEPLOY_PATH/apps"
+  for app in public-reader admin; do
+    test ! -L "$DEPLOY_PATH/apps/$app"
+    test ! -L "$DEPLOY_PATH/apps/$app/dist"
+    test ! -e "$DEPLOY_PATH/apps/$app/dist" || test -d "$DEPLOY_PATH/apps/$app/dist"
+  done
+  for app in public-reader admin; do
+    target="$DEPLOY_PATH/apps/$app/dist"
+    mkdir -p "$backup/$app" "$DEPLOY_PATH/apps/$app"
+    if [ -e "$target" ]; then mv "$target" "$backup/$app/previous"; fi
+    replaced+=("$app")
+  done
+  tar -xzf /tmp/freedompost-deploy.tar.gz -C "$DEPLOY_PATH"
+  test -f "$DEPLOY_PATH/apps/public-reader/dist/reader/index.html"
+  test -f "$DEPLOY_PATH/apps/public-reader/dist/reader-shell/index.html"
+  test -f "$DEPLOY_PATH/apps/admin/dist/index.html"
+)
+install_static_release
 rm -f /tmp/freedompost-deploy.tar.gz
 cd "$DEPLOY_PATH"
 

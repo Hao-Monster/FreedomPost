@@ -16,8 +16,14 @@ export function validateProductionEnvironment(environment = process.env) {
   const add = (name, message) => errors.push({ name, message });
   const value = (name) => String(environment[name] ?? "");
 
-  for (const name of ["DEPLOY_HOST", "DEPLOY_USER", "DEPLOY_PATH"]) {
+  for (const name of ["DEPLOY_HOST", "DEPLOY_USER"]) {
     if (!value(name).trim()) add(name, "is required");
+  }
+  // Keep this lexical contract in sync with the remote script's entry guard.
+  const deployPath = value("DEPLOY_PATH");
+  if (!/^\/[A-Za-z0-9_.-]+(?:\/[A-Za-z0-9_.-]+)*$/.test(deployPath)
+      || deployPath.split("/").some((segment) => segment === "." || segment === "..")) {
+    add("DEPLOY_PATH", "must be a non-root canonical absolute path using only letters, digits, dot, underscore and hyphen in each segment (no trailing slash or dot segments)");
   }
   if (!value("DEPLOY_PASSWORD") && !value("DEPLOY_KEY")) {
     add("DEPLOY_PASSWORD|DEPLOY_KEY", "one SSH credential is required");

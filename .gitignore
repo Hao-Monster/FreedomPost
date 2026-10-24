@@ -1,4 +1,5 @@
 node_modules/
+.gomodcache/
 dist/
 .astro/
 .vite/

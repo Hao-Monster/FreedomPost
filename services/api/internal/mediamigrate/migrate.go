@@ -137,7 +137,7 @@ func Audit(ctx context.Context, db *pgxpool.Pool) (*Plan, error) {
 			}
 			// Report local unmanaged object links without enumerating storage. Other
 			// external URLs may be normal links; operators review those in the report.
-			if strings.HasPrefix(raw, "/api/uploads/") {
+			if strings.HasPrefix(mediarefs.LegacyIdentity(raw), "/api/uploads/") {
 				plan.UnresolvedURLs = appendUnique(plan.UnresolvedURLs, raw)
 			}
 		}
@@ -236,12 +236,12 @@ func commitCopy(ctx context.Context, db *pgxpool.Pool, item Item, copy *storage.
 	if err != nil {
 		return err
 	}
-	var key, mode, publicURL string
-	err = tx.QueryRow(ctx, `SELECT storage_key,delivery_mode,public_url FROM attachments WHERE id=$1 FOR UPDATE`, item.ID).Scan(&key, &mode, &publicURL)
+	var key, mode, publicURL, state string
+	err = tx.QueryRow(ctx, `SELECT storage_key,delivery_mode,public_url,upload_state FROM attachments WHERE id=$1 FOR UPDATE`, item.ID).Scan(&key, &mode, &publicURL, &state)
 	if err != nil {
 		return err
 	}
-	if mode != "legacy_public" || key != item.Key || publicURL != item.URL {
+	if mode != "legacy_public" || key != item.Key || publicURL != item.URL || state != "ready" {
 		return fmt.Errorf("attachment changed since audit: %s", item.ID)
 	}
 	publicUse, err := catalogUses(ctx, tx, item.URL)
@@ -251,25 +251,44 @@ func commitCopy(ctx context.Context, db *pgxpool.Pool, item Item, copy *storage.
 	if publicUse {
 		return fmt.Errorf("public product/tool reference appeared during migration")
 	}
+	if _, err := tx.Exec(ctx, `DELETE FROM attachment_post_refs WHERE attachment_id=$1`, item.ID); err != nil {
+		return err
+	}
 	refs := []string{}
 	for _, post := range posts {
 		markdown := post.markdown
+		htmlContent := post.html
+		matched := false
 		for _, raw := range mediarefs.URLs(post.html) {
 			if mediarefs.LegacyIdentity(raw) == mediarefs.LegacyIdentity(item.URL) {
-				markdown = mediarefs.RewriteMarkdown(markdown, raw, domain.ManagedMediaURL(post.id, item.ID))
+				matched = true
+				target := domain.ManagedMediaURL(post.id, item.ID)
+				markdown = mediarefs.RewriteMarkdown(markdown, raw, target)
+				htmlContent = mediarefs.RewriteHTML(htmlContent, raw, target)
 			}
 		}
-		if markdown == post.markdown {
-			for _, raw := range mediarefs.URLs(post.html) {
-				if mediarefs.LegacyIdentity(raw) == mediarefs.LegacyIdentity(item.URL) {
-					return fmt.Errorf("HTML-only media reference requires manual migration: %s", post.id)
-				}
-			}
+		if !matched {
 			continue
 		}
+		var searchText, excerpt string
+		if strings.TrimSpace(post.markdown) != "" {
+			if markdown == post.markdown {
+				return fmt.Errorf("HTML-only media reference requires manual migration: %s", post.id)
+			}
+			rendered := renderer.Render(markdown)
+			htmlContent = rendered.HTML
+			searchText = rendered.SearchText
+			excerpt = rendered.Excerpt
+		} else {
+			if htmlContent == post.html {
+				return fmt.Errorf("HTML-only media reference requires manual migration: %s", post.id)
+			}
+			rendered := renderer.Render(htmlContent)
+			searchText = rendered.SearchText
+			excerpt = rendered.Excerpt
+		}
 		refs = append(refs, post.id)
-		rendered := renderer.Render(markdown)
-		if _, err := tx.Exec(ctx, `UPDATE posts SET content_markdown=$2,content_html=$3,search_text=$4,excerpt=$5,updated_at=NOW() WHERE id=$1`, post.id, markdown, rendered.HTML, rendered.SearchText, rendered.Excerpt); err != nil {
+		if _, err := tx.Exec(ctx, `UPDATE posts SET content_markdown=$2,content_html=$3,search_text=$4,excerpt=$5,updated_at=NOW() WHERE id=$1`, post.id, markdown, htmlContent, searchText, excerpt); err != nil {
 			return err
 		}
 		if _, err := tx.Exec(ctx, `INSERT INTO attachment_post_refs(attachment_id,post_id) VALUES($1,$2) ON CONFLICT DO NOTHING`, item.ID, post.id); err != nil {
@@ -277,12 +296,14 @@ func commitCopy(ctx context.Context, db *pgxpool.Pool, item Item, copy *storage.
 		}
 	}
 	var contextID string
+	ownerType := item.OwnerType
 	ownerID := item.OwnerID
 	if item.OwnerType == "comment" && item.OwnerID != nil {
 		if err := tx.QueryRow(ctx, `SELECT post_id FROM comments WHERE id=$1`, *item.OwnerID).Scan(&contextID); err != nil {
 			return err
 		}
 	} else if len(refs) > 0 {
+		ownerType = "post"
 		contextID = refs[0]
 		ownerID = &contextID
 	} else {
@@ -291,7 +312,7 @@ func commitCopy(ctx context.Context, db *pgxpool.Pool, item Item, copy *storage.
 	if _, err := tx.Exec(ctx, `INSERT INTO managed_media_legacy_sources(attachment_id,storage_provider,storage_key,public_url,sha256) VALUES($1,$2,$3,$4,$5)`, item.ID, item.Provider, item.Key, item.URL, copy.SHA256); err != nil {
 		return err
 	}
-	if _, err := tx.Exec(ctx, `UPDATE attachments SET delivery_mode='managed',storage_provider=$2,storage_key=$3,stored_filename=$4,public_url='',sha256=$5,mime_type=$6,detected_mime_type=$6,owner_id=$7,context_post_id=$8,pending_until=NULL,claim_token_hash=NULL WHERE id=$1`, item.ID, copy.StorageProvider, copy.StorageKey, copy.StoredFilename, copy.SHA256, copy.MimeType, ownerID, contextID); err != nil {
+	if _, err := tx.Exec(ctx, `UPDATE attachments SET delivery_mode='managed',storage_provider=$2,storage_key=$3,stored_filename=$4,public_url='',sha256=$5,mime_type=$6,detected_mime_type=$6,owner_id=$7,context_post_id=$8,owner_type=$9,pending_until=NULL,claim_token_hash=NULL WHERE id=$1`, item.ID, copy.StorageProvider, copy.StorageKey, copy.StoredFilename, copy.SHA256, copy.MimeType, ownerID, contextID, ownerType); err != nil {
 		return err
 	}
 	return tx.Commit(ctx)
@@ -300,8 +321,9 @@ func commitCopy(ctx context.Context, db *pgxpool.Pool, item Item, copy *storage.
 // Retire is destructive and is never called by Copy or Audit. The command must
 // require an explicit flag and prior backup/rollback approval from the operator.
 func Retire(ctx context.Context, db *pgxpool.Pool, source, private map[string]storage.ManagedAdapter) error {
-	rows, err := db.Query(ctx, `SELECT old.attachment_id,old.storage_provider,old.storage_key,old.public_url,old.sha256,a.storage_provider,a.storage_key,a.delivery_mode
-	 FROM managed_media_legacy_sources old JOIN attachments a ON a.id=old.attachment_id WHERE old.retired_at IS NULL ORDER BY old.attachment_id`)
+	rows, err := db.Query(ctx, `SELECT old.attachment_id,old.storage_provider,old.storage_key,old.public_url,old.sha256,
+	 COALESCE(a.storage_provider,''),COALESCE(a.storage_key,''),COALESCE(a.delivery_mode,'')
+	 FROM managed_media_legacy_sources old LEFT JOIN attachments a ON a.id=old.attachment_id WHERE old.retired_at IS NULL ORDER BY old.attachment_id`)
 	if err != nil {
 		return err
 	}

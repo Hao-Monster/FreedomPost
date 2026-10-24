@@ -75,6 +75,7 @@ type ArticleCacheItem = {
 
 type StoredCommentAttachment = {
   id?: string;
+  claimToken?: string;
   name: string;
   type?: string;
   mimeType?: string;
@@ -817,23 +818,35 @@ function handlePendingFileClick(event: MouseEvent) {
   updateCommentSubmitState();
 }
 
+const MAX_COMMENT_ATTACHMENTS = 5;
+const MAX_COMMENT_ATTACHMENT_BYTES = 25 * 1024 * 1024;
+const MAX_COMMENT_TOTAL_BYTES = 100 * 1024 * 1024;
+const uploadedCommentAttachments = new WeakMap<File, Map<string, StoredCommentAttachment>>();
+
 function addPendingCommentFiles(files: File[]) {
   const usableFiles = files.filter((file) => file.size > 0);
   if (usableFiles.length === 0) return;
 
-  const availableSlots = Math.max(0, 10 - pendingCommentFiles.length);
+  const oversized = usableFiles.find((file) => file.size > MAX_COMMENT_ATTACHMENT_BYTES);
+  if (oversized) {
+    showToast("单个评论附件不能超过 25MB");
+  }
+  const sizeValidFiles = usableFiles.filter((file) => file.size <= MAX_COMMENT_ATTACHMENT_BYTES);
+  if (sizeValidFiles.length === 0) return;
+
+  const availableSlots = Math.max(0, MAX_COMMENT_ATTACHMENTS - pendingCommentFiles.length);
   if (availableSlots === 0) {
-    showToast("单次评论最多添加 10 个文件");
+    showToast("单次评论最多添加 5 个文件");
     return;
   }
 
-  const acceptedFiles = usableFiles.slice(0, availableSlots);
+  const acceptedFiles = sizeValidFiles.slice(0, availableSlots);
   pendingCommentFiles = [...pendingCommentFiles, ...acceptedFiles];
   renderPendingCommentFiles();
   updateCommentSubmitState();
 
-  if (usableFiles.length > acceptedFiles.length) {
-    showToast("单次评论最多添加 10 个文件");
+  if (sizeValidFiles.length > acceptedFiles.length) {
+    showToast("单次评论最多添加 5 个文件");
   }
 }
 
@@ -890,9 +903,17 @@ async function submitComment(event: SubmitEvent) {
     return;
   }
 
+  if (files.length > MAX_COMMENT_ATTACHMENTS) {
+    showToast("单次评论最多添加 5 个文件");
+    return;
+  }
+  if (files.some((file) => file.size > MAX_COMMENT_ATTACHMENT_BYTES)) {
+    showToast("单个评论附件不能超过 25MB");
+    return;
+  }
   const totalBytes = files.reduce((sum, file) => sum + file.size, 0);
-  if (totalBytes > 500 * 1024 * 1024) {
-    showToast("附件总量不能超过 500MB");
+  if (totalBytes > MAX_COMMENT_TOTAL_BYTES) {
+    showToast("评论附件总量不能超过 100MB");
     return;
   }
 
@@ -904,7 +925,10 @@ async function submitComment(event: SubmitEvent) {
   try {
     const attachments: StoredCommentAttachment[] = [];
     for (const file of files) attachments.push(await uploadCommentAttachment(file, targetSlug));
-    const comment = await createRemoteComment(content, attachments, targetSlug, targetReplyParentId);
+    const comment = await createRemoteComment(content, attachments, targetSlug, targetReplyParentId, files);
+    for (const file of files) {
+      uploadedCommentAttachments.get(file)?.delete(targetSlug);
+    }
     recordCommentSubmission(targetSlug);
     commentCache.set(targetSlug, [...getComments(targetSlug), comment]);
 
@@ -927,6 +951,12 @@ async function submitComment(event: SubmitEvent) {
 }
 
 async function uploadCommentAttachment(file: File, slug = activeSlug): Promise<StoredCommentAttachment> {
+  const existingBySlug = uploadedCommentAttachments.get(file);
+  const cached = existingBySlug?.get(slug);
+  if (cached && cached.claimToken) {
+    return cached;
+  }
+
   const token = await requestChallenge("comment_upload");
   const formData = new FormData();
   formData.set("file", file);
@@ -942,14 +972,22 @@ async function uploadCommentAttachment(file: File, slug = activeSlug): Promise<S
   }
 
   const payload = (await response.json()) as { file: StoredCommentAttachment };
-  return normalizeAttachment(payload.file);
+  const normalized = normalizeAttachment(payload.file);
+  let bySlug = uploadedCommentAttachments.get(file);
+  if (!bySlug) {
+    bySlug = new Map<string, StoredCommentAttachment>();
+    uploadedCommentAttachments.set(file, bySlug);
+  }
+  bySlug.set(slug, normalized);
+  return normalized;
 }
 
 async function createRemoteComment(
   content: string,
   attachments: StoredCommentAttachment[],
   slug = activeSlug,
-  parentId = replyParentId
+  parentId = replyParentId,
+  sourceFiles: File[] = []
 ): Promise<StoredComment> {
   const response = await fetch(`/api/posts/${encodeURIComponent(slug)}/comments`, {
     method: "POST",
@@ -965,6 +1003,18 @@ async function createRemoteComment(
   });
 
   if (!response.ok) {
+    let errorCode = "";
+    try {
+      const errBody = (await response.json()) as { error?: { code?: string }; code?: string };
+      errorCode = errBody?.error?.code ?? errBody?.code ?? "";
+    } catch {
+      // Ignore non-JSON error payloads
+    }
+    if (errorCode === "INVALID_ATTACHMENT") {
+      for (const file of sourceFiles) {
+        uploadedCommentAttachments.get(file)?.delete(slug);
+      }
+    }
     throw new Error("Failed to create comment");
   }
 

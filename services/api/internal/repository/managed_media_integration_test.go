@@ -358,3 +358,221 @@ func TestMigrationCommitFailureRetainsVerifiedPrivateCopy(t *testing.T) {
 		t.Fatal("commit failure deleted original")
 	}
 }
+
+func TestDeletePostReassignsSharedMediaAndSchedulesGraceCleanup(t *testing.T) {
+	repo := managedMediaFixture(t)
+	ctx := context.Background()
+	a := mediaPost(t, repo, domain.VisibilityPublic)
+	b := mediaPost(t, repo, domain.VisibilityPublic)
+	c := mediaPost(t, repo, domain.VisibilityPublic)
+
+	shared, err := repo.CreateAttachment(ctx, domain.Attachment{
+		OwnerType: "post", OwnerID: &a.ID, ContextPostID: &a.ID,
+		OriginalFilename: "shared.txt", StoredFilename: uuid.NewString() + ".txt",
+		StorageProvider: "local", StorageKey: "shared", MimeType: "text/plain",
+		SizeBytes: 6, DeliveryMode: "managed", UploadState: "ready",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	onlyA, err := repo.CreateAttachment(ctx, domain.Attachment{
+		OwnerType: "post", OwnerID: &a.ID, ContextPostID: &a.ID,
+		OriginalFilename: "only-a.txt", StoredFilename: uuid.NewString() + ".txt",
+		StorageProvider: "local", StorageKey: "only-a", MimeType: "text/plain",
+		SizeBytes: 6, DeliveryMode: "managed", UploadState: "ready",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	unrelated, err := repo.CreateAttachment(ctx, domain.Attachment{
+		OwnerType: "post", OwnerID: &c.ID, ContextPostID: &c.ID,
+		OriginalFilename: "unrelated.txt", StoredFilename: uuid.NewString() + ".txt",
+		StorageProvider: "local", StorageKey: "unrelated", MimeType: "text/plain",
+		SizeBytes: 9, DeliveryMode: "managed", UploadState: "ready",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := mediaSave(repo, a, "[附件: S]("+domain.ManagedMediaURL(a.ID, shared.ID)+")\n\n[附件: A]("+domain.ManagedMediaURL(a.ID, onlyA.ID)+")"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := mediaSave(repo, b, "[附件: S]("+domain.ManagedMediaURL(a.ID, shared.ID)+")"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := mediaSave(repo, c, "[附件: U]("+domain.ManagedMediaURL(c.ID, unrelated.ID)+")"); err != nil {
+		t.Fatal(err)
+	}
+
+	deleted, err := repo.DeletePost(ctx, a.ID)
+	if err != nil || !deleted {
+		t.Fatalf("DeletePost(a) = %v, %v", deleted, err)
+	}
+
+	sharedAfterA, err := repo.GetManagedAttachment(ctx, shared.ID)
+	if err != nil || sharedAfterA == nil || sharedAfterA.OwnerID == nil || *sharedAfterA.OwnerID != b.ID || sharedAfterA.PendingUntil != nil {
+		t.Fatalf("shared attachment was not reassigned to post B: %+v %v", sharedAfterA, err)
+	}
+	onlyAAfterA, err := repo.GetManagedAttachment(ctx, onlyA.ID)
+	if err != nil || onlyAAfterA == nil || onlyAAfterA.OwnerID != nil || onlyAAfterA.PendingUntil == nil || !onlyAAfterA.PendingUntil.After(time.Now().Add(23*time.Hour)) {
+		t.Fatalf("unreferenced attachment did not receive 24h grace window: %+v %v", onlyAAfterA, err)
+	}
+	unrelatedAfterA, err := repo.GetManagedAttachment(ctx, unrelated.ID)
+	if err != nil || unrelatedAfterA == nil || unrelatedAfterA.OwnerID == nil || *unrelatedAfterA.OwnerID != c.ID || unrelatedAfterA.PendingUntil != nil {
+		t.Fatalf("unrelated post attachment was modified: %+v %v", unrelatedAfterA, err)
+	}
+}
+
+func TestCreatePostClaimsStagedMedia(t *testing.T) {
+	repo := managedMediaFixture(t)
+	ctx := context.Background()
+	future := time.Now().Add(time.Hour)
+	token := "qa-create-post-claim"
+	staged, err := repo.CreateAttachment(ctx, domain.Attachment{
+		OwnerType: "post", OriginalFilename: "staged.txt", StoredFilename: uuid.NewString() + ".txt",
+		StorageProvider: "local", StorageKey: "staged", MimeType: "text/plain", DetectedMime: "text/plain",
+		SizeBytes: 6, DeliveryMode: "managed", UploadState: "ready", PendingUntil: &future,
+		ClaimTokenHash: security.HashToken(token),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tempPostID := "00000000-0000-4000-8000-000000000099"
+	markdown := "[附件: Staged](" + domain.ManagedMediaURL(tempPostID, staged.ID) + ")"
+	rendered := renderer.Render(markdown)
+	created, err := repo.CreatePost(ctx, domain.CreatePostInput{
+		Title: "Create with claim", Visibility: domain.VisibilityPrivate, Currency: "CNY",
+		ContentMarkdown: markdown, ContentHTML: rendered.HTML, SearchText: rendered.SearchText, Excerpt: rendered.Excerpt,
+		ImportedImages: []domain.PendingPostImage{{ID: staged.ID, ClaimToken: token}},
+	})
+	if err != nil {
+		t.Fatalf("CreatePost with staged media failed: %v", err)
+	}
+	if !strings.Contains(created.ContentMarkdown, domain.ManagedMediaURL(created.ID, staged.ID)) {
+		t.Fatalf("CreatePost did not rewrite staged media URL to new post ID: %s", created.ContentMarkdown)
+	}
+	ref, err := repo.HasPostAttachmentReference(ctx, created.ID, staged.ID)
+	if err != nil || !ref {
+		t.Fatalf("CreatePost did not record attachment_post_refs: %v %v", ref, err)
+	}
+}
+
+func TestLegacyMigrationSupportsHTMLOnlyPost(t *testing.T) {
+	repo := managedMediaFixture(t)
+	ctx := context.Background()
+	source, _ := storage.NewLocalAdapter(t.TempDir(), "/api/uploads")
+	target, _ := storage.NewLocalAdapter(t.TempDir(), "")
+	object, err := source.Put(ctx, storage.PutInput{Data: []byte("HTML only post bytes"), OriginalName: "legacy.png"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	att, err := repo.CreateAttachment(ctx, domain.Attachment{
+		OwnerType: "post", OriginalFilename: "legacy.png", StoredFilename: object.StoredFilename,
+		StorageProvider: "local", StorageKey: object.StorageKey, PublicURL: object.PublicURL,
+		MimeType: object.MimeType, DetectedMime: object.MimeType, SizeBytes: object.SizeBytes, SHA256: object.SHA256,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	post := mediaPost(t, repo, domain.VisibilityPublic)
+	if _, err := repo.pool.Exec(ctx, `UPDATE posts SET content_markdown='', content_html=$2 WHERE id=$1`, post.ID, `<p><img src="`+object.PublicURL+`" alt="legacy"></p>`); err != nil {
+		t.Fatal(err)
+	}
+	if err := mediamigrate.Copy(ctx, repo.pool, map[string]storage.ManagedAdapter{"local": source}, target); err != nil {
+		t.Fatalf("mediamigrate.Copy failed on HTML-only legacy post: %v", err)
+	}
+	updated, err := repo.GetPostByID(ctx, post.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(updated.ContentHTML, domain.ManagedMediaURL(post.ID, att.ID)) {
+		t.Fatalf("HTML-only post was not rewritten to managed media URL: %s", updated.ContentHTML)
+	}
+}
+
+func TestMigrationRemovesStaleOwnerReferenceWhenAttachmentMovedToPrivatePost(t *testing.T) {
+	repo := managedMediaFixture(t)
+	ctx := context.Background()
+	source, _ := storage.NewLocalAdapter(t.TempDir(), "/api/uploads")
+	target, _ := storage.NewLocalAdapter(t.TempDir(), "")
+	object, err := source.Put(ctx, storage.PutInput{Data: []byte("moved to private B"), OriginalName: "moved.txt"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	publicA := mediaPost(t, repo, domain.VisibilityPublic)
+	privateB := mediaPost(t, repo, domain.VisibilityPrivate)
+	att, err := repo.CreateAttachment(ctx, domain.Attachment{
+		OwnerType: "post", OwnerID: &publicA.ID, ContextPostID: &publicA.ID,
+		OriginalFilename: "moved.txt", StoredFilename: object.StoredFilename,
+		StorageProvider: "local", StorageKey: object.StorageKey, PublicURL: object.PublicURL,
+		MimeType: object.MimeType, DetectedMime: object.MimeType, SizeBytes: object.SizeBytes, SHA256: object.SHA256,
+		DeliveryMode: "legacy_public", UploadState: "ready",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := repo.pool.Exec(ctx, `UPDATE posts SET content_markdown='No attachment anymore', content_html='<p>No attachment anymore</p>' WHERE id=$1`, publicA.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := repo.pool.Exec(ctx, `UPDATE posts SET content_markdown=$2, content_html=$3 WHERE id=$1`, privateB.ID, "[附件: Moved]("+object.PublicURL+")", `<p><a href="`+object.PublicURL+`">Moved</a></p>`); err != nil {
+		t.Fatal(err)
+	}
+	// Simulate a stale owner_id backfill row from before the article removed the attachment.
+	if _, err := repo.pool.Exec(ctx, `INSERT INTO attachment_post_refs (attachment_id, post_id) VALUES ($1, $2) ON CONFLICT DO NOTHING`, att.ID, publicA.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := mediamigrate.Copy(ctx, repo.pool, map[string]storage.ManagedAdapter{"local": source}, target); err != nil {
+		t.Fatal(err)
+	}
+	hasA, err := repo.HasPostAttachmentReference(ctx, publicA.ID, att.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hasB, err := repo.HasPostAttachmentReference(ctx, privateB.ID, att.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if hasA || !hasB {
+		t.Fatalf("expected stale public ref removed and private ref kept: hasA=%v hasB=%v", hasA, hasB)
+	}
+}
+
+func TestLegacyBrowserBackslashAliasProtectedAndAudited(t *testing.T) {
+	repo := managedMediaFixture(t)
+	ctx := context.Background()
+	source, err := storage.NewLocalAdapter(t.TempDir(), "https://reader.example/api/uploads")
+	if err != nil {
+		t.Fatal(err)
+	}
+	object, err := source.Put(ctx, storage.PutInput{Data: []byte("legacy public secret"), OriginalName: "secret.txt"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	post := mediaPost(t, repo, domain.VisibilityPublic)
+	if _, err := repo.CreateAttachment(ctx, domain.Attachment{
+		OwnerType: "post", OwnerID: &post.ID, UploaderType: "admin", OriginalFilename: "secret.txt",
+		StoredFilename: object.StoredFilename, StorageProvider: "local", StorageKey: object.StorageKey,
+		PublicURL: object.PublicURL, MimeType: object.MimeType, DetectedMime: object.MimeType,
+		SizeBytes: object.SizeBytes, SHA256: object.SHA256, DeliveryMode: "legacy_public", UploadState: "ready",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	browserAlias := strings.ReplaceAll(object.PublicURL, "/", `\`)
+	saved, err := mediaSave(repo, post, `<a href="`+browserAlias+`">Download attachment</a>`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	saved.Visibility = domain.VisibilityPrivate
+	if _, err := mediaSave(repo, saved, saved.ContentMarkdown); !errors.Is(err, domain.ErrMediaMigrationRequired) {
+		t.Fatalf("expected private save of browser backslash alias to fail with ErrMediaMigrationRequired, got %v", err)
+	}
+
+	plan, err := mediamigrate.Audit(ctx, repo.pool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plan.Items) != 1 {
+		t.Fatalf("expected Audit to find 1 item for browser backslash alias, got %+v", plan)
+	}
+}

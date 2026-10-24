@@ -41,7 +41,7 @@ func (s *Server) unmanagedArticleImageHosts(renderedHTML string) []string {
 			if !strings.EqualFold(attribute.Key, "src") || isAllowedAttachmentURL(attribute.Val, s.cfg.PublicUploadBaseURL, ossBaseURL, s.cfg.R2PublicBaseURL) {
 				continue
 			}
-			parsed, err := url.Parse(attribute.Val)
+			parsed, err := mediarefs.ParseURL(attribute.Val)
 			if err == nil && parsed.Hostname() != "" {
 				hosts[strings.ToLower(parsed.Hostname())] = struct{}{}
 			} else {
@@ -64,38 +64,49 @@ func (s *Server) hasPublicArticleMedia(r *http.Request, rendered string) bool {
 	if s.cfg.AliyunOSSBucket != "" && s.cfg.AliyunOSSRegion != "" {
 		bases = append(bases, "https://"+s.cfg.AliyunOSSBucket+".oss-"+s.cfg.AliyunOSSRegion+".aliyuncs.com")
 	}
-	site, _ := url.Parse(s.cfg.PublicSiteURL)
-	requestOrigin, _ := url.Parse("http://" + r.Host)
+	site, _ := mediarefs.ParseURL(s.cfg.PublicSiteURL)
+	requestOrigin, _ := mediarefs.ParseURL("http://" + r.Host)
 	for _, raw := range mediarefs.URLs(rendered) {
 		if _, _, ok := mediarefs.Parse(raw); ok {
 			continue
 		}
-		candidate, err := url.Parse(raw)
-		if err != nil || raw == "" {
+		if strings.TrimSpace(raw) == "" {
 			continue
 		}
-		ownHost := candidate.Host == "" || requestOrigin != nil && strings.EqualFold(candidate.Hostname(), requestOrigin.Hostname()) || site != nil && strings.EqualFold(candidate.Hostname(), site.Hostname())
-		candidatePath := path.Clean(candidate.Path)
-		if ownHost && strings.HasPrefix(candidatePath, "/api/uploads/") {
+		candidate, err := mediarefs.ParseURL(raw)
+		if err != nil {
 			return true
 		}
-		for _, base := range bases {
-			if base == "" {
-				continue
+		candidates := []*url.URL{candidate}
+		if candidate.Host == "" && (candidate.Scheme == "http" || candidate.Scheme == "https") && strings.HasPrefix(candidate.Path, "/") {
+			if alt, altErr := url.Parse(candidate.Scheme + "://" + strings.TrimLeft(candidate.Path, "/")); altErr == nil {
+				candidates = append(candidates, alt)
 			}
-			configured, err := url.Parse(base)
-			if err != nil {
-				continue
-			}
-			basePath := strings.TrimRight(path.Clean("/"+configured.Path), "/")
-			if configured.Host != "" && !strings.EqualFold(candidate.Hostname(), configured.Hostname()) {
-				continue
-			}
-			if configured.Host == "" && !ownHost {
-				continue
-			}
-			if candidatePath == basePath || strings.HasPrefix(candidatePath, basePath+"/") {
+		}
+		for _, candidate := range candidates {
+			ownHost := candidate.Host == "" || requestOrigin != nil && strings.EqualFold(candidate.Hostname(), requestOrigin.Hostname()) || site != nil && strings.EqualFold(candidate.Hostname(), site.Hostname())
+			candidatePath := path.Clean(candidate.Path)
+			if ownHost && strings.HasPrefix(candidatePath, "/api/uploads/") {
 				return true
+			}
+			for _, base := range bases {
+				if base == "" {
+					continue
+				}
+				configured, err := mediarefs.ParseURL(base)
+				if err != nil {
+					continue
+				}
+				basePath := strings.TrimRight(path.Clean("/"+configured.Path), "/")
+				if configured.Host != "" && !strings.EqualFold(candidate.Hostname(), configured.Hostname()) {
+					continue
+				}
+				if configured.Host == "" && !ownHost {
+					continue
+				}
+				if candidatePath == basePath || strings.HasPrefix(candidatePath, basePath+"/") {
+					return true
+				}
 			}
 		}
 	}
@@ -103,10 +114,10 @@ func (s *Server) hasPublicArticleMedia(r *http.Request, rendered string) bool {
 }
 
 func (s *Server) normalizeManagedArticleReferences(r *http.Request, markdown, rendered string) string {
-	site, _ := url.Parse(s.cfg.PublicSiteURL)
-	requestOrigin, _ := url.Parse("http://" + r.Host)
+	site, _ := mediarefs.ParseURL(s.cfg.PublicSiteURL)
+	requestOrigin, _ := mediarefs.ParseURL("http://" + r.Host)
 	for _, raw := range mediarefs.URLs(rendered) {
-		candidate, err := url.Parse(raw)
+		candidate, err := mediarefs.ParseURL(raw)
 		if err != nil || candidate.Host == "" || (candidate.Scheme != "" && candidate.Scheme != "http" && candidate.Scheme != "https") {
 			continue
 		}

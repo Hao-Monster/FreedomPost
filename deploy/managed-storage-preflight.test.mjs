@@ -162,7 +162,7 @@ test('existing configuration parsing accepts literal quotes and refuses ambiguou
 test('managed configuration gate precedes mutation and all inputs reach runner and SSH preflight', () => {
   const gate = remote.indexOf('\nverify_managed_storage_configuration\n');
   assert.ok(gate > 0);
-  for (const mutation of ['mkdir -p "$ROLLBACK_DIR"', 'tar -xzf /tmp/', '\nset_env "ADMIN_PASSWORD_HASH"', 'up -d postgres']) {
+  for (const mutation of ['\nprepare_rollback_directory\n', 'tar -xzf /tmp/', '\nset_env "ADMIN_PASSWORD_HASH"', 'up -d postgres']) {
     assert.ok(remote.indexOf(mutation) > gate, mutation);
   }
   const workflow = readFileSync(new URL('../.github/workflows/deploy.yml', import.meta.url), 'utf8');

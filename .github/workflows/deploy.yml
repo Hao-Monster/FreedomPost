@@ -134,7 +134,9 @@ jobs:
           mkdir -p services/paid-access/bin
           (cd services/paid-access && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o bin/paid-access ./cmd/server)
           mkdir -p services/api/bin
-          (cd services/api && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w -X main.version=${{ github.sha }}" -o bin/fp-api ./cmd/server)
+          (cd services/api && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w -X main.version=${{ inputs.release_sha }}" -o bin/fp-api ./cmd/server)
+          (cd services/api && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w -X main.version=${{ inputs.release_sha }}" -o bin/media-migrate ./cmd/media-migrate)
+          test "$(services/api/bin/media-migrate -version)" = "${{ inputs.release_sha }}"
 
       - name: Prepare deploy bundle
         run: |
@@ -165,6 +167,8 @@ jobs:
             --exclude "package-lock.json" \
             --exclude "tsconfig*.json" \
             ./ /tmp/freedompost-deploy/
+          test -s /tmp/freedompost-deploy/services/api/bin/media-migrate
+          test -s /tmp/freedompost-deploy/services/api/bin/fp-api
           tar -czf freedompost-deploy.tar.gz -C /tmp/freedompost-deploy .
           # Log bundle size for monitoring
           du -sh freedompost-deploy.tar.gz

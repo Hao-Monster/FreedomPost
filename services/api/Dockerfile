@@ -11,6 +11,7 @@ RUN apk add --no-cache ca-certificates tzdata \
 
 # Copy prebuilt binary
 COPY services/api/bin/fp-api /fp-api
+COPY services/api/bin/media-migrate /media-migrate
 
 # Copy SQL migration files (used by -migrate flag)
 COPY deploy/migrations/ /migrations/

@@ -87,6 +87,65 @@ func (p *Postgres) AbortAttachmentUpload(ctx context.Context, id string) error {
 	return err
 }
 
+const legacyAttachmentReferencedGuardSQL = `NOT (
+	attachments.delivery_mode = 'legacy_public' AND (
+		EXISTS (
+			SELECT 1 FROM (
+				SELECT COALESCE((
+					SELECT lower(translate(string_agg(
+						CASE
+							WHEN m.tok[1] ~ '^%[0-9a-fA-F]{2}$' AND ('x' || substr(m.tok[1], 2))::bit(8)::int BETWEEN 1 AND 127
+								THEN chr(('x' || substr(m.tok[1], 2))::bit(8)::int)
+							ELSE m.tok[1]
+						END,
+						'' ORDER BY m.ord
+					), E'\\', '/'))
+					FROM regexp_matches(p.content_html || E'\n' || p.content_markdown, '%[0-9a-fA-F]{2}|[^%]+|%', 'g') WITH ORDINALITY AS m(tok, ord)
+				), '') AS normalized_body
+				FROM posts p
+			) p
+			WHERE (attachments.stored_filename <> '' AND strpos(p.normalized_body, lower(attachments.stored_filename)) > 0)
+			   OR (attachments.public_url <> '' AND strpos(p.normalized_body, lower(translate(attachments.public_url, E'\\', '/'))) > 0)
+		)
+		OR EXISTS (
+			SELECT 1 FROM (
+				SELECT COALESCE((
+					SELECT lower(translate(string_agg(
+						CASE
+							WHEN m.tok[1] ~ '^%[0-9a-fA-F]{2}$' AND ('x' || substr(m.tok[1], 2))::bit(8)::int BETWEEN 1 AND 127
+								THEN chr(('x' || substr(m.tok[1], 2))::bit(8)::int)
+							ELSE m.tok[1]
+						END,
+						'' ORDER BY m.ord
+					), E'\\', '/'))
+					FROM regexp_matches(to_jsonb(p)::text, '%[0-9a-fA-F]{2}|[^%]+|%', 'g') WITH ORDINALITY AS m(tok, ord)
+				), '') AS normalized_body
+				FROM products p
+			) p
+			WHERE (attachments.stored_filename <> '' AND strpos(p.normalized_body, lower(attachments.stored_filename)) > 0)
+			   OR (attachments.public_url <> '' AND strpos(p.normalized_body, lower(translate(attachments.public_url, E'\\', '/'))) > 0)
+		)
+		OR EXISTS (
+			SELECT 1 FROM (
+				SELECT COALESCE((
+					SELECT lower(translate(string_agg(
+						CASE
+							WHEN m.tok[1] ~ '^%[0-9a-fA-F]{2}$' AND ('x' || substr(m.tok[1], 2))::bit(8)::int BETWEEN 1 AND 127
+								THEN chr(('x' || substr(m.tok[1], 2))::bit(8)::int)
+							ELSE m.tok[1]
+						END,
+						'' ORDER BY m.ord
+					), E'\\', '/'))
+					FROM regexp_matches(to_jsonb(t)::text, '%[0-9a-fA-F]{2}|[^%]+|%', 'g') WITH ORDINALITY AS m(tok, ord)
+				), '') AS normalized_body
+				FROM tools t
+			) t
+			WHERE (attachments.stored_filename <> '' AND strpos(t.normalized_body, lower(attachments.stored_filename)) > 0)
+			   OR (attachments.public_url <> '' AND strpos(t.normalized_body, lower(translate(attachments.public_url, E'\\', '/'))) > 0)
+		)
+	)
+)`
+
 func (p *Postgres) ClaimExpiredAttachments(ctx context.Context, limit int) ([]domain.Attachment, error) {
 	if limit <= 0 || limit > 200 {
 		limit = 200
@@ -94,6 +153,9 @@ func (p *Postgres) ClaimExpiredAttachments(ctx context.Context, limit int) ([]do
 	rows, err := p.pool.Query(ctx, `WITH expired AS (
 		SELECT id FROM attachments WHERE owner_id IS NULL AND pending_until<=NOW()
 		  AND NOT EXISTS (SELECT 1 FROM attachment_post_refs r WHERE r.attachment_id=attachments.id)
+		  AND NOT EXISTS (SELECT 1 FROM managed_media_legacy_sources old WHERE old.attachment_id=attachments.id
+		    AND (old.retired_at IS NULL OR old.cache_purged_at IS NULL))
+		  AND `+legacyAttachmentReferencedGuardSQL+`
 		ORDER BY pending_until FOR UPDATE SKIP LOCKED LIMIT $1
 	) UPDATE attachments a SET upload_state='deleting', pending_until=NOW()+INTERVAL '5 minutes'
 	FROM expired WHERE a.id=expired.id
@@ -114,6 +176,10 @@ func (p *Postgres) ClaimExpiredAttachments(ctx context.Context, limit int) ([]do
 }
 
 func (p *Postgres) DeleteClaimedAttachment(ctx context.Context, id string) error {
-	_, err := p.pool.Exec(ctx, `DELETE FROM attachments WHERE id=$1 AND owner_id IS NULL AND upload_state='deleting'`, id)
+	_, err := p.pool.Exec(ctx, `DELETE FROM attachments WHERE id=$1 AND owner_id IS NULL AND upload_state='deleting'
+	 AND NOT EXISTS (SELECT 1 FROM attachment_post_refs r WHERE r.attachment_id=attachments.id)
+	 AND NOT EXISTS (SELECT 1 FROM managed_media_legacy_sources old WHERE old.attachment_id=attachments.id
+	   AND (old.retired_at IS NULL OR old.cache_purged_at IS NULL))
+	 AND `+legacyAttachmentReferencedGuardSQL, id)
 	return err
 }

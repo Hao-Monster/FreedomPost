@@ -75,6 +75,7 @@ type CreatePostInput struct {
 	ContentHTML     string
 	SearchText      string
 	Excerpt         string
+	ImportedImages  []PendingPostImage
 }
 
 type UpdatePostInput struct {

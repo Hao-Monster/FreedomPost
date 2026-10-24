@@ -60,6 +60,10 @@ func TestProtectedArticleRejectsPublicObjectURLAliases(t *testing.T) {
 		"/api/uploads/qa.txt", "/api/uploads/qa.txt?download=1", "/api/uploads/qa.txt#download",
 		"https://READER.example:443/api/uploads//qa.txt", "/api/%75ploads/qa.txt", "/api/uploads/x/../qa.txt",
 		"https://CDN.example:443/uploads/qa.txt?download=1", "https://cdn.example/uploads/%71a.txt", "//cdn.example/uploads/qa.txt",
+		`\api\uploads\qa.txt`, `https:\\reader.example\api\uploads\qa.txt`, `https:/\reader.example/api/uploads/qa.txt`,
+		`https:\\cdn.example\uploads\qa.txt`, " /api/uploads/qa.txt ", "\t/api/uploads/qa.txt", "/api/uploads/qa.txt\n",
+		"http://reader.example/api/uploads/qa.txt", "http:/reader.example/api/uploads/qa.txt", `http:\reader.example\api\uploads\qa.txt`,
+		"https:/api/uploads/qa.txt", `https:\api\uploads\qa.txt`, "http:/api/uploads/qa.txt", `http:\api\uploads\qa.txt`,
 	} {
 		if !s.hasPublicArticleMedia(r, `<a href="`+raw+`">file</a>`) {
 			t.Errorf("public alias accepted: %s", raw)
@@ -74,7 +78,10 @@ func TestManagedArticleNormalizesSameOriginAbsoluteDestinations(t *testing.T) {
 	s := &Server{cfg: &config.Config{PublicSiteURL: "https://reader.example"}}
 	r := httptest.NewRequest("PUT", "https://admin.example/api/admin/posts/qa", nil)
 	path := "/api/post-media/00000000-0000-4000-8000-000000000001/00000000-0000-4000-8000-000000000002"
-	for _, raw := range []string{"https://reader.example" + path, "//reader.example" + path, "https://ADMIN.example:443" + path, "https://reader.example" + path + "?download=1"} {
+	for _, raw := range []string{
+		"https://reader.example" + path, "//reader.example" + path, "https://ADMIN.example:443" + path, "https://reader.example" + path + "?download=1",
+		`https:\\reader.example` + path, `https:/\reader.example` + path,
+	} {
 		markdown := "[附件: QA](" + raw + ")"
 		if got := s.normalizeManagedArticleReferences(r, markdown, `<a href="`+raw+`">QA</a>`); got != "[附件: QA]("+path+")" {
 			t.Errorf("not normalized: %s", got)

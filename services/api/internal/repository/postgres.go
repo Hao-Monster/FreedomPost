@@ -202,7 +202,7 @@ func (p *Postgres) CreatePost(ctx context.Context, input domain.CreatePostInput)
 	if err := requireProtectedPostMedia(ctx, tx, id, input.Visibility, input.ContentHTML); err != nil {
 		return nil, err
 	}
-	if err := syncPostMedia(ctx, tx, id, &post.ContentMarkdown, &post.ContentHTML, nil); err != nil {
+	if err := syncPostMedia(ctx, tx, id, &post.ContentMarkdown, &post.ContentHTML, input.ImportedImages); err != nil {
 		return nil, err
 	}
 	if _, err := tx.Exec(ctx, `UPDATE posts SET content_markdown=$2,content_html=$3 WHERE id=$1`, id, post.ContentMarkdown, post.ContentHTML); err != nil {
@@ -277,11 +277,129 @@ func (p *Postgres) UpdatePost(ctx context.Context, input domain.UpdatePostInput)
 }
 
 func (p *Postgres) DeletePost(ctx context.Context, id string) (bool, error) {
-	ct, err := p.pool.Exec(ctx, `DELETE FROM posts WHERE id = $1`, id)
+	tx, err := p.pool.Begin(ctx)
+	if err != nil {
+		return false, fmt.Errorf("begin delete post: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	// Match comment creation's post lock before taking the comment snapshot.
+	// A comment committed before this lock must be included in media cleanup.
+	var lockedPostID string
+	if err := tx.QueryRow(ctx, `SELECT id FROM posts WHERE id=$1 FOR UPDATE`, id).Scan(&lockedPostID); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return false, nil
+		}
+		return false, fmt.Errorf("lock post for delete: %w", err)
+	}
+
+	rows, err := tx.Query(ctx, `SELECT id FROM comments WHERE post_id = $1`, id)
+	if err != nil {
+		return false, fmt.Errorf("list post comments for delete: %w", err)
+	}
+	var commentIDs []string
+	for rows.Next() {
+		var commentID string
+		if err := rows.Scan(&commentID); err != nil {
+			rows.Close()
+			return false, fmt.Errorf("scan post comment for delete: %w", err)
+		}
+		commentIDs = append(commentIDs, commentID)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return false, fmt.Errorf("iterate post comments for delete: %w", err)
+	}
+	rows.Close()
+
+	// A surviving article being deleted concurrently must wait for the same
+	// media before removing its references, even while another post/comment
+	// still owns it. Sort shared locks as in article saves to avoid lock cycles.
+	mediaRows, err := tx.Query(ctx, `SELECT a.id FROM attachments a
+		WHERE (a.owner_type='post' AND a.owner_id=$1::uuid)
+		 OR (a.owner_type='comment' AND a.owner_id=ANY($2::uuid[]))
+		 OR EXISTS(SELECT 1 FROM attachment_post_refs r WHERE r.attachment_id=a.id AND r.post_id=$1::uuid)
+		ORDER BY a.id FOR UPDATE`, id, commentIDs)
+	if err != nil {
+		return false, fmt.Errorf("lock post media for delete: %w", err)
+	}
+	var affectedAttachmentIDs []string
+	for mediaRows.Next() {
+		var attachmentID string
+		if err := mediaRows.Scan(&attachmentID); err != nil {
+			mediaRows.Close()
+			return false, fmt.Errorf("scan post media for delete: %w", err)
+		}
+		affectedAttachmentIDs = append(affectedAttachmentIDs, attachmentID)
+	}
+	if err := mediaRows.Err(); err != nil {
+		mediaRows.Close()
+		return false, fmt.Errorf("iterate post media for delete: %w", err)
+	}
+	mediaRows.Close()
+
+	ct, err := tx.Exec(ctx, `DELETE FROM posts WHERE id = $1`, id)
 	if err != nil {
 		return false, fmt.Errorf("delete post: %w", err)
 	}
-	return ct.RowsAffected() > 0, nil
+	if ct.RowsAffected() == 0 {
+		return false, nil
+	}
+
+	// Surviving body references take ownership after the source post/comment
+	// is deleted. Committed post media is authorized through these references;
+	// its deleted context may stay NULL without locking another post via the FK.
+	if _, err := tx.Exec(ctx, `
+		UPDATE attachments a
+		SET owner_type = 'post', owner_id = (
+			SELECT r.post_id
+			FROM attachment_post_refs r
+			WHERE r.attachment_id = a.id
+			ORDER BY r.post_id
+			LIMIT 1
+		)
+		WHERE a.delivery_mode = 'managed'
+		  AND (
+			(a.owner_type = 'post' AND a.owner_id = $1::uuid)
+			OR (a.owner_type = 'comment' AND a.owner_id = ANY($2::uuid[]))
+		  )
+		  AND EXISTS (
+			SELECT 1
+			FROM attachment_post_refs r
+			WHERE r.attachment_id = a.id
+		  )
+	`, id, commentIDs); err != nil {
+		return false, fmt.Errorf("reassign shared post attachments: %w", err)
+	}
+
+	// Release managed attachments strictly belonging to this deleted post (or its comments)
+	// that have no remaining post references, giving a 24h grace window before cleanup.
+	if _, err := tx.Exec(ctx, `
+		UPDATE attachments a
+		SET owner_id = NULL,
+		    pending_until = COALESCE(a.pending_until, NOW() + INTERVAL '24 hours')
+		WHERE a.delivery_mode = 'managed'
+		  AND (
+			(a.owner_type = 'post' AND a.owner_id = $1::uuid)
+			OR (a.owner_type = 'comment' AND a.owner_id = ANY($2::uuid[]))
+		  )
+		  AND NOT EXISTS (
+			SELECT 1
+			FROM attachment_post_refs r
+			WHERE r.attachment_id = a.id
+		  )
+	`, id, commentIDs); err != nil {
+		return false, fmt.Errorf("release deleted post attachments: %w", err)
+	}
+
+	if err := releaseUnreferencedAttachments(ctx, tx, affectedAttachmentIDs); err != nil {
+		return false, fmt.Errorf("schedule unreferenced post attachments cleanup: %w", err)
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return false, fmt.Errorf("commit delete post: %w", err)
+	}
+	return true, nil
 }
 
 func (p *Postgres) RecordView(ctx context.Context, input domain.RecordViewInput) (*domain.RecordViewResult, error) {
@@ -633,7 +751,9 @@ func (p *Postgres) DeleteAttachmentsByIDs(ctx context.Context, ids []string) err
 		args[i] = id
 	}
 	_, err := p.pool.Exec(ctx,
-		`DELETE FROM attachments WHERE id IN (`+strings.Join(placeholders, ",")+`)`, args...,
+		`DELETE FROM attachments WHERE id IN (`+strings.Join(placeholders, ",")+`)
+		 AND NOT EXISTS (SELECT 1 FROM managed_media_legacy_sources old
+		 WHERE old.attachment_id=attachments.id AND (old.retired_at IS NULL OR old.cache_purged_at IS NULL))`, args...,
 	)
 	return err
 }

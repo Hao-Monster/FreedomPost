@@ -3,6 +3,7 @@
 package mediarefs
 
 import (
+	"errors"
 	"net/url"
 	"path"
 	"strings"
@@ -14,12 +15,91 @@ import (
 	"golang.org/x/net/html"
 )
 
-const Prefix = "/api/post-media/"
+const (
+	Prefix         = "/api/post-media/"
+	ReaderBasePath = "/reader/"
+)
+
+// ParseURL normalizes browser-accepted URL aliases (leading/trailing C0 and
+// space characters, embedded tab/CR/LF, backslashes before query/fragment, and
+// relative paths resolved against the /reader/ base path) so server-side
+// policy, audit, and migration see the same target as browsers.
+func ParseURL(raw string) (*url.URL, error) {
+	s := strings.TrimFunc(raw, func(r rune) bool {
+		return r <= 0x20
+	})
+	if strings.ContainsAny(s, "\t\r\n") {
+		s = strings.Map(func(r rune) rune {
+			if r == '\t' || r == '\r' || r == '\n' {
+				return -1
+			}
+			return r
+		}, s)
+	}
+	boundary := len(s)
+	if q := strings.IndexByte(s, '?'); q >= 0 && q < boundary {
+		boundary = q
+	}
+	if h := strings.IndexByte(s, '#'); h >= 0 && h < boundary {
+		boundary = h
+	}
+	if strings.ContainsRune(s[:boundary], '\\') {
+		s = strings.ReplaceAll(s[:boundary], `\`, "/") + s[boundary:]
+	}
+	lower := strings.ToLower(s)
+	for _, scheme := range []string{"http:", "https:"} {
+		if !strings.HasPrefix(lower, scheme) {
+			continue
+		}
+		rest := s[len(scheme):]
+		lowerRest := lower[len(scheme):]
+		switch {
+		case strings.HasPrefix(rest, "//"):
+			s = scheme + "//" + strings.TrimLeft(rest, "/")
+		case strings.HasPrefix(rest, "/"):
+			if scheme == "http:" &&
+				!strings.HasPrefix(lowerRest, "/api/uploads/") &&
+				!strings.HasPrefix(lowerRest, "/reader/") &&
+				!strings.HasPrefix(rest, "/.") &&
+				!strings.HasPrefix(lowerRest, "/%2e") {
+				s = "http://" + rest[1:]
+			}
+		case rest != "":
+			if scheme == "http:" &&
+				!strings.HasPrefix(rest, ".") &&
+				!strings.HasPrefix(lowerRest, "%2e") &&
+				!strings.HasPrefix(lowerRest, "api/uploads/") &&
+				!strings.HasPrefix(lowerRest, "reader/") {
+				s = "http://" + rest
+			} else {
+				s = scheme + ReaderBasePath + rest
+			}
+		}
+		break
+	}
+	u, err := url.Parse(s)
+	if err != nil {
+		return nil, err
+	}
+	if (u.Scheme == "http" || u.Scheme == "https") && (u.Opaque != "" || (u.Host == "" && u.Path == "")) {
+		return nil, errors.New("ambiguous special-scheme URL")
+	}
+	if u.Host == "" && u.Opaque == "" && u.Path != "" && (u.Scheme == "" || u.Scheme == "http" || u.Scheme == "https") {
+		if strings.HasPrefix(u.Path, "/") {
+			u.Path = path.Clean(u.Path)
+		} else {
+			u.Path = path.Clean(ReaderBasePath + u.Path)
+		}
+	} else if u.Host != "" && u.Path != "" {
+		u.Path = path.Clean("/" + u.Path)
+	}
+	return u, nil
+}
 
 // LegacyIdentity identifies the object behind query/fragment variants. Only
 // the legacy local upload route is host-independent; remote stores keep host.
 func LegacyIdentity(raw string) string {
-	u, err := url.Parse(raw)
+	u, err := ParseURL(raw)
 	if err != nil {
 		return raw
 	}
@@ -38,7 +118,7 @@ func LegacyIdentity(raw string) string {
 }
 
 func Filename(raw string) string {
-	u, err := url.Parse(raw)
+	u, err := ParseURL(raw)
 	if err != nil {
 		return ""
 	}
@@ -66,6 +146,20 @@ func Parse(raw string) (postID, attachmentID string, ok bool) {
 // reference definitions), while preserving identical text inside code blocks
 // and inline code. It deliberately does not replace arbitrary prose URLs.
 func RewriteMarkdown(markdown, from, to string) string {
+	rewritten := rewriteMarkdownTarget(markdown, from, to)
+	if strings.Contains(from, "&") {
+		escapedFrom := html.EscapeString(from)
+		if escapedFrom != from {
+			rewritten = rewriteMarkdownTarget(rewritten, escapedFrom, to)
+		}
+	}
+	return rewritten
+}
+
+func rewriteMarkdownTarget(markdown, from, to string) string {
+	if markdown == "" || from == "" || to == "" || from == to {
+		return markdown
+	}
 	type span struct{ start, end int }
 	var code []span
 	doc := goldmark.New().Parser().Parse(text.NewReader([]byte(markdown)))
@@ -115,10 +209,11 @@ func RewriteMarkdown(markdown, from, to string) string {
 		}
 		before := markdown[:index]
 		after := markdown[end:]
-		destination := strings.HasSuffix(before, "](") && (strings.HasPrefix(after, ")") || strings.HasPrefix(after, " ") || strings.HasPrefix(after, "\t")) || strings.HasSuffix(before, "](<") && strings.HasPrefix(after, ">")
-		for _, attr := range []string{"src", "href", "poster"} {
-			destination = destination || strings.HasSuffix(before, attr+`="`) && strings.HasPrefix(after, `"`) || strings.HasSuffix(before, attr+"='") && strings.HasPrefix(after, "'")
-		}
+		trimmedBefore := strings.TrimRight(before, " \t")
+		trimmedAfter := strings.TrimLeft(after, " \t")
+		destination := (strings.HasSuffix(trimmedBefore, "](") && (strings.HasPrefix(trimmedAfter, ")") || strings.HasPrefix(after, " ") || strings.HasPrefix(after, "\t"))) ||
+			(strings.HasSuffix(trimmedBefore, "](<") && strings.HasPrefix(trimmedAfter, ">"))
+		destination = destination || isHTMLMediaAttrDestination(before, after)
 		line := strings.TrimSpace(before[strings.LastIndex(before, "\n")+1:])
 		if strings.HasPrefix(line, "[") && strings.Contains(line, "]:") {
 			tail := strings.TrimSpace(line[strings.Index(line, "]:")+2:])
@@ -133,6 +228,36 @@ func RewriteMarkdown(markdown, from, to string) string {
 		position = end
 	}
 	return out.String()
+}
+
+func isHTMLMediaAttrDestination(before, after string) bool {
+	if len(before) == 0 || len(after) == 0 {
+		return false
+	}
+	quote := before[len(before)-1]
+	if (quote != '"' && quote != '\'') || after[0] != quote {
+		return false
+	}
+	prefix := strings.TrimRight(before[:len(before)-1], " \t")
+	if !strings.HasSuffix(prefix, "=") {
+		return false
+	}
+	prefix = strings.TrimRight(prefix[:len(prefix)-1], " \t")
+	lowerPrefix := strings.ToLower(prefix)
+	for _, attr := range []string{"src", "href", "poster"} {
+		if !strings.HasSuffix(lowerPrefix, attr) {
+			continue
+		}
+		attrStart := len(lowerPrefix) - len(attr)
+		if attrStart == 0 {
+			return true
+		}
+		prev := lowerPrefix[attrStart-1]
+		if prev == ' ' || prev == '\t' || prev == '\n' || prev == '\r' {
+			return true
+		}
+	}
+	return false
 }
 
 func RewriteHTML(rendered, from, to string) string {

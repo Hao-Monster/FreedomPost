@@ -283,28 +283,52 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request, ownerType,
 	// Limit request body to configured max upload size
 	r.Body = http.MaxBytesReader(w, r.Body, maxBytes+multipartRequestOverheadBytes)
 
-	if err := r.ParseMultipartForm(1 << 20); err != nil {
+	reader, err := r.MultipartReader()
+	if err != nil {
 		writeError(w, http.StatusBadRequest, "INVALID_REQUEST", "无效的上传请求")
 		return
 	}
-	if r.MultipartForm != nil {
-		defer r.MultipartForm.RemoveAll()
-	}
 
-	file, header, err := r.FormFile("file")
-	if err != nil {
+	var (
+		filename  string
+		data      []byte
+		foundFile bool
+	)
+	for {
+		part, nextErr := reader.NextPart()
+		if errors.Is(nextErr, io.EOF) {
+			break
+		}
+		if nextErr != nil {
+			var maxBytesErr *http.MaxBytesError
+			if errors.As(nextErr, &maxBytesErr) {
+				writeError(w, http.StatusRequestEntityTooLarge, "FILE_TOO_LARGE", "文件超出大小限制")
+				return
+			}
+			writeError(w, http.StatusBadRequest, "INVALID_REQUEST", "无效的上传请求")
+			return
+		}
+		if part.FormName() != "file" || part.FileName() == "" {
+			_ = part.Close()
+			continue
+		}
+		filename = part.FileName()
+		data, err = io.ReadAll(io.LimitReader(part, maxBytes+1))
+		_ = part.Close()
+		if err != nil {
+			var maxBytesErr *http.MaxBytesError
+			if errors.As(err, &maxBytesErr) {
+				writeError(w, http.StatusRequestEntityTooLarge, "FILE_TOO_LARGE", "文件超出大小限制")
+				return
+			}
+			writeError(w, http.StatusBadRequest, "READ_ERROR", "读取文件失败")
+			return
+		}
+		foundFile = true
+		break
+	}
+	if !foundFile {
 		writeError(w, http.StatusBadRequest, "NO_FILE", "未找到文件字段")
-		return
-	}
-	defer file.Close()
-	if header.Size > maxBytes {
-		writeError(w, http.StatusRequestEntityTooLarge, "FILE_TOO_LARGE", "文件超出大小限制")
-		return
-	}
-
-	data, err := io.ReadAll(io.LimitReader(file, maxBytes+1))
-	if err != nil {
-		writeError(w, http.StatusBadRequest, "READ_ERROR", "读取文件失败")
 		return
 	}
 	if int64(len(data)) > maxBytes {
@@ -312,7 +336,7 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request, ownerType,
 		return
 	}
 	if contextPostID != "" {
-		s.persistManagedUpload(w, r, data, header.Filename, ownerType, uploaderType, contextPostID, maxBytes)
+		s.persistManagedUpload(w, r, data, filename, ownerType, uploaderType, contextPostID, maxBytes)
 		return
 	}
 
@@ -331,7 +355,7 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request, ownerType,
 
 	obj, err := s.storage.Put(r.Context(), storage.PutInput{
 		Data:         data,
-		OriginalName: header.Filename,
+		OriginalName: filename,
 		OwnerType:    ownerType,
 		OwnerID:      ownerID,
 		UploaderType: uploaderType,
@@ -348,7 +372,7 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request, ownerType,
 	// Persist attachment metadata to DB
 	att, err := s.repo.CreateAttachment(r.Context(), domain.Attachment{
 		OwnerType:        ownerType,
-		OriginalFilename: header.Filename,
+		OriginalFilename: filename,
 		StoredFilename:   obj.StoredFilename,
 		StorageProvider:  obj.StorageProvider,
 		StorageKey:       obj.StorageKey,

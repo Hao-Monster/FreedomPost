@@ -7,4 +7,6 @@ coverage
 .git
 .env
 .env.*
+# Legacy deployments may have stored credential snapshots inside this context.
+.rollback
 npm-debug.log*
